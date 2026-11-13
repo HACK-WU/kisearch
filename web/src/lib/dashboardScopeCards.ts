@@ -156,13 +156,14 @@ export function layerColumns(
  *   · 触发回写的三条主路径 `sync-relation` / `bulk-sync-relation` / `edit-relation`
  *     全在 `BLOCKED_OPS`（`src/lib/scope-policy.ts:59-71`）⇒ 只读库下 AI 与人工写入
  *     被 409 拒绝 ⇒ 那三条路径**不会**回写；
- *   · 例外只有 CLI 的 `ki import --wiki-writeback`（`import.ts` 里 `wikiWriteback: true`
- *     仅 CLI 传），它走 `EXEMPT_OPS` 的 import 通道。
+ *   · 例外只有 CLI 的 `ki import`（`src/import.ts` 里 `wikiWriteback: true`，**没有**同名
+ *     命令行开关），它走 `EXEMPT_OPS` 的 import 通道。Web 上传与对外上传接口自 2026-11-13
+ *     也传 `wikiWriteback: true`，但只读库在收流/建任务阶段就拒绝（403），到不了回写。
  *   ⚠️ 不能写成「ki import 与数据源同步仍会回写」：**数据源同步不回写 wiki**（资源页
  *     的「不会回写」清单已核实），它只写 KB 与向量。写错会让人以为同步一次 wiki 就变了。
  */
 export function readonlyWikiNote(scope: string): string {
-  return `只读库下逐条写入会被拒绝，因此以上回写不会发生；例外是 CLI 导入带 --wiki-writeback 时仍会回写（数据源同步只写 KB 与向量，不回写 wiki）。解除只读：${scopeReadonlyUnlockHint(scope)}`;
+  return `只读库下逐条写入会被拒绝，因此以上回写不会发生；例外是 CLI 导入（ki import，无需额外开关）时仍会回写（数据源同步只写 KB 与向量，不回写 wiki）。解除只读：${scopeReadonlyUnlockHint(scope)}`;
 }
 
 /**

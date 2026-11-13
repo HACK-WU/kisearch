@@ -124,6 +124,7 @@ stdout 一行 JSON：
 - `files.saved / skipped` 是**上传层**（服务端收下了几个文件），`import.result` 是**导入层**（真正写进库的结果）。两者都可能少于你给的文件数，看 `skippedSample` 的原因。
 - `import.state` 为 `queued` + `waitingForScopeLock: true` 表示**在排队**（同库同一时刻只允许一个导入），不是卡住，别取消、别重投。
 - `import.source`：`memory` = 实时进度；`ledger` = 服务重启后从任务记录读到的终态；`log` = 只剩日志，需 `ki log <taskId>` 查。
+- `import.result.wikiWriteback`：**目标库配了 wiki 回写目录时才有**，`{written, skipped, failed}` 三个计数。它是「库里这份文档有没有同步成 wiki 文件」的唯一凭据；`written: 0` + `skipped > 0` 属正常（回写只补缺、不覆盖，重复上传的文档早就在目录里）。
 - 退出码：`0` 成功；`2` 配置/参数/依赖问题；`3` 上传或导入被判失败（JSON 里有 `code`）。
 
 ## 失败处理

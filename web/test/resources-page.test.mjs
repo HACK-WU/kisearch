@@ -560,12 +560,16 @@ describe('Wiki 回写（本页核心区）', () => {
     assert.ok(WIKI_WRITE_ACTIONS.some((a) => a.text.includes('删对应 .md')));
   });
 
-  it('不会回写清单点名 Web 上传 / 数据源同步，并说明反向也不成立', () => {
-    const texts = WIKI_NO_WRITE_ACTIONS.map((a) => a.text).join('|');
-    assert.ok(texts.includes('Web 上传'));
-    assert.ok(texts.includes('数据源同步'));
-    assert.ok(texts.includes('向量重建'));
-    assert.ok(texts.includes('不会回灌 KB'), '必须说明 wiki 是单向输出，改文件不进 KB');
+  it('不会回写清单只留数据源同步等项目；Web 上传自 2026-11-13 起归入会回写', () => {
+    const noTexts = WIKI_NO_WRITE_ACTIONS.map((a) => a.text).join('|');
+    assert.equal(noTexts.includes('Web 上传'), false, 'Web 上传导入会写回 wiki，不得留在「不会回写」清单');
+    assert.ok(noTexts.includes('数据源同步'));
+    assert.ok(noTexts.includes('向量重建'));
+    assert.ok(noTexts.includes('不会回灌 KB'), '必须说明 wiki 是单向输出，改文件不进 KB');
+    // 会回写清单必须点名这两条上传通道，否则用户会去「不会回写」里找
+    const yesTexts = WIKI_WRITE_ACTIONS.map((a) => a.text).join('|');
+    assert.ok(yesTexts.includes('Web 上传'), '会回写清单缺 Web 上传');
+    assert.ok(yesTexts.includes('对外上传'), '会回写清单缺对外上传接口');
   });
 
   it('★ Web 在线编辑保存不在「会回写」清单里（它直写源文件，走的是另一条路）', () => {

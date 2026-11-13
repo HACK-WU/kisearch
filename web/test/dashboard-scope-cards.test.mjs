@@ -185,11 +185,13 @@ describe('wikiWritebackCard（Wiki 回写四态）', () => {
     }
   });
 
-  it('只读库追加注脚（只读 ⇒ 不回写，唯一例外是 CLI 导入带 --wiki-writeback）', () => {
+  it('只读库追加注脚（只读 ⇒ 不回写，唯一例外是 CLI 导入）', () => {
     const ws = { enabled: true, writableDir: DIR, writableFrom: 'wiki-sync' };
     const ro = wikiWritebackCard('demo', true, ws);
     assert.match(ro.title, /只读库下逐条写入会被拒绝/);
-    assert.match(ro.title, /--wiki-writeback/);
+    assert.match(ro.title, /ki import/);
+    // `--wiki-writeback` 这个开关从来不存在（回写由 import 硬编码开启），文案不得再指路
+    assert.doesNotMatch(ro.title, /--wiki-writeback/);
     // 可写 / 未知不追加，避免噪声
     assert.doesNotMatch(wikiWritebackCard('demo', false, ws).title, /只读库下/);
     assert.doesNotMatch(wikiWritebackCard('demo', undefined, ws).title, /只读库下/);
@@ -270,7 +272,8 @@ describe('readonlyWikiNote', () => {
   it('含原因、唯一例外与解除命令', () => {
     const note = readonlyWikiNote('demo');
     assert.match(note, /逐条写入会被拒绝/);
-    assert.match(note, /--wiki-writeback/);
+    assert.match(note, /ki import/);
+    assert.doesNotMatch(note, /--wiki-writeback/);
     assert.match(note, /ki scope readonly demo --off/);
   });
 

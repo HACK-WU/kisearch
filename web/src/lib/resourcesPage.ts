@@ -1153,7 +1153,9 @@ export const SCOPE_CONFIG_NOTES: string[] = [
 // 事实来源（全部代码可查，不要凭印象改写）：
 //   · 三处落点：KB local/group 索引 + 向量 collection + wiki Markdown（wiki-sync.ts）
 //   · 会/不会：sync-relation.ts:349 / relation-edit-publish.ts:426（写入、编辑发布）
-//             import.ts:2146 且 args.wikiWriteback 仅 CLI 传 true（Web 上传、数据源同步不回写）
+//             import.ts 的 args.wikiWriteback：CLI 导入、Web 上传（/api/import/run 与分步
+//             finalize）、对外上传接口（/open/v1/import/upload）都传 true（2026-11-13 起）；
+//             数据源同步与「重试未完成」不传
 //             group-create.ts:126（建组建同名目录）/ delete-relation（删对应 .md）
 //   · 文件格式：markdown-gen.ts:31-38（groupPath / relation / exportedAt 三段 frontmatter）
 //   · 历史补齐：wiki-sync.ts:398 backfillWiki（autoBackfill 只在"目录不存在或为空"时触发）
@@ -1202,6 +1204,8 @@ export const WIKI_WRITE_ACTIONS: WikiActionLine[] = [
   { text: 'AI 批量写入（MCP）', code: 'ki_bulk_sync_relation' },
   { text: 'AI 局部编辑后 finish（MCP）', code: 'ki_edit_relation' },
   { text: 'CLI 导入（只补缺，不覆盖已有文件）', code: 'ki import' },
+  // 2026-11-13 起「上传即回写」：Web 上传页与对外上传接口导入后同样落 wiki 文件
+  { text: 'Web 上传与对外上传接口导入（同一规则，只补缺）' },
   { text: '建组时在 wiki 下建同名目录', code: 'ki group create' },
   { text: '删文档时删对应 .md（来源不匹配则拒绝删）', code: 'ki delete-relation' },
 ];
@@ -1222,7 +1226,6 @@ export const WIKI_EDIT_SAVE_NOTE =
   'Web 在线编辑保存改的是这篇文档自己的源文件，不按 wikiSync 的目录规则落盘；没有源文件的文档编辑后不会产生 wiki 文件。';
 
 export const WIKI_NO_WRITE_ACTIONS: WikiActionLine[] = [
-  { text: 'Web 上传文档' },
   { text: '数据源同步', code: 'ki datasource sync' },
   { text: '向量重建 / 索引整理' },
   { text: '反向也不成立：手工改 wiki 文件不会回灌 KB，要重新导入', code: 'ki import' },

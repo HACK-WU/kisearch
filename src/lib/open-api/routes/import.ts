@@ -10,6 +10,7 @@
 import type http from 'node:http';
 
 import type { KiConfig } from '../../config.js';
+import type { WikiImportWritebackResult } from '../../wiki-sync.js';
 import { isScopeAuthorized } from '../../mcp-token.js';
 import { assertHttpChannelWritable, isScopeReadonlyError } from '../../scope-policy.js';
 import { readViews } from '../../scope-view.js';
@@ -194,6 +195,9 @@ export async function handleOpenApiImportUpload(input: RouteInput): Promise<void
       ...(conflictSuffix ? { conflictSuffix } : {}),
       vector,
       conflictMode,
+      // 上传即回写：scope 配了 wikiSync.sourceDir 时，本次导入完成的文档会同步成
+      // wiki 文件（已存在文件跳过）。未配置就是零副作用。
+      wikiWriteback: true,
     },
     ctx.config,
   ).then(() => {
@@ -347,6 +351,7 @@ function summarizeImportResult(raw: unknown): Record<string, unknown> | null {
   const r = raw as {
     stats?: { total?: number; vectorized?: number; skipped?: number; errors?: number; vector?: boolean };
     groups?: string[];
+    wikiWriteback?: WikiWritebackLike;
   };
   const groups = Array.isArray(r.groups) ? r.groups : [];
   return {
@@ -359,6 +364,31 @@ function summarizeImportResult(raw: unknown): Record<string, unknown> | null {
     groups: groups.slice(0, 20).map(groupDisplayName),
     groupsTotal: groups.length,
     ...(r.stats?.vector === undefined ? {} : { vectorStored: r.stats.vector }),
+    ...(r.wikiWriteback ? { wikiWriteback: summarizeWikiWriteback(r.wikiWriteback) } : {}),
+  };
+}
+
+/**
+ * 导入内核的 wiki 写回结果。
+ *
+ * 直接复用 `wiki-sync.ts` 的类型而不是本地重声明：字段改名时 TypeScript 会报错，
+ * 本地重声明则会静默变成 undefined（对外只会看到 `0/0/0`，看着像"一篇都没写"）。
+ */
+type WikiWritebackLike = Pick<WikiImportWritebackResult, 'written' | 'skipped' | 'failed' | 'failedCount'>;
+
+/**
+ * wiki 写回 → 对外摘要。
+ *
+ * 只给计数，不给 `targetDir`（服务端绝对路径）与失败 `reason`（文件系统错误串，
+ * 可能带内部路径）——调用方据此能判断「到底写没写、被跳过了多少」，定位细节看服务端日志。
+ */
+function summarizeWikiWriteback(wiki: WikiWritebackLike): Record<string, number> {
+  return {
+    written: typeof wiki.written === 'number' ? wiki.written : 0,
+    skipped: typeof wiki.skipped === 'number' ? wiki.skipped : 0,
+    failed: typeof wiki.failedCount === 'number'
+      ? wiki.failedCount
+      : (Array.isArray(wiki.failed) ? wiki.failed.length : 0),
   };
 }
 

@@ -128,7 +128,18 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
 - **`waitingForScopeLock: true` + `phase: "waiting"` 表示「在排队」，不是卡住**。同一个库同一时刻只允许一个导入，第二个任务会等前一个结束；这时不要去取消或重复提交。
 - **`source` 说明这份状态有多可信**：`memory` = 实时进度；`ledger` = 服务重启后从任务记录里读到的终态（带 `stale: true`，不是实时）；`log` = 记录也过期了，只知道这个任务确实跑过，可执行 `ki log <taskId>` 看历史日志。
 - `state` 为 `done` 时 `result` 里有文件数、错误数与前 20 个 `group`（`groupsTotal` 是总数）。`根` 代表知识库根目录。
+- 该库配了 wiki 回写目录时，`result` 里还会多一个 `wikiWriteback`：`{ "written": 2, "skipped": 0, "failed": 0 }`，见下一节。
 - **越权查看别人的任务是 403 而不是 404**：任务确实存在，只是不在你的 Token 授权范围内。
+
+### 会顺带写回 wiki 目录吗
+
+会——**前提是该库配了 wiki 回写目录**（`scopes.<库名>.wikiSync.sourceDir`）。导入成功的文档会各生成一个 Markdown 文件，落在 `<该目录>/<group>/<文档名>.md`，与用命令行导入或用 MCP 工具写知识得到的结果一致。
+
+- **只补缺、不覆盖**：目标位置已有同名文件时跳过，不会刷掉你在 wiki 仓库里手改过的内容。想让库里的版本重写过去，用 `ki wiki-backfill <库名> --force`。
+- **没配就不发生**：该库没配 `wikiSync.sourceDir` 时，上传只进知识库，`result` 里也不会出现 `wikiWriteback`。
+- **失败不影响导入**：写回出错只记服务端日志，这次导入仍算成功；对照 `result.wikiWriteback.failed` 判断有几篇没写出去。
+- **`skipped` 偏大是正常的**：重复上传同一批文档时，这些文件早已在 wiki 目录里，会全部计入 `skipped`。
+- **服务重启后再查同一任务**：状态改为从任务记录读（`source: "ledger"`），那份记录只存文件数与错误数，`result` 里不再有 `wikiWriteback`——不等于没写回，要复核请在下一次上传后当次读取，或看服务端日志。
 
 ### 上传参数（都放在 URL 查询串里）
 

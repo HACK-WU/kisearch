@@ -405,7 +405,11 @@ export interface HandleDirectImportArgs {
   writeSourceBlock?: boolean;
   /**
    * 导入成功后把本次完成的文档按 wiki 格式写回 `scopes.<scope>.wikiSync.sourceDir`
-   * （已存在文件跳过）。CLI `ki import` 传 `true`；Web 上传 / 数据源同步保持缺省 false。
+   * （已存在文件跳过）。
+   *
+   * 传 `true` 的入口：CLI `ki import`、Web 上传（`/api/import/run` 与分步 finalize）、
+   * 对外上传接口（`/open/v1/import/upload`）——「上传即回写」，2026-11-13 用户拍板。
+   * 数据源同步刻意不传（源目录就是用户自己的目录，写回会自我复制）。
    */
   wikiWriteback?: boolean;
   /**
@@ -2200,7 +2204,8 @@ async function handleDirectImportUnlocked(
     ? scheduleIndexMaintenance(scope, { reason: 'import' })
     : { accepted: false, merged: false };
 
-  // CLI 导入的可选 wiki 写回（wikiSync 未配置/关闭 → null，既有导入零变化）。
+  // 导入的可选 wiki 写回（wikiSync 未配置/关闭 → null，既有导入零变化）。
+  // CLI / Web 上传 / 对外上传接口传 true（上传即回写），数据源同步不传。
   // 只写本次「文件级完成」的文档；已存在文件由 writeImportedDocsToWiki 跳过。
   let wikiWriteback: WikiImportWritebackResult | undefined;
   if (args.wikiWriteback === true && activeFileRecords.length > 0) {

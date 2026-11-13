@@ -1039,10 +1039,7 @@ ki sync-relation \
 }
 ```
 
-**Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki 文件（Markdown 格式）。Wiki 目录发现优先级：
-
-1. `group-index.json` 的 `source` 块（由 `ki import` 自动记录）
-2. `config.yaml` 中 scope 级 `wikiSync.sourceDir` 兜底配置
+**Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki 文件（Markdown 格式）。写回目录**只认** `config.yaml` 中 scope 级 `wikiSync.sourceDir`；未配置（或 `enabled: false`）时不写回。
 
 如果 `wikiSynced` 为 `false`，输出中会包含 `wikiReason` 说明原因（如未配置 Wiki 目录、relation 含非法路径字符等）。Wiki 写回失败不阻塞主流程，仅记录警告。
 
@@ -1053,8 +1050,9 @@ ki sync-relation \
 > - **手动**：`ki wiki-backfill <scope>`（已存在文件跳过、不刷新时间戳；`--force` 全量覆盖）
 >
 > **Group / 导入同步**：开启 wikiSync 时，`ki group create` 会在 `wikiSync.sourceDir` 下创建同名目录；
-> CLI `ki import` 会把本次导入成功的文档按 wiki 格式写入 `<sourceDir>/<group>/<relation>.md`
-> （已存在文件跳过、导入源在 wiki 内不自我复制；Web 上传与 `ki datasource sync` 不写回）。
+> CLI `ki import`、Web 上传页与对外上传接口（`/open/v1/import/upload`）都会把本次导入成功的文档
+> 按 wiki 格式写入 `<sourceDir>/<group>/<relation>.md`（已存在文件跳过、导入源在 wiki 内不自我复制；
+> `ki datasource sync` 不写回）。
 > 写回结果在导入 JSON 的 `wikiWriteback` 字段（`targetDir/written/skipped/failed`），失败不阻塞导入。
 
 ### 批量模式

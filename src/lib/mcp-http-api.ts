@@ -2574,6 +2574,8 @@ async function processImportUpload(
       tags: body.finalize.tags,
       conflictMode: body.finalize.conflictMode,
       conflictSuffix: body.finalize.conflictSuffix,
+      // 上传即回写（2026-11-13 用户拍板，见 RunImportArgs.wikiWriteback）
+      wikiWriteback: true,
     }, requestConfig);
     jobId = job.id;
   }
@@ -2926,6 +2928,8 @@ async function handleImportRun(
     // S0-3：Web 端不提供预算覆盖（预算来自 scope 配置/默认值）；
     // 超限时 IMPORT_BUDGET_EXCEEDED 经 job 终态 error 透出
     budget: undefined,
+    // 上传即回写（2026-11-13 用户拍板，见 RunImportArgs.wikiWriteback）
+    wikiWriteback: true,
   }, requestConfig);
 
   sendJson(res, 202, { ok: true, jobId: job.id, scope });
@@ -4395,6 +4399,18 @@ export interface RunImportArgs {
   uploadIncomplete?: boolean;
   /** S0-3：Web 端预算覆盖入口（当前不暴露给前端，预留保持 CLI/Web 同构） */
   budget?: HandleDirectImportArgs['budget'];
+  /**
+   * 导入成功后把本次完成的文档写回 `scopes.<scope>.wikiSync.sourceDir`。
+   *
+   * ★ 2026-11-13 用户拍板：**上传即回写**——Web 上传页（`/api/import/run`、分步 finalize）
+   *   与对外上传接口（`/open/v1/import/upload`）都传 `true`，与 CLI `ki import` 同口径。
+   *   此前只有 CLI 传，HTTP 链路全都不写回，而源码/文档只写了「CLI 会写回」，
+   *   于是第三方调用方看着导入成功、wiki 目录却没有任何文件。
+   *
+   * 缺省（undefined）仍为不写回：数据源同步走 `handleDirectImport` 直连，不经本函数；
+   * 「重试未完成」（`/api/import/retry-incomplete`）也刻意不传——用户裁定范围只到上传。
+   */
+  wikiWriteback?: boolean;
 }
 
 export async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
@@ -4434,6 +4450,8 @@ export async function runImportJob(job: Job, args: RunImportArgs, requestConfig:
         budget: args.budget,
         // 任务归属：写进未完成清单，供任务中心按任务校验重试归属（HTTP 路径）
         jobId: job.id,
+        // 上传即回写（2026-11-13）：Web 上传页 / 对外上传接口都经本函数，口径见 RunImportArgs
+        wikiWriteback: args.wikiWriteback,
         onProgress: (progress) => {
           job.phase = progress.phase;
           job.progress = { done: progress.done, total: progress.total };

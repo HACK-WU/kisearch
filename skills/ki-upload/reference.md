@@ -57,7 +57,8 @@
 - `phase`：`waiting` / `scan` / `vectorize` / `persist`
 - `progress`：0~1 的小数（由 `done/total` 换算，可能长时间不变，不代表卡死）
 - `source`：`memory`（实时）/ `ledger`（重启后从任务记录读，带 `stale: true`）/ `log`（只剩日志）
-- `result`（仅 `done`）：`total` / `vectorized` / `skipped` / `errors` / `groups`（前 20 个，`根` = 知识库根）/ `groupsTotal`
+- `result`（仅 `done`）：`total` / `vectorized` / `skipped` / `errors` / `groups`（前 20 个，`根` = 知识库根）/ `groupsTotal` / `wikiWriteback`
+- `result.wikiWriteback`：仅目标库配了 wiki 回写目录（`scopes.<库名>.wikiSync.sourceDir`）时出现，形如 `{"written": 2, "skipped": 0, "failed": 0}`。回写只补缺不覆盖，重复上传同一批文档会全部进 `skipped`；写回失败不影响导入结果
 
 ## 二、错误码全表
 

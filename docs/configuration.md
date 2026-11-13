@@ -254,8 +254,8 @@ scopes:
 > 空值 / 纯空白按「未配置」处理（`ki doctor` 会以 ⚠️ 提示）。
 
 > 开启时除 `sync-relation` 写回外，`ki group create` 会在 `sourceDir` 下创建同名目录，
-> CLI `ki import` 会把导入成功的文档写入 `<sourceDir>/<group>/<relation>.md`（已存在跳过）；
-> Web 上传与 `ki datasource sync` 不写回。
+> 导入（CLI `ki import`、Web 上传、对外上传接口）会把导入成功的文档写入
+> `<sourceDir>/<group>/<relation>.md`（已存在跳过）；`ki datasource sync` 不写回。
 
 #### `scopes.<scope>.clean`
 
