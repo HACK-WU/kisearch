@@ -142,6 +142,8 @@ import { logicalDocPath, matchDocQuery, normalizeSearchQuery, type SearchableDoc
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
 // 文档移动（REQ-20261112-002）：预检 + 编排 + 回滚，复用 sync / delete 两条已测链路
 import { moveDocument } from './doc-move.js';
+// 文档删除（2026-11-13）：预检（源文件落点 / 草稿 / 数据源归属）+ 复用 batch-delete 执行
+import { deleteDocument, precheckDocDelete } from './doc-delete.js';
 // 读详情（浏览页正文）：noVectorFallback 精确读，使 /api/doc/get 可安全走 read 通道
 import { executeGetModuleInfoLocal } from '../get-module-info.js';
 import { createTaskReporter, getTaskRecord, listTaskRecords, TASK_TTL_MS, type TaskParamSnapshot, type TaskReporter, type TaskResultSnapshot } from './task-registry.js';
@@ -1585,6 +1587,59 @@ export async function handleApiRequest(
               expectedRevision: typeof body.expectedRevision === 'string' ? body.expectedRevision : undefined,
             });
             // 移动改变了文档归属：列表缓存必须失效，否则左树与列表还指着旧 Group
+            docListCache.delete(scope);
+            sendJson(res, 200, result);
+          } catch (error) {
+            docListCache.delete(scope);
+            sendDocEditError(res, error);
+          }
+        })),
+        [scope],
+      );
+      return;
+    }
+    if (p === '/doc/delete' && req.method === 'POST') {
+      // 删除文档（2026-11-13）。两段式：
+      //   ├─ `dryRun: true`（确认弹窗打开时）→ **read 通道**，回答「源文件会不会一起没 / 有没有未结束的草稿 /
+      //   │   是不是数据源同步下来的」。走写锁会让「导入进行中」时弹窗一直转圈，而它只读、不写。
+      //   └─ 真正删除 → 写通道 + scope 写锁；删除**没有回滚**，所以预检在模块内按当前状态重跑一遍，
+      //       不信任前端传来的结论（两次判定之间档案可能已被别处删掉）。
+      const body = await readJsonBody(req) as Record<string, unknown> | undefined;
+      const scope = resolveScope(requestConfig, typeof body?.scope === 'string' ? body.scope : '');
+      if (authScopes !== null && !scopeAllowed(authScopes, scope)) {
+        rejectScopeViolation(res, scope, p);
+        return;
+      }
+      if (typeof body?.group !== 'string' || typeof body.relation !== 'string') {
+        sendJson(res, 400, { ok: false, code: 'DOC_ID_INVALID', error: '缺少删除参数（group / relation）' });
+        return;
+      }
+      const target = { scope, group: body.group, relation: body.relation };
+      if (body?.dryRun === true) {
+        await getSharedOperationCoordinator().submit(
+          { operation: 'doc-delete-precheck', params: { scope } },
+          () => runWithConfigSnapshot(requestConfig, () => {
+            try {
+              sendJson(res, 200, precheckDocDelete(target));
+            } catch (error) {
+              sendDocEditError(res, error);
+            }
+          }),
+          [scope],
+          'read',
+        );
+        return;
+      }
+      if (rejectIfScopeReadonly(res, scope, 'http:/api/doc/delete')) return;
+      await getSharedOperationCoordinator().submit(
+        { operation: 'doc-relation-delete', params: { scope } },
+        () => runWithConfigSnapshot(requestConfig, () => withScopeWriteLock(scope, 'doc-relation-delete', async () => {
+          try {
+            const result = await deleteDocument({
+              ...target,
+              wikiDelete: body.wikiDelete !== false,
+            });
+            // 删掉的是一条文档记录：列表缓存与树计数必须失效，否则左树还挂着这篇
             docListCache.delete(scope);
             sendJson(res, 200, result);
           } catch (error) {

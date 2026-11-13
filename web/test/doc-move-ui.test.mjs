@@ -46,9 +46,14 @@ test('移动入口与「编辑文档」同一门禁，且窄屏「⋯」菜单�
 });
 
 test('窄屏收起集合包含移动按钮（阈值上调而不是硬塞）', () => {
-  const block = css.slice(css.indexOf('@container reader-drawer (max-width: 700px)'), css.indexOf('@container reader-drawer (max-width: 700px)') + 800);
+  // 阈值随新动作单调上调：620（初版）→ 700（加「移动」）→ 820（加「删除」，2026-11-13）。
+  // 断言只看「当前阈值块内包含移动」+「旧阈值已不存在」，避免每加一个动作就要改死数字。
+  const current = css.indexOf('@container reader-drawer (max-width: 820px)');
+  assert.ok(current > 0, '窄屏收起阈值块必须存在（当前 820）');
+  const block = css.slice(current, current + 900);
   assert.ok(block.includes('ki-drawer__copy--move'), '「移动」要一起收进 ⋯，否则窄窗会把这排挤成两行');
   assert.ok(!css.includes('@container reader-drawer (max-width: 620px)'), '旧阈值 620 必须同步上调（新增动作约 76px）');
+  assert.ok(!css.includes('@container reader-drawer (max-width: 700px)'), '旧阈值 700 必须随「删除」上调（又一个动作约 76px）');
 });
 
 test('目标 Group 复用导入页的 GroupPathSelect，且弹窗不被 overflow 裁剪', () => {
@@ -64,9 +69,10 @@ test('目标 Group 复用导入页的 GroupPathSelect，且弹窗不被 overflow
 });
 
 test('Esc 让给弹窗；移动后页面跟随搬家', () => {
+  // 早退列表会随新弹窗增长（2026-11-13 加了 deleteOpen）：断言「moveOpen 在内」，不锁死整行写法
   assert.match(
     drawer,
-    /editor\.isOpen \|\| readerLinkComposerOpen \|\| moveOpen\) return;/,
+    /editor\.isOpen \|\| readerLinkComposerOpen \|\| moveOpen[^;]*\) return;/,
     '弹窗打开时阅读器的 Esc 必须先退出，否则一次 Esc 关掉整个阅读器',
   );
   assert.ok(browse.includes('onMoved={asDrawer ? undefined : handleDocMoved}'), '页内阅读态必须接住移动结果');

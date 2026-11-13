@@ -440,6 +440,74 @@ export async function moveDocument(args: {
   return req<MoveDocumentResponse>('/api/doc/move', { method: 'POST', body: JSON.stringify(args) });
 }
 
+// ─── 删除文档（2026-11-13）─────────────────────────────────
+
+/**
+ * 删除前的预检结果（`POST /api/doc/delete` + `dryRun`）。
+ *
+ * 为什么要预检而不是「点了就删、出事再说」：删除不可恢复，弹窗必须在用户按下确认**之前**
+ * 说清「源文件会不会一起没」「有没有未结束的草稿会挡住」「这片是不是数据源同步下来的」。
+ */
+export interface DocDeletePrecheckResponse {
+  ok: true;
+  scope: string;
+  group: string;
+  relation: string;
+  exists: boolean;
+  /** > 0 时后端会 409 拒绝：请先在编辑器里保存或取消 */
+  pendingDrafts: number;
+  /** wiki 源文件绝对路径（未配置源目录时不出现） */
+  wikiPath?: string;
+  /** 勾「同时删除源文件」时是否真的会删 */
+  wikiWillDelete: boolean;
+  /** wikiWillDelete=false 时的原因 */
+  wikiSkipReason?: 'not-configured' | 'file-not-found' | 'source-mismatch';
+  /** 数据源管辖的实体文件：有值 ⇒ 删掉后下次同步仍会重新导入 */
+  datasourceSource?: string;
+}
+
+/** 删除结果（`POST /api/doc/delete`） */
+export interface DeleteDocumentResponse {
+  ok: true;
+  scope: string;
+  group: string;
+  relation: string;
+  deleted: boolean;
+  wikiRemoved: boolean;
+  wikiSkipReason?: string;
+  datasourceSource?: string;
+  /** 成功但需要用户知道的事（源文件没删掉的原因、数据源会重新导入等） */
+  warnings: string[];
+}
+
+/** 只预检，不删除（不产生任何副作用） */
+export async function precheckDocumentDelete(args: {
+  scope: string;
+  group: string;
+  relation: string;
+}): Promise<DocDeletePrecheckResponse> {
+  return req<DocDeletePrecheckResponse>('/api/doc/delete', {
+    method: 'POST',
+    body: JSON.stringify({ ...args, dryRun: true }),
+  });
+}
+
+/**
+ * 删除一篇文档（不可恢复）。
+ *
+ * `wikiDelete` 缺省 true = 连仓库里的 .md 一起删；传 false 只从知识库移除、源文件原地不动。
+ * 错误由 `req` 抛出，带 `status` 与 `body.code`：
+ * `DOC_NOT_FOUND` / `DOC_EDIT_IN_PROGRESS`（草稿未收口）/ `SCOPE_READONLY` / `DOC_DELETE_FAILED`。
+ */
+export async function deleteDocument(args: {
+  scope: string;
+  group: string;
+  relation: string;
+  wikiDelete?: boolean;
+}): Promise<DeleteDocumentResponse> {
+  return req<DeleteDocumentResponse>('/api/doc/delete', { method: 'POST', body: JSON.stringify(args) });
+}
+
 export async function getImportConfig(scope: string): Promise<ImportConfigResponse> {
   return req<ImportConfigResponse>(`/api/import/config?${new URLSearchParams({ scope }).toString()}`);
 }

@@ -78,6 +78,9 @@ const RULES: Rule[] = [
   // 文档移动（REQ-20261112-002）：与写入同级。未登记的路由默认 404，漏登记既是"功能不可用"
   // 也会让路由覆盖率单测转红。
   exact('POST', '/doc/move', 'permission', 'knowledge.write'),
+  // 文档删除（2026-11-13）：写操作，与写入/移动同级。预检也走同一路由（body.dryRun），
+  // 因为它读的是「这篇文档的当前状态」，与 `knowledge.read` 的语义不同（且调用方一定有写权限）。
+  exact('POST', '/doc/delete', 'permission', 'knowledge.write'),
   exact('POST', '/import/upload', 'permission', 'knowledge.write'),
   exact('POST', '/import/run', 'permission', 'knowledge.write'),
   exact('POST', '/import/preflight', 'permission', 'knowledge.write'),

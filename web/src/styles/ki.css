@@ -596,6 +596,19 @@ a:hover { text-decoration: underline; }
 /* scope 芯片最前：复用抽屉 meta 行的既有权重（浅底 + 主色字），不新造视觉语言 */
 .ki-page-head__scope { flex: none; }
 .ki-page-head__hint { flex: none; }
+/* 删除回执（2026-11-13）：文档消失、阅读区也收起后，只有页头能说明「刚才发生了什么」。
+   ★ 必须**在同一行内**（不是另起一段）：另起一行会让页头长高一行、8 秒后再缩回，
+     正文区跟着上下跳一次。长文案走省略号，全文在 title 里。 */
+.ki-page-head__notice {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 52ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ki-color-success);
+  font-size: var(--ki-font-size-xs);
+}
 
 /* 服务横幅 */
 .ki-banner {
@@ -2053,18 +2066,22 @@ a:hover { text-decoration: underline; }
 }
 .ki-drawer__overflow-item:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
 .ki-drawer__overflow-item--armed { color: var(--ki-color-primary); font-weight: 650; }
+.ki-drawer__overflow-item--danger { color: var(--ki-color-danger-ink); }
+.ki-drawer__overflow-item--danger:hover { background: var(--ki-color-danger-bg, #fdecec); color: var(--ki-color-danger-ink); }
 
 /* 手机/窄窗：三个文字动作收进 ⋯ 菜单。
    实测依据（temp/probe-bar-width.cjs）：375px 视口下平铺会把头部折成 **3 行 135px**，
    反而高于改造前的 126.5px；收起后回到 2 行 91px，窄窗（AI 面板打开 557px）回到 1 行。
    ⚠️ 平铺版隐藏不等于功能不可达 —— 菜单即它们的入口（护栏 #4 只管"有没有入口"）。 */
 /* 620 → 700（2026-11-12，REQ-20261112-002）：新增「移动」一枚文字动作（+约 76px）。
-   阈值只许上调、不许硬塞：早收起只是多一次点击，晚收起会把这排折成两行
+   700 → 820（2026-11-13）：又加一枚「删除」（同约 76px）。**阈值单调上调**：
+   早收起只是多一次点击，晚收起会把这排折成两行
    —— 那两个方向的手感差距，错误库「AI 面板挤压下头部工具栏折两行」有实测记录。 */
-@container reader-drawer (max-width: 700px) {
+@container reader-drawer (max-width: 820px) {
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--link,
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--edit,
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--move,
+  .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--danger,
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__copy--copy { display: none; }
   .ki-drawer--inline .ki-drawer__head--bar .ki-drawer__overflow { display: inline-flex; }
   /* 窄容器把搜索框下限从 240 收到 230（其内部固定件：分段 106 + 清空 46 + 输入框最小 64 + gaps）。
@@ -2217,6 +2234,15 @@ a:hover { text-decoration: underline; }
   background: color-mix(in srgb, var(--ki-color-primary) 10%, var(--ki-color-surface));
   color: var(--ki-color-primary);
   font-weight: 600;
+}
+/* 删除（2026-11-13）：本排唯一的破坏性动作，靠**文字颜色**区分而不是红底 ——
+   红底会让它看起来比「编辑文档」更"主要"，而它应该是最后才点的那个。
+   颜色只在常态给到 danger-ink（对比度够、不刺眼），hover 才加深背景。 */
+.ki-drawer__copy--danger { color: var(--ki-color-danger-ink); }
+.ki-drawer__copy--danger:hover {
+  background: var(--ki-color-danger-bg, #fdecec);
+  border-color: color-mix(in srgb, var(--ki-color-danger-ink) 40%, var(--ki-color-border));
+  color: var(--ki-color-danger-ink);
 }
 
 .ki-jump-link { text-decoration-thickness: 2px; text-underline-offset: 3px; }
@@ -6873,6 +6899,43 @@ select.ki-chat-cfg__ta--select {
   color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); line-height: 1.7;
 }
 .ki-move__hint { margin: 0; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
+
+/* ── 删除文档确认弹窗（2026-11-13）──────────────────────────────────
+   宽度与移动弹窗同为 520：内容只有「文档身份 + 后果清单」两段。
+   ★ danger 语义靠**确认按钮 + 红字警告**表达，不给整块红底 ——
+     红底会把「这是可取消的确认」读成「已经出事了」。 */
+.ki-doc-del { width: min(520px, calc(100vw - 32px)); }
+.ki-doc-del__sub { margin: 4px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
+.ki-doc-del__body { display: flex; flex-direction: column; gap: 12px; }
+.ki-doc-del__ident {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 8px 10px; border-radius: var(--ki-radius-sm); background: var(--ki-color-hover);
+}
+.ki-doc-del__ident-label { flex: none; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
+.ki-doc-del__ident-path {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-sm);
+}
+.ki-doc-del__notes {
+  margin: 0; padding-left: 18px;
+  color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); line-height: 1.7;
+}
+/* 勾选这一条是控件而不是说明：去掉圆点缩进，让它与上面两条文字左对齐 */
+.ki-doc-del__wiki { list-style: none; margin: 4px 0 0 -18px; }
+.ki-doc-del__wiki label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.ki-doc-del__wiki input { margin: 0; }
+.ki-doc-del__path {
+  margin-left: 4px; padding: 1px 4px;
+  border: 1px solid var(--ki-color-border); border-radius: 4px;
+  background: var(--ki-color-bg-secondary);
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+}
+.ki-doc-del__hint { margin: 0; color: var(--ki-color-text-muted); font-size: var(--ki-font-size-xs); }
+.ki-doc-del__warn {
+  display: block; margin: 6px 0 0;
+  color: var(--ki-color-danger-ink);
+  font-size: var(--ki-font-size-xs); line-height: 1.6;
+}
 .ki-ds-add__sub { margin: 4px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); }
 .ki-ds-add__hint {
   margin: 0 0 14px; color: var(--ki-color-text-muted);

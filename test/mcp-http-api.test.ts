@@ -978,6 +978,49 @@ describe('/api/search-config', () => {
   });
 });
 
+describe('/api/doc/delete', () => {
+  const scope = 'doc-delete-api';
+  const post = (body: Record<string, unknown>): Promise<Response> => fetch(`${handle!.base}/api/doc/delete`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const listNames = async (): Promise<string[]> => {
+    const list = await (await fetch(`${handle!.base}/api/doc/list?scope=${scope}`)).json() as { docs: { name: string }[] };
+    return list.docs.map((doc) => doc.name);
+  };
+
+  it('缺参数 → 400 DOC_ID_INVALID（不猜目标）', async () => {
+    const res = await post({ scope });
+    assert.equal(res.status, 400);
+    assert.equal(((await res.json()) as { code?: string }).code, 'DOC_ID_INVALID');
+  });
+
+  it('dryRun 只预检：回答落点，且列表里文档还在', async () => {
+    seedRelationsCache(scope, { 告警收敛: ['删除预检'] });
+    const res = await post({ scope, group: '告警收敛', relation: '删除预检', dryRun: true });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { exists: boolean; pendingDrafts: number; wikiWillDelete: boolean };
+    assert.equal(body.exists, true);
+    assert.equal(body.pendingDrafts, 0);
+    assert.equal(body.wikiWillDelete, false, '未配置 wiki 源目录时不该删任何文件');
+    assert.ok((await listNames()).includes('删除预检'), '预检不得产生副作用');
+  });
+
+  it('真删 → 从列表消失；再删同一篇 → 404 DOC_NOT_FOUND', async () => {
+    const res = await post({ scope, group: '告警收敛', relation: '删除预检' });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { deleted: boolean };
+    assert.equal(body.deleted, true);
+    // 列表缓存必须在服务端失效：否则左树还挂着这篇
+    assert.equal((await listNames()).includes('删除预检'), false);
+
+    const again = await post({ scope, group: '告警收敛', relation: '删除预检' });
+    assert.equal(again.status, 404);
+    assert.equal(((await again.json()) as { code?: string }).code, 'DOC_NOT_FOUND');
+  });
+});
+
 describe('/api/doc/list', () => {
   it('scope 为空（default）返回空列表', async () => {
     const res = await fetch(`${handle!.base}/api/doc/list?scope=empty-scope`);

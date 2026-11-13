@@ -17,15 +17,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { getKbDir, getLocalKbDir } from './scope.js';
+import { getLocalKbDir } from './scope.js';
 import { loadGroupCache } from './group-cache.js';
 import { readJson } from './store.js';
 import { activeDrafts, contentRevision } from './relation-edit-draft.js';
 import { relationIndexMode } from './relation-edit-live.js';
 import type { Relation } from './scoring.js';
-import { isUnsafeRelationName, resolveWikiRootDir } from './wiki-sync.js';
+import { resolveWikiRootDir } from './wiki-sync.js';
 import { groupToRelDir, isRootGroup } from './import-path.js';
-import { DocumentEditError } from './document-editor.js';
+import { datasourceManagedFile, normalizeGroup, normalizeRelation, reject } from './doc-identity.js';
 import { executeSyncRelation } from '../sync-relation.js';
 import { executeDeleteRelation } from '../delete-relation.js';
 
@@ -58,71 +58,6 @@ export interface MoveDocumentResult {
   source: SourceMovePlan;
   indexMode: 'dense' | 'fts';
   warnings: string[];
-}
-
-function reject(status: number, code: string, message: string, details?: Record<string, unknown>): never {
-  throw new DocumentEditError(status, code, message, details);
-}
-
-/** Group 路径归一 + 校验（复用写入侧同一套判据：空段 / 点段 / 反斜杠 / 保留键） */
-function normalizeGroup(raw: string, field: string, allowRoot = false): string {
-  const group = String(raw ?? '').trim().replace(/^\/+|\/+$/g, '');
-  if (!group) reject(400, 'DOC_ID_INVALID', `缺少${field}`);
-  // 根散文件的 group 是保留键（`__root__`）：写入侧只允许「Group 留空」到达它。
-  // 移动到根是**用户在选择器里显式点「根目录」**（2026-11-12 用户要求），所以目标侧放行；
-  // 源侧仍拒绝 —— 删除链路按 Group 树定位，根没有稳定的树节点，强行支持只会半途失败。
-  if (isRootGroup(group)) {
-    if (allowRoot) return group;
-    reject(400, 'DOC_ID_INVALID',
-      `暂不支持移动「根目录」下的文档（${group} 是内部保留键）：请先把目标文档归到具体 Group`);
-  }
-  if (group.split('/').some((part) => !part || part === '.' || part === '..' || part.includes('\\'))) {
-    reject(400, 'DOC_ID_INVALID', `${field} 路径不合法：${group}`);
-  }
-  return group;
-}
-
-function normalizeRelation(raw: string, field: string): string {
-  const relation = String(raw ?? '').trim();
-  if (!relation) reject(400, 'DOC_ID_INVALID', `缺少${field}`);
-  // relation 会直接成为 wiki 文件名；含 "/" "\\" ".." 会破坏目录结构（写入侧同一判据）
-  if (isUnsafeRelationName(relation) || relation === '.' || /[\u0000]/.test(relation)) {
-    reject(400, 'DOC_ID_INVALID', `${field} 不能包含 "/"、"\\" 或 ".."：${relation}`);
-  }
-  return relation;
-}
-
-/**
- * 数据源管辖判定：`sourcePath` 能在该 scope 已登记数据源的目录（含多映射子目录）下找到实体文件
- * ⇒ 这篇文档的「真相源」在仓库外，ki 侧移动后下次同步会重新导入（同步**不做**内容查重）。
- */
-function datasourceManagedFile(scope: string, sourcePath?: string): string | undefined {
-  const rel = String(sourcePath ?? '').trim();
-  if (!rel) return undefined;
-  const file = path.join(getKbDir(scope), 'datasource.json');
-  if (!fs.existsSync(file)) return undefined;
-  let raw: { dir?: unknown; mappings?: unknown };
-  try {
-    raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { dir?: unknown; mappings?: unknown };
-  } catch {
-    return undefined; // 登记损坏与「是否受管辖」无关：交给数据源页自己的 fail-loud
-  }
-  const dir = typeof raw.dir === 'string' ? raw.dir : undefined;
-  if (!dir) return undefined;
-  const mappings = Array.isArray(raw.mappings) ? raw.mappings : [];
-  const subdirs = mappings.length > 0
-    ? mappings.map((item) => String((item as { subdir?: unknown })?.subdir ?? ''))
-    : [''];
-  // 两种相对基线都要试：单数据源 = 相对 dir；多映射 = 相对各自 subdir（历史记录里也可能已带子目录前缀）
-  const candidates = [path.resolve(dir, rel), ...subdirs.map((sub) => path.resolve(dir, sub, rel))];
-  for (const candidate of candidates) {
-    try {
-      if (fs.statSync(candidate).isFile()) return candidate;
-    } catch {
-      // 不存在即不是这个基线，继续下一个
-    }
-  }
-  return undefined;
 }
 
 /** 解析并校验「源文件 → 目标路径」；只读，任何一条不满足都降级为「不搬文件」而不是抛错 */

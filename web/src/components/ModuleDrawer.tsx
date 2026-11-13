@@ -17,7 +17,8 @@ import {
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ReaderLinkComposer, type ReaderLinkSelection } from '@/components/ReaderLinkComposer';
 import { DocMoveDialog } from '@/components/DocMoveDialog';
-import type { MoveDocumentResponse } from '@/api/httpApi';
+import { DocDeleteDialog } from '@/components/DocDeleteDialog';
+import type { DeleteDocumentResponse, MoveDocumentResponse } from '@/api/httpApi';
 import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
 // 根散文件的 group 是内部保留键（`__root__`）：路径段位置整段省略（连分隔符一起）
 import { groupPathSegment } from '@/lib/groupTree';
@@ -434,6 +435,14 @@ interface ModuleDrawerProps {
    */
   onMoved?: (result: MoveDocumentResponse) => void;
   /**
+   * 文档被删除后的回调（2026-11-13）。
+   *
+   * 与 `onMoved` 同一约定：查看器不写 URL、不知道左树结构，只回传结果，由页面决定
+   * 「关掉阅读区 / 重取列表 / 给回执」。没有该回调的调用方（如 AI 引用预览）不渲染删除入口 ——
+   * 删除后没人负责后续导航，等于给用户一个"删完还停在原地"的半截体验。
+   */
+  onDeleted?: (result: DeleteDocumentResponse) => void;
+  /**
    * 挂载后显示一次的成功提示（3.5s 自动消失）。
    *
    * 为什么需要：「移动文档」会改变 group/relation，而本组件的 React `key` 含这两项 ⇒ 整块重挂载，
@@ -474,6 +483,7 @@ export function ModuleDrawer({
   inlineActions,
   bodySlot,
   onMoved,
+  onDeleted,
   initialNotice,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
@@ -491,6 +501,8 @@ export function ModuleDrawer({
   const [readerLinkComposerOpen, setReaderLinkComposerOpen] = useState(false);
   /** 「移动文档」弹窗（REQ-20261112-002）：改变归属是写操作，与「编辑文档」同一套只读门禁 */
   const [moveOpen, setMoveOpen] = useState(false);
+  /** 「删除文档」确认弹窗（2026-11-13）：比移动更不可逆，同样与「编辑文档」共用写门禁 */
+  const [deleteOpen, setDeleteOpen] = useState(false);
   /** 「添加链接」待选模式：点按钮后等待用户在正文中选中片段，选中即自动弹面板（用户要求的新顺序） */
   const [linkArmed, setLinkArmed] = useState(false);
   /**
@@ -767,6 +779,7 @@ export function ModuleDrawer({
     setReaderLinkSelection(null);
     setReaderLinkComposerOpen(false);
     setMoveOpen(false);
+    setDeleteOpen(false);
     if (controlledFullscreen === undefined) setInternalFullscreen(next);
     updateOutlineCollapsed(!next);
     onFullscreenChange?.(next);
@@ -1154,7 +1167,7 @@ export function ModuleDrawer({
     document.body.style.overflow = 'hidden';
     const handler = (e: KeyboardEvent): void => {
       if (e.key !== 'Escape') return;
-      if (editor.isOpen || readerLinkComposerOpen || moveOpen) return;
+      if (editor.isOpen || readerLinkComposerOpen || moveOpen || deleteOpen) return;
       // 浮层最先关（⋯ 菜单排在查找栏之前）：否则一次 Esc 会连抽屉一起收掉
       if (overflowOpen) { setOverflowOpen(false); return; }
       // 查找栏优先：Esc 只关查找栏，再按一次才退全屏 / 关抽屉（Q3：三个 Esc 语义不能撞车）
@@ -1169,7 +1182,7 @@ export function ModuleDrawer({
       document.body.style.overflow = prev;
       window.removeEventListener('keydown', handler);
     };
-  }, [clearSelectionWarning, closeFindBar, editor.isOpen, findOpen, fullscreen, linkArmed, moveOpen, onClose, overflowOpen, readerLinkComposerOpen, updateFullscreen]);
+  }, [clearSelectionWarning, closeFindBar, deleteOpen, editor.isOpen, findOpen, fullscreen, linkArmed, moveOpen, onClose, overflowOpen, readerLinkComposerOpen, updateFullscreen]);
 
   /** 「⋯」菜单：点面板外关闭（与 ScopeSelect 同款做法；ESC 由上面的统一链处理） */
   useEffect(() => {
@@ -1681,6 +1694,21 @@ export function ModuleDrawer({
                 {copied ? '已复制' : '复制'}
               </button>
             )}
+            {/* 删除文档（2026-11-13）：与「编辑文档」同一写门禁 + 额外一条「编辑器开着时不许删」——
+                编辑器里改的就是这篇，删了之后保存会 404（草稿卫兵也只挡未结束的草稿，挡不住"编辑中"）。
+                没有 onDeleted 的调用方（AI 引用预览）不渲染：删完没人负责导航，等于半截体验。 */}
+            {editable && group && content !== null && onDeleted && (
+              <button
+                className="ki-drawer__copy ki-drawer__copy--danger"
+                type="button"
+                disabled={docWriteDisabled || editor.isOpen}
+                aria-disabled={docWriteDisabled || editor.isOpen}
+                title={scopeReadonly
+                  ? SCOPE_READONLY_BLOCKED_HINT
+                  : editor.isOpen ? '请先关闭编辑器再删除' : '删除这篇文档（不可恢复，会先二次确认）'}
+                onClick={() => setDeleteOpen(true)}
+              >删除</button>
+            )}
             {/* 窄容器的「⋯」入口：宽容器里按钮自身 display:none（菜单不可达），动作照旧平铺 */}
             <div className="ki-drawer__overflow" ref={overflowRef}>
               <button
@@ -1733,6 +1761,16 @@ export function ModuleDrawer({
                       className="ki-drawer__overflow-item"
                       onClick={() => { setOverflowOpen(false); void handleCopy(); }}
                     >{copied ? '已复制' : '复制'}</button>
+                  )}
+                  {editable && group && content !== null && onDeleted && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={docWriteDisabled || editor.isOpen}
+                      aria-disabled={docWriteDisabled || editor.isOpen}
+                      className="ki-drawer__overflow-item ki-drawer__overflow-item--danger"
+                      onClick={() => { setOverflowOpen(false); setDeleteOpen(true); }}
+                    >删除</button>
                   )}
                 </div>
               )}
@@ -1828,6 +1866,17 @@ export function ModuleDrawer({
           relation={module}
           onClose={() => setMoveOpen(false)}
           onMoved={onMoved}
+        />
+      )}
+      {/* 删除文档（2026-11-13）：成功与否都由页面接手 —— 删除成功会连这篇一起从列表消失，
+          查看器不该自己猜"接下来显示什么"。 */}
+      {deleteOpen && group && content !== null && onDeleted && (
+        <DocDeleteDialog
+          scope={scope}
+          group={group}
+          relation={module}
+          onClose={() => setDeleteOpen(false)}
+          onDeleted={onDeleted}
         />
       )}
     </>

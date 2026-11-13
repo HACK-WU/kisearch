@@ -19,7 +19,7 @@ import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
 import { useScope } from '@/lib/scopeContext';
 import { useDocList, useGroupDocs, getDocList, fetchGroupDocsAll, type DocListResponse } from '@/lib/hooks';
 // 移动文档的返回体（REQ-20261112-002）：页面据此把 URL / 目录选中 / 列表一起搬过去
-import type { MoveDocumentResponse } from '@/api/httpApi';
+import type { DeleteDocumentResponse, MoveDocumentResponse } from '@/api/httpApi';
 import { isViewDocList, normalizeDocData, decodeGroupPath, type DocListViewPayload } from '@/lib/viewBuckets';
 import { getTasks, scopeImportRunning, type TaskRecord } from '@/api/tasksApi';
 import { getDocContent, type DocItem } from '@/api/httpApi';
@@ -1334,6 +1334,39 @@ export function BrowsePage(): JSX.Element {
     setActiveGroup(treeGroup);
   }, [currentViewing, queryClient, readerFullscreen, setActiveGroup, writeBrowseUrl, viewMembers]);
 
+  /**
+   * 删除成功后的回执。与「移动」不同，这里不需要跨重挂载传话（文档已消失、查看器直接关闭），
+   * 但**必须由页面给**：关掉阅读区之后，只有页头还能承载「刚才发生了什么」。
+   * 8 秒自动消失 —— 删除是低频动作，留一条不会自行退场的提示会占着页头。
+   */
+  const [deleteNotice, setDeleteNotice] = useState('');
+  useEffect(() => {
+    if (!deleteNotice) return;
+    const timer = window.setTimeout(() => setDeleteNotice(''), 8000);
+    return () => window.clearTimeout(timer);
+  }, [deleteNotice]);
+
+  const handleDocDeleted = useCallback((result: DeleteDocumentResponse): void => {
+    /*
+     * 删除后要让三样东西跟着变（漏一样就会看到"删掉了但树里还在"）：
+     * ① 文档列表 / 目录计数 → 失效 react-query；
+     * ② 该组已取过的叶子缓存 → 允许重新取（删掉的那篇否则还挂在树上）；
+     * ③ 阅读态与 URL → 文档已不存在，必须收起，否则刷新落空。
+     */
+    void queryClient.invalidateQueries({ queryKey: ['docList'] });
+    loadedGroupsRef.current.delete(result.group);
+    // 回执里的 group 是「字段值」：根要显式写成「根目录」（空串会读成「已删除： / 文档名」）
+    const groupLabel = result.group === ROOT_GROUP_KEY ? ROOT_GROUP_FIELD_LABEL : result.group;
+    // `deleted:false` 是「它已经不在了」（并发删除），不是失败 —— 回执不能写成「已删除」
+    const headline = result.deleted ? '已删除' : '文档已不存在';
+    setDeleteNotice(
+      `${headline}：${groupLabel} / ${result.relation}`
+      + (result.wikiRemoved ? '；wiki 源文件已删除' : '')
+      + (result.warnings.length > 0 ? `；${result.warnings[0]}` : ''),
+    );
+    closeDocument();
+  }, [closeDocument, queryClient]);
+
   const renderViewer = (asDrawer: boolean, slot?: ReactNode): JSX.Element | null => {
     if (!currentViewing) return null;
     return (
@@ -1369,6 +1402,9 @@ export function BrowsePage(): JSX.Element {
         /* 移动入口只给「页内阅读态」：检索结果抽屉的头部同时承担结果导航，
            移动后没有稳定的落点可回到结果列表，宁可不提供入口也不给半截体验。 */
         onMoved={asDrawer ? undefined : handleDocMoved}
+        /* 删除入口同样只给「页内阅读态」：抽屉态的主区是检索结果列表，
+           删掉后既没有稳定的落点可回，也没有页面级回执的承载处。 */
+        onDeleted={asDrawer ? undefined : handleDocDeleted}
         initialNotice={asDrawer ? undefined : moveNotice}
         canGoBack={history.length > 0}
         onBack={goBack}
@@ -1481,6 +1517,17 @@ export function BrowsePage(): JSX.Element {
               <span className="ki-page-head__hint">原文阅读</span>
               <span className="ki-page-head__sep">·</span>
               <span className="ki-page-head__group">未选择文档，从左侧目录选择</span>
+              {/* 删除回执：文档已经没了、阅读区也收起了，只有页头还能说明「刚才发生了什么」。
+                  刻意**内联在同一行**而不是另起一行：另起一行会让页头长高一行、8 秒后再缩回，
+                  正文区跟着上下跳一次（用户会以为页面在抖）。 */}
+              {deleteNotice ? (
+                <>
+                  <span className="ki-page-head__sep">·</span>
+                  <span className="ki-page-head__notice" role="status" aria-live="polite" title={deleteNotice}>
+                    {deleteNotice}
+                  </span>
+                </>
+              ) : null}
             </p>
           )}
         </div>

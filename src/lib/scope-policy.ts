@@ -49,6 +49,9 @@ export const EXEMPT_OPS: ReadonlySet<string> = new Set([
   'restore-snapshot',
   'rebuild-vector',
   'migrate-relation-cache',
+  // 删除前的只读预检（2026-11-13）：只回答「源文件会不会一起没 / 有没有草稿」，不写任何东西。
+  // 只读库在 UI 上已置灰删除按钮，这里放行是为了「同一份代码在只读库也能解释清楚为什么不能删」。
+  'doc-delete-precheck',
 ]);
 
 /**
@@ -71,6 +74,8 @@ export const BLOCKED_OPS: ReadonlySet<string> = new Set([
   'doc-edit-write',
   // 文档移动（REQ-20261112-002）：只读库同样不许搬动归属
   'doc-move-write',
+  // 文档删除（2026-11-13）：只读库同样不许删 —— 删除比移动更不可逆
+  'doc-relation-delete',
 ]);
 
 /** 判定某 op 的归属；`unknown` = 未登记（按拦截处理，并由单测报警） */
