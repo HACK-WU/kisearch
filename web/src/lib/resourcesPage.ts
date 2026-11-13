@@ -597,21 +597,6 @@ export const SKILL_ITEMS: SkillItem[] = [
   },
 ];
 
-// ─── 记忆闭环（安装器只装 Skills，Rules 需手动放置） ──────────────────────
-
-export const MEMORY_SKILLS = ['ki-search-first', 'ki-memory-lookup', 'ki-memory-write'];
-
-export const MEMORY_RULE_FILE = 'rules/ai-codekb-memory.md';
-
-export const MEMORY_SKILLS_COMMAND =
-  'curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \\\n'
-  + `  bash -s -- --repo HACK-WU/skills -n ${MEMORY_SKILLS.join(',')} -t /path/to/your-project`;
-
-export const MEMORY_RULE_COMMAND =
-  'mkdir -p /path/to/your-project/rules\n'
-  + 'curl -fsSL https://raw.githubusercontent.com/HACK-WU/kisearch/master/rules/ai-codekb-memory.md \\\n'
-  + '  -o /path/to/your-project/rules/ai-codekb-memory.md';
-
 // ─── LLM 配置（只读诊断 + 可复制片段） ───────────────────────────────────
 
 /** 环境变量名占位：引导用户用引用而非明文落盘（`${ENV_VAR}` 已被配置层解析） */

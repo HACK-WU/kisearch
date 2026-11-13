@@ -56,14 +56,10 @@ import {
   LLM_FIELD_NOTES,
   LLM_PROTOCOL_NOTE,
   LLM_RELOAD_HINT,
-  MEMORY_RULE_COMMAND,
-  MEMORY_RULE_FILE,
-  MEMORY_SKILLS,
   MCP_TOOL_COUNT,
   MCP_TOOLS,
   MCP_TOOLS_NOTE,
   mcpToolsDocUrl,
-  MEMORY_SKILLS_COMMAND,
   MORE_SKILL_TOOLS,
   NODE_REQUIREMENT,
   PRIMARY_SKILL_TOOLS,
@@ -496,19 +492,6 @@ function SkillSection(): JSX.Element {
         说明：加 <code>-g</code> 装到全局；加 <code>--skill ki-search</code> 只装检索规则。
         装完用 <code>{SKILLS_LIST_COMMAND}</code> 确认。{SKILL_AGENT_COUNT_HINT}。
       </p>
-
-      <details className="res-more res-more--block">
-        <summary>记忆闭环（推荐）：还需 {MEMORY_SKILLS.length} 个配套 Skill + 1 条 Rules</summary>
-        <div className="res-more__body">
-          <p className="res-help">
-            上面装的只是检索与 AGENTS.md 两条规则；要让 AI 具备「先查记忆 → 判断 → 写回记忆」的闭环，
-            还需要下面这些。安装器只支持 Skills，
-            <code>{MEMORY_RULE_FILE}</code> 必须手动放置。
-          </p>
-          <CodeBlock code={MEMORY_SKILLS_COMMAND} label="配套 Skill" ariaLabel="安装记忆闭环配套 Skill" />
-          <CodeBlock code={MEMORY_RULE_COMMAND} label="Rules（手动放置）" ariaLabel="手动放置记忆规则文件" />
-        </div>
-      </details>
 
       <h3 className="res-subhead">其他工具 / 指定目录</h3>
       <p className="res-help res-mt-2">

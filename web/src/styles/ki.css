@@ -7813,15 +7813,6 @@ select.ki-chat-cfg__ta--select {
 .res-more[open] summary::before { transform: rotate(90deg); }
 .res-more summary:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
 .res-more .res-tool { border-top: 1px solid var(--ki-color-border); }
-/* 独立成块的折叠（记忆闭环）：自带描边，不依附 .res-tools */
-.res-more--block {
-  margin-top: var(--ki-space-3);
-  border: 1px solid var(--ki-color-border);
-  border-radius: var(--ki-radius-md);
-  background: var(--ki-color-bg-secondary);
-}
-.res-more--block summary { padding: 0 14px; }
-.res-more__body { display: grid; gap: var(--ki-space-3); padding: 0 14px 14px; }
 
 /* ── LLM 状态 ── */
 .res-llm-status {

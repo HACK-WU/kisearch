@@ -45,13 +45,11 @@ const {
   GROUP_LABEL,
   isLoopbackHost,
   KI_UPLOAD_TRIGGER,
-  MEMORY_RULE_FILE,
   MCP_TOOL_COUNT,
   MCP_TOOLS,
   MCP_TOOLS_NOTE,
   mcpToolsDocUrl,
   openApiDocUrl,
-  MEMORY_SKILLS,
   LLM_FIELD_NOTES,
   LLM_PROTOCOL_NOTE,
   MORE_SKILL_TOOLS,
@@ -720,11 +718,6 @@ describe('Agent Skill 说明', () => {
       assert.equal(ticks % 2, 0, `${item.name} 反引号未成对`);
       assert.equal(bolds % 2, 0, `${item.name} 的 ** 未成对`);
     }
-  });
-
-  it('记忆闭环清单与规则文件路径不为空（安装器不装 Rules）', () => {
-    assert.deepEqual(MEMORY_SKILLS, ['ki-search-first', 'ki-memory-lookup', 'ki-memory-write']);
-    assert.equal(MEMORY_RULE_FILE, 'rules/ai-codekb-memory.md');
   });
 });
 
