@@ -12,7 +12,9 @@ import { withTimeout, TOOL_TIMEOUT } from './util.js';
 export function registerScopeListTool(server: McpServer, authScopes: string[] | null = null): void {
   server.tool(
     'ki_scope_list',
-    '列出所有 scope（KB 目录层 + 向量语义层并集，标注每个 scope 存在于哪层、是否已在配置注册）',
+    '列出所有 scope（KB 目录层 + 向量语义层并集，标注每个 scope 存在于哪层、是否已在配置注册）。'
+    + '精确查询像翻书：本工具 → ki_group_list → ki_get_module_info 逐层定位到整篇原文，结果确定无遗漏；'
+    + '只有模糊描述、不知落在哪一篇时改用 ki_search（语义检索）。',
     {},
     async () => {
       try {

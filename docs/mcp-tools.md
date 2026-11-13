@@ -11,7 +11,7 @@
 | `ki_search` | 语义检索（hybrid / fulltext） | `query`（必填）、`limit`（默认 10，总条数上限）、`tags`（不传=搜全部）、`mode`、`threshold`、`timeout`、`include_original` |
 | `ki_group_list` | Group 树 + Relations，支持 hot/warm/cold/emerging/full 分区与向量兜底 | `groups`（单数别名 `group`）、`subtree`、`mode`（默认 hot）、`hot_count`、`depth`、`auto_fallback` |
 | `ki_get_module_info` | 读取本地 KB 原文；同 Group 批量 ≤10 条；超长文档可分段读取 | `group`（必填）、`relation` 或 `relations[]`（二选一）、`start_line` / `start_char` / `max_chars`（可选，分段读取；不传 = 全文） |
-| `ki_scope_list` | 列出所有 scope 及 KB/向量状态；每条含 `wikiSync { enabled, writableDir, writableFrom, rejectReason? }`（`enabled:true` + `writableDir:null` = 配了但写不进去，如未配置 `wikiSync.sourceDir`）。视图定义读取失败时响应带 `viewsWarning`（此时 `views` 缺省 ≠ 没有视图） | — |
+| `ki_scope_list` | 列出所有 scope 及 KB/向量状态；精确读整篇走「本工具 → `ki_group_list` → `ki_get_module_info`」，只有模糊描述时用 `ki_search`。每条含 `wikiSync { enabled, writableDir, writableFrom, rejectReason? }`（`enabled:true` + `writableDir:null` = 配了但写不进去，如未配置 `wikiSync.sourceDir`）。视图定义读取失败时响应带 `viewsWarning`（此时 `views` 缺省 ≠ 没有视图） | — |
 | `ki_view_list` | 列出知识视图（多个知识库的只读聚合）。默认每条含 `view` / `id` / `members` / `availableCount` / `missing` / **`usableCount`**（真能参与语义检索的成员数）；有成员不可用时给 **`degradedReason`**（如「3 个向量维度不一致（语义检索会跳过）」），维度不一致的库名另列 `dimensionMismatch`。`verbose` 展开 `memberMeta` 与审计字段（健康摘要同样保留）。没有视图、被授权过滤光、视图文件损坏三种"空"分别给 `hint` / `warning` | `verbose` |
 | `ki_tag_list` | 列出 scope 下的 tag 及文档数（只读） | `scope` |
 

@@ -7,7 +7,8 @@ import { timeoutSecondsToMs } from '../query-timeout.js';
 export function registerSearchTool(server: McpServer): void {
   server.tool(
     'ki_search',
-    '语义检索知识库内容',
+    '语义检索知识库内容（按意思找相似片段，适合不知落在哪一篇时）；'
+    + '已知确切 Group / Relation 名、要读完整原文时改用 ki_group_list + ki_get_module_info',
     {
       scope: z.string().optional().default('default').describe('知识库名或视图名（多个用逗号分隔聚合检索，视图会自动展开为成员库；结果统一排序并按来源库标注；省略则用 default；strict 模式下必须传且须在白名单内）'),
       query: z.string().describe('自然语言查询文本'),
