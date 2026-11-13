@@ -116,8 +116,8 @@ test('前后端契约登记齐全（路由 / 权限 / 只读门禁 / 写锁 / �
 
 test('样式：危险动作靠文字色区分，且窄屏收起集合包含它', () => {
   assert.ok(css.includes('.ki-drawer__copy--danger'), '缺少危险按钮样式');
-  const current = css.indexOf('@container reader-drawer (max-width: 820px)');
-  assert.ok(current > 0, '窄屏收起阈值块必须存在');
-  assert.ok(css.slice(current, current + 900).includes('ki-drawer__copy--danger'), '「删除」要一起收进 ⋯，否则窄窗会折行');
+  const current = css.indexOf('@container reader-drawer (max-width: 880px)');
+  assert.ok(current > 0, '窄屏收起阈值块必须存在（当前 880）');
+  assert.ok(css.slice(current, current + 1200).includes('ki-drawer__copy--danger'), '「删除」要一起收进 ⋯，否则窄窗会折行');
   assert.ok(css.includes('.ki-doc-del'), '缺少删除弹窗样式');
 });

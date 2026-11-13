@@ -452,6 +452,28 @@ interface ModuleDrawerProps {
   initialNotice?: string;
 }
 
+/**
+ * 「下载 .md」的文件名（2026-11-13）。
+ *
+ * 四道处理都有具体理由，不是防御性噪音：
+ * - **净化平台非法字符**：Windows 拒收 `\ / : * ? " < > |`，控制字符（`\n` `\t`）在多数平台
+ *   会被静默替换或直接保存失败；
+ * - **去掉重复的 `.md`**：relation 偶尔自带扩展名（导入侧未剥净），拼出来会变成 `x.md.md`；
+ * - **截断 120 字符**：Windows 单个文件名上限 255 **字节**，中文名约 85 字符就顶到上限，
+ *   再叠浏览器追加的 `(1)` 与保存目录，超长会让保存直接失败 —— 截断比失败好；
+ * - **片段态加后缀**：正文只载入搜索命中片段时，名字必须能看出来，否则会被当全文存档。
+ */
+export function downloadFileName(module: string, fallbackOnly: boolean): string {
+  const cleaned = (module || 'document')
+    .replace(/\.md$/i, '')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 120)
+    .trim();
+  return `${cleaned || 'document'}${fallbackOnly ? '-命中片段' : ''}.md`;
+}
+
 export function ModuleDrawer({
   scope,
   module,
@@ -495,6 +517,8 @@ export function ModuleDrawer({
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  /** 下载失败提示（Blob / objectURL 构造异常，或浏览器拦了 a[download]） */
+  const [downloadFailed, setDownloadFailed] = useState(false);
   const [savedNotice, setSavedNotice] = useState('');
   const savedNoticeTimer = useRef<number | undefined>(undefined);
   const [readerLinkSelection, setReaderLinkSelection] = useState<ReaderLinkSelection | null>(null);
@@ -1042,6 +1066,44 @@ export function ModuleDrawer({
     }
   }, [displayedContent]);
 
+  /**
+   * 下载当前正文为 `.md`（2026-11-13）。
+   *
+   * 三个刻意的取舍：
+   * - **下载的就是屏幕上这份正文**（`displayedContent`），不重新向服务端要原文 ——
+   *   与「复制」同源，避免"复制到的是片段、下载到的是全文"这种两套事实。
+   * - **片段态在文件名上标注**：正文加载失败、只显示搜索命中片段时，名字带「-命中片段」，
+   *   否则用户会把它当全文存档。
+   * - **objectURL 必须释放**：不释放时每次下载都留一份 Blob 在内存里（大文档尤其明显）；
+   *   但不能立刻释放 —— Safari 在 click 返回后还在读，延迟一拍更稳。
+   */
+  const handleDownload = useCallback((): void => {
+    if (!displayedContent) return;
+    const fileName = downloadFileName(module, showingFallback);
+    let url = '';
+    try {
+      const blob = new Blob([displayedContent], { type: 'text/markdown;charset=utf-8' });
+      url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = fileName;
+      anchor.rel = 'noopener';
+      // 必须挂进文档再 click：Firefox 对游离节点的 `download` 不触发
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setDownloadFailed(false);
+    } catch {
+      setDownloadFailed(true);
+      setTimeout(() => setDownloadFailed(false), 2500);
+    } finally {
+      if (url) {
+        const pending = url;
+        window.setTimeout(() => URL.revokeObjectURL(pending), 1000);
+      }
+    }
+  }, [displayedContent, module, showingFallback]);
+
   /** 暂存当前阅读页选区；只有点击“添加链接”后才打开跳转面板。 */
   const captureReaderSelection = useCallback((explicitAction = false): ReaderLinkSelection | null => {
     if (!editable || !group || content === null || editor.isOpen || readerLinkComposerOpen) return null;
@@ -1334,6 +1396,9 @@ export function ModuleDrawer({
       {anchorWarning && <div className="ki-drawer__copy-failed" role="status">{anchorWarning}。文档已打开，请重新选择位置。</div>}
       {copyFailed && (
         <div className="ki-drawer__copy-failed" role="status">复制失败，请手动选择文本后复制</div>
+      )}
+      {downloadFailed && (
+        <div className="ki-drawer__copy-failed" role="status">下载失败：浏览器未能保存文件，请重试或改用「复制」</div>
       )}
       {loading ? (
         <div className="ki-drawer__status">
@@ -1694,6 +1759,23 @@ export function ModuleDrawer({
                 {copied ? '已复制' : '复制'}
               </button>
             )}
+            {/* 下载正文为 .md（2026-11-13）：与「复制」同门禁（都是取内容，只读库也该能用），
+                不与编辑/移动/删除共用写门禁。片段态在 title 与文件名上都说清楚。 */}
+            {displayedContent && (
+              <button
+                className="ki-drawer__copy ki-drawer__copy--download"
+                type="button"
+                disabled={docActionsDisabled}
+                /* title 不写具体文件名：实际名字经过净化与截断，写死一个可能对不上的名字
+                   比不写更容易误导（如文档名含 `/` 时显示 `a/b.md`、实际存成 `a_b.md`）。 */
+                title={docActionsDisabled
+                  ? '当前显示的是检索结果，没有可下载的正文'
+                  : showingFallback
+                    ? '当前只载入了搜索命中片段，下载内容为片段（文件名会标注）'
+                    : '下载为 Markdown（.md）'}
+                onClick={handleDownload}
+              >下载</button>
+            )}
             {/* 删除文档（2026-11-13）：与「编辑文档」同一写门禁 + 额外一条「编辑器开着时不许删」——
                 编辑器里改的就是这篇，删了之后保存会 404（草稿卫兵也只挡未结束的草稿，挡不住"编辑中"）。
                 没有 onDeleted 的调用方（AI 引用预览）不渲染：删完没人负责导航，等于半截体验。 */}
@@ -1761,6 +1843,15 @@ export function ModuleDrawer({
                       className="ki-drawer__overflow-item"
                       onClick={() => { setOverflowOpen(false); void handleCopy(); }}
                     >{copied ? '已复制' : '复制'}</button>
+                  )}
+                  {displayedContent && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={docActionsDisabled}
+                      className="ki-drawer__overflow-item"
+                      onClick={() => { setOverflowOpen(false); handleDownload(); }}
+                    >下载</button>
                   )}
                   {editable && group && content !== null && onDeleted && (
                     <button

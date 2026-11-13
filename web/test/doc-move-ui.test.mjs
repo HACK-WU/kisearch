@@ -46,14 +46,15 @@ test('移动入口与「编辑文档」同一门禁，且窄屏「⋯」菜单�
 });
 
 test('窄屏收起集合包含移动按钮（阈值上调而不是硬塞）', () => {
-  // 阈值随新动作单调上调：620（初版）→ 700（加「移动」）→ 820（加「删除」，2026-11-13）。
-  // 断言只看「当前阈值块内包含移动」+「旧阈值已不存在」，避免每加一个动作就要改死数字。
-  const current = css.indexOf('@container reader-drawer (max-width: 820px)');
-  assert.ok(current > 0, '窄屏收起阈值块必须存在（当前 820）');
-  const block = css.slice(current, current + 900);
+  // 阈值随新动作单调上调：620（初版）→ 700（加「移动」）→ 820（加「删除」）→ 880（加「下载」）。
+  // 断言「当前阈值块内包含移动」+「旧阈值已不存在」，避免每加一个动作就要改死数字。
+  const current = css.indexOf('@container reader-drawer (max-width: 880px)');
+  assert.ok(current > 0, '窄屏收起阈值块必须存在（当前 880）');
+  const block = css.slice(current, current + 1200);
   assert.ok(block.includes('ki-drawer__copy--move'), '「移动」要一起收进 ⋯，否则窄窗会把这排挤成两行');
-  assert.ok(!css.includes('@container reader-drawer (max-width: 620px)'), '旧阈值 620 必须同步上调（新增动作约 76px）');
-  assert.ok(!css.includes('@container reader-drawer (max-width: 700px)'), '旧阈值 700 必须随「删除」上调（又一个动作约 76px）');
+  for (const stale of ['620', '700', '820']) {
+    assert.ok(!css.includes(`@container reader-drawer (max-width: ${stale}px)`), `旧阈值 ${stale} 必须同步上调（每加一枚动作约 +60~120px）`);
+  }
 });
 
 test('目标 Group 复用导入页的 GroupPathSelect，且弹窗不被 overflow 裁剪', () => {
