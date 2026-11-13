@@ -1039,6 +1039,14 @@ ki sync-relation \
 }
 ```
 
+**从「只写全文索引」切回向量化**：文档此前用 `--no-vector` 写入（或导入时关掉了向量化），本次改走向量化写入时，系统会在新向量写入成功**之后**清掉旧的全文索引记录，并在输出里给出结果：
+
+- `ftsRemoved`：本次清掉的旧全文索引条数（没有可清理的旧索引时不出现）
+- `ftsCleanupFailed` / `ftsCleanupReason`：清理失败条数与原因。失败时旧记录仍登记在文档上，下次写入会重试——不会出现「元数据说干净、旧内容还能被搜到」
+- 若本次向量写入没成功，旧全文索引会被**保留**（否则文档在两套索引里都不存在），此时只给 `ftsCleanupReason` 说明原因
+
+> 为什么要清：旧全文索引里存的是上一次的正文。留着它，`ki search --mode fulltext`（以及向量服务不可用时自动降级的那次检索）会返回一段当前文档里**已经不存在**的旧文字。
+
 **Wiki 写回**：sync-relation 写入 KB 后，会自动尝试将内容同步写回外部 Wiki 文件（Markdown 格式）。写回目录**只认** `config.yaml` 中 scope 级 `wikiSync.sourceDir`；未配置（或 `enabled: false`）时不写回。
 
 如果 `wikiSynced` 为 `false`，输出中会包含 `wikiReason` 说明原因（如未配置 Wiki 目录、relation 含非法路径字符等）。Wiki 写回失败不阻塞主流程，仅记录警告。
@@ -1345,9 +1353,10 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 | `items` | array | 是 | 批量条目（**单次最多 50 条**，超出请分批调用），每项含 `group`（Group 路径）、`relation`（Relation 名称）、`module_info`（KB Markdown）、`tags`（可选，自定义标签，逗号分隔） |
 | `vector` | boolean | 否 | 是否写入向量层（默认 `true`；`false` = 非向量化，仅写 KB 层） |
 
-> 返回：`{ ok, scope, total, succeeded, failed, skipped, results: [{ group, relation, evicted, contentTags, vectorStored, vectorReason?, wikiSynced?, wikiFile?, wikiReason?, skipped?, skipReason? }], vectorStored, hints? }`
+> 返回：`{ ok, scope, total, succeeded, failed, skipped, results: [{ group, relation, evicted, contentTags, vectorStored, vectorReason?, ftsRemoved?, ftsCleanupFailed?, ftsCleanupReason?, wikiSynced?, wikiFile?, wikiReason?, skipped?, skipReason? }], vectorStored, hints? }`
 > - `results[].vectorStored`（逐条）：该条**主内容向量（`ki-search`）是否成功写入**（成功即可被 `ki_search` 召回；部分自定义 tag 失败仍为 `true`，配合 `vectorReason` 感知不完整）
 > - `vectorStored`（顶层）：**所有需向量化的条目全部完整写入成功**才为 `true`；任一条失败（含部分 tag 失败）即为 `false`。⚠️ 注意：顶层与逐条粒度不同——顶层 `false` 不代表每条都失败，需结合 `results[].vectorStored`/`vectorReason` 定位
+> - `results[].ftsRemoved` / `results[].ftsCleanupFailed` / `results[].ftsCleanupReason`（可选）：该条从「只写全文索引」切到向量化时清掉的旧全文索引条数 / 清理失败条数 / 失败原因，语义与单条模式同名字段一致
 > - `hints`（可选）：Group 路径解析提示（自动补全 / 多候选歧义 / 未匹配），供调用方感知路径是否精确命中
 
 #### `ki_group_create`

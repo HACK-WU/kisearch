@@ -441,6 +441,12 @@ export interface BulkSyncResultItem {
   vectorReason?: string;
   fullTextStored?: boolean;
   fullTextReason?: string;
+  /** FTS-only → dense 切换时该条清掉的旧全文索引条数（无切换则不出现） */
+  ftsRemoved?: number;
+  /** 旧全文索引清理失败条数（ID 已保留等待重试；不出现 = 全成功） */
+  ftsCleanupFailed?: number;
+  /** 清理失败原因 */
+  ftsCleanupReason?: string;
   wikiSynced?: boolean;
   wikiFile?: string;
   wikiReason?: string;
@@ -516,6 +522,62 @@ async function fullTextWriteBack(params: {
   } catch (err) {
     return { stored: false, ids: [...(params.previousIds ?? [])], reason: `全文索引写入失败：${(err as Error).message}` };
   }
+}
+
+/**
+ * 从 FTS-only 切到 dense 后清理旧全文索引（REQ-20261113-002）。
+ *
+ * 为什么必须清：`fts` 记录里存的是**旧版本正文**，而 local KB 已被新内容覆盖。不清理时
+ * `--mode fulltext`（以及降级到全文的默认检索）会一直命中并返回一份「当前 KB 里已不存在」
+ * 的文本——结果看起来正常、实际是错的，与本项目 fail-loud 红线同源。
+ *
+ * 顺序硬约束（**由调用方保证**，本函数不做判断）：只有 dense 已写入成功才能调用。否则内容
+ * 在新旧两套索引里同时不存在，等于把文档从检索里彻底抹掉——这与 `fullTextWriteBack` 分支
+ * 「新 FTS 未完整写入就保留旧 dense」是同一原则的镜像。
+ *
+ * 契约：
+ * - `ftsDeleteByIds` 的 NOT_FOUND 属幂等成功（既有语义），本函数不区分「本来就没有」与
+ *   「刚删掉」，两处都计为已清理；
+ * - 部分失败只清掉成功的 ID、保留失败 ID 并把 `ftsIndexComplete` 置 false（宁可留 ID 被
+ *   再次清理，也不要丢掉定位）；
+ * - 只改传入的 `rel` 对象，**不落盘**：单条 / 批量两条链路各自的事务窗口不同（前者 `vec`
+ *   之后还要重读盘，后者统一在阶段 4 落盘），落盘由调用方负责。
+ */
+async function cleanupStaleFtsIds(params: {
+  scope: string;
+  rel: Relation;
+  staleIds: string[];
+}): Promise<{ removed: number; failed: number; reason?: string }> {
+  const staleIds = [...new Set(params.staleIds.filter(Boolean))];
+  if (staleIds.length === 0) return { removed: 0, failed: 0 };
+  const { scope, rel } = params;
+  let failedIds: string[];
+  try {
+    const deleted = await ftsDeleteByIds({ scope, ids: staleIds });
+    // failedIds 为空但 failed>0 = 底层只报总数未归因，保守按「全部可能残留」处理
+    failedIds = deleted.failedIds.length > 0
+      ? deleted.failedIds
+      : deleted.failed > 0 ? staleIds : [];
+  } catch (err) {
+    return { removed: 0, failed: staleIds.length, reason: `旧全文索引清理失败：${(err as Error).message}` };
+  }
+  if (failedIds.length === 0) {
+    delete rel.ftsIds;
+    delete rel.ftsLocators;
+    delete rel.ftsIndexComplete;
+    return { removed: staleIds.length, failed: 0 };
+  }
+  const remaining = new Set(failedIds);
+  rel.ftsIds = staleIds.filter((id) => remaining.has(id));
+  const locators = (rel.ftsLocators ?? []).filter((locator) => remaining.has(locator.ftsId));
+  if (locators.length > 0) rel.ftsLocators = locators;
+  else delete rel.ftsLocators;
+  rel.ftsIndexComplete = false;
+  return {
+    removed: staleIds.length - rel.ftsIds.length,
+    failed: rel.ftsIds.length,
+    reason: `旧全文索引清理失败 ${rel.ftsIds.length} 条`,
+  };
 }
 
 /**
@@ -902,6 +964,23 @@ async function executeBulkSyncRelationLocal(params: {
             }
           }
 
+          // ★ 从 FTS-only 切到 dense：逐条清理旧全文索引（REQ-20261113-002，单条路径同口径）。
+          // 条件用 vectorStored：该条内容向量确实写入成功；dense 没写成的条目保留旧 FTS，
+          // 避免内容在新旧两套索引里同时不存在。单条失败不中断整批（逐条记入结果）。
+          for (let i = 0; i < results.length; i++) {
+            if (results[i].skipped || results[i].vectorStored !== true) continue;
+            const priorFtsIds = itemPriorFtsIds[i] ?? [];
+            if (priorFtsIds.length === 0) continue;
+            const rel = cache.groups[results[i].group]?.hot_relations.find((r) => r.text === results[i].relation);
+            if (!rel) continue;
+            const cleaned = await cleanupStaleFtsIds({ scope, rel, staleIds: priorFtsIds });
+            if (cleaned.removed > 0) results[i].ftsRemoved = cleaned.removed;
+            if (cleaned.failed > 0) {
+              results[i].ftsCleanupFailed = cleaned.failed;
+              results[i].ftsCleanupReason = cleaned.reason;
+            }
+          }
+
           // 检查是否有 item 的向量全部失败（无任何成功 entry）
           const failedItems = new Set<number>();
           for (let j = 0; j < bulkResult.results.length; j++) {
@@ -1076,7 +1155,7 @@ export async function executeBulkSyncRelation(params: {
 }
 
 export type SyncRelationResult =
-  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
+  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; /** FTS-only → dense 切换时清掉的旧全文索引条数（无切换则不出现） */ ftsRemoved?: number; /** 旧全文索引清理失败条数（ID 已保留等待重试；不出现 = 全成功） */ ftsCleanupFailed?: number; /** 清理失败原因 / 未清理原因（如 dense 写入未成功） */ ftsCleanupReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
   | { ok: false; error: string };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───
@@ -1332,6 +1411,55 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       ? { stored: false, reason: '非向量化模式（--no-vector），不写 dense 向量' }
       : await vectorWriteBack({ relation, group, moduleInfo, scope, tags: params.tags });
 
+    // ★ 从 FTS-only 切到 dense：旧全文索引必须在 dense **写入成功之后**清理
+    // （REQ-20261113-002）。上面只把 `ftsIndexComplete` 置 false 是不够的——检索链路不读
+    // 该字段，记录仍在索引里，`--mode fulltext` 会继续返回旧版本正文。
+    let ftsRemoved: number | undefined;
+    let ftsCleanupFailed: number | undefined;
+    let ftsCleanupReason: string | undefined;
+    if (params.vector !== false && previousFtsIds.length > 0) {
+      if (!vec.stored) {
+        // 顺序硬约束：dense 没写成就不清旧 FTS，否则内容在新旧两套索引里同时不存在。
+        ftsCleanupReason = `dense 写入未成功（${vec.reason ?? '原因未知'}），已保留旧全文索引待下次写入清理`;
+      } else {
+        // ★ 必须用「重新读盘」的副本落盘：`vectorWriteBack` 自己 loadCacheShape → 回写
+        // memoryIds → persist，函数开头那份 in-memory cache 已经落后于磁盘；拿它落盘会把
+        // 刚写好的 memoryIds 冲掉（向量变孤儿、文档无法再按 ID 删除）。
+        let latestCache: RelationsCache | undefined;
+        try {
+          latestCache = loadCacheShape(scope) as RelationsCache;
+        } catch (err) {
+          ftsRemoved = 0;
+          ftsCleanupFailed = previousFtsIds.length;
+          ftsCleanupReason = `旧全文索引清理失败（读取元数据失败）：${(err as Error).message}`;
+        }
+        const latestRel = latestCache?.groups?.[group]?.hot_relations.find((r) => r.text === relation);
+        if (latestCache && latestRel) {
+          const cleaned = await cleanupStaleFtsIds({ scope, rel: latestRel, staleIds: previousFtsIds });
+          ftsRemoved = cleaned.removed;
+          if (cleaned.failed > 0) {
+            ftsCleanupFailed = cleaned.failed;
+            ftsCleanupReason = cleaned.reason;
+          }
+          // 引擎里已删的 ID 必须同步落盘：只留内存会让重启后统计偏高，并让下次写入
+          // 重复尝试删除一批不存在的 ID（幂等但产生噪音）。
+          if (cleaned.removed > 0 || cleaned.failed > 0) {
+            try {
+              migrateLegacyRelationsCache(scope);
+              getSharedOperationCoordinator().withMetadataCommitSync(scope, () => persistCacheShape(scope, latestCache as unknown as LegacyRelationsCacheShape, new Set([group])));
+            } catch (err) {
+              // 引擎侧已删、磁盘仍留着旧 ID：如实说明「删了但没记住」，不要谎报成一条都没清掉
+              // （下次写入会再删一次，NOT_FOUND 幂等，可自愈）。
+              ftsCleanupReason = [
+                ftsCleanupReason,
+                `旧全文索引已清理 ${cleaned.removed} 条，但元数据落盘失败：${(err as Error).message}`,
+              ].filter(Boolean).join('；');
+            }
+          }
+        }
+      }
+    }
+
     // Wiki 写回（容错，失败不阻塞）。移动文档跳过：文件已由调用方 rename 到位，
     // 这里再走 generateMarkdown 会把用户文件重写一遍（见 skipWikiWriteback 注释）。
     let wikiSynced: boolean | undefined;
@@ -1368,6 +1496,11 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       contentTags,
       ...(vec.reason ? { vectorReason: vec.reason } : {}),
       ...(fts ? { fullTextStored: fts.stored, ...(fts.reason ? { fullTextReason: fts.reason } : {}) } : {}),
+      // FTS-only → dense 切换的清理结果（REQ-20261113-002 R8）：让人看得出「这次清掉了几条」，
+      // 避免再次出现「看起来成功、实际留了一地旧索引」。
+      ...(ftsRemoved !== undefined ? { ftsRemoved } : {}),
+      ...(ftsCleanupFailed !== undefined ? { ftsCleanupFailed } : {}),
+      ...(ftsCleanupReason ? { ftsCleanupReason } : {}),
       ...(wikiSynced !== undefined ? { wikiSynced } : {}),
       ...(wikiFile ? { wikiFile } : {}),
       ...(wikiReason ? { wikiReason } : {}),
