@@ -64,6 +64,10 @@ export const GOVERNANCE_CODE_NUMBERS = {
   REF_ALREADY_ADDED: 1402,
   REF_NOT_FOUND: 1403,
   SEARCH_UNAVAILABLE: 1404,
+  /** 参考文档条数超上限：此前误用 `REF_ALREADY_ADDED` 表达，语义错（不是"重复加入"） */
+  REF_LIMIT_EXCEEDED: 1405,
+  /** refs/search 收到 query：该路由已收窄为「只出 AI 候选」，手动按名搜索改走 /governance/docs/search */
+  REF_SEARCH_QUERY_UNSUPPORTED: 1406,
 
   // ── 通用 / 传输层（1500-1599）──
   /** Token 无权访问该 scope（HTTP 层 403；**不复用** DATASOURCE_LIFECYCLE_LOCKED，
@@ -85,6 +89,7 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   REF_NOT_FOUND: 404,
   REVISION_CONFLICT: 409,
   RESTORE_NAME_CONFLICT: 409,
+  REF_LIMIT_EXCEEDED: 409,
   SEARCH_UNAVAILABLE: 503,
   TRASH_WRITE_FAILED: 500,
 };

@@ -210,6 +210,21 @@ export interface RefCandidateDto {
   matchedKeywords: string[];
   /** score < 0.6：默认不勾，但保留给人判断 */
   weak: boolean;
+  /** 该文档**自身**的检索可见性（不是事件阶段档位）；候选行直接展示它 */
+  visibility: VisibilityDto;
+  /** 去重前的 chunk 命中数（>1 表示多个正文片段命中同一篇） */
+  chunkHits: number;
+}
+
+/** 一步里真实发生的调用（过程面板的调用行）；**只记真的调了东西的**，本地计算不记 */
+export interface RefSearchCallDto {
+  kind: 'tool' | 'skill';
+  /** 机器名（给人核对，如 ki_search） */
+  name: string;
+  /** 人话动作名 */
+  label: string;
+  ms: number;
+  note?: string;
 }
 
 export interface RefSearchStepDto {
@@ -217,6 +232,7 @@ export interface RefSearchStepDto {
   ms: number;
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
+  calls?: RefSearchCallDto[];
 }
 
 export interface RefExcluded {
@@ -230,6 +246,14 @@ export interface RefSearchResultDto {
   excluded: RefExcluded;
   total: number;
   durationMs: number;
+  /** 实际发给检索的 query（过程面板展示用，不让前端自己拼） */
+  query: string;
+  /** 0 候选的原因；有候选时省略。前端据此区分空态文案 */
+  reason?: 'no-keywords' | 'empty-scope' | 'no-hits' | 'all-excluded';
+  /** 实际检索模式：fulltext = 语义侧不可用已降级，面板必须如实显示 */
+  mode?: 'hybrid' | 'fulltext';
+  degraded?: boolean;
+  degradedReason?: string;
 }
 
 export interface VisibilityFailureDto {

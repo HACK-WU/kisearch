@@ -9,6 +9,13 @@
  * · `lifecycle` 三档与后端一致：`wiki | temp | event`；期限用**相对天数** `ttlDays`。
  */
 
+import type {
+  RefCandidateDto,
+  RefSearchCallDto,
+  RefSearchResultDto,
+  RefSearchStepDto,
+} from './governanceContract';
+
 export type LifecycleKind = 'wiki' | 'temp' | 'event';
 export type Visibility = 'full' | 'fts-only' | 'hidden';
 export type TrashReason = 'temp-expired' | 'event-closed' | 'event-expired' | 'manual';
@@ -391,17 +398,59 @@ export function listRefs(scope: string, eventId: string): Promise<{ ok: true; re
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs?${new URLSearchParams({ scope }).toString()}`);
 }
 
-export function searchRefs(scope: string, eventId: string, query: string): Promise<{ ok: true; hits: Array<{ group: string; name: string; visibility: Visibility }> }> {
+/**
+ * 候选与步骤类型**直接取契约 DTO**（`governanceContract.ts`），不再本地重写一份。
+ *
+ * 此前这里有一份手抄的同名 interface，与契约文件靠人工保持一致 ——
+ * 而 parity 测试只比对「后端 contract ↔ 前端 contract」，**管不到这份手抄**，
+ * 加字段时漏改就会静默漂移。改成别名后，contract 一改这里跟着变，tsc 立刻报错。
+ */
+export type RefCandidate = RefCandidateDto;
+export type RefSearchCall = RefSearchCallDto;
+export type RefSearchStep = RefSearchStepDto;
+export type RefSearchReason = NonNullable<RefSearchResultDto['reason']>;
+
+/** 响应外壳由 `req()` 校验后补上 `ok/scope`，其余字段全部来自契约 */
+export type RefSearchResult = RefSearchResultDto & { ok: true; scope: string };
+
+/**
+ * AI 候选（S-05 §3.2 五步）。**只此一种语义** —— 按名搜索请用 `searchRefDocs`。
+ *
+ * 0 候选时看 `reason`：`no-keywords` / `empty-scope` / `no-hits` / `all-excluded`
+ * 对应四句完全不同的空态文案（尤其 empty-scope = 事件与文档不在同一 scope）。
+ */
+export function findRefCandidates(
+  scope: string,
+  eventId: string,
+  opts: { topK?: number; limit?: number } = {},
+): Promise<RefSearchResult> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs/search`, {
     method: 'POST',
-    body: JSON.stringify({ scope, query }),
+    body: JSON.stringify({ scope, ...opts }),
   });
 }
 
-export function addRefs(scope: string, eventId: string, docs: Array<{ group: string; name: string }>): Promise<{ ok: true; added: number; skipped: string[] }> {
+/** 手动按名 / 路径搜文档；传 eventId 时后端排除「已关联 / 已加入」（R31 服务端兜底） */
+export function searchRefDocs(
+  scope: string,
+  q: string,
+  eventId?: string,
+  limit = 20,
+): Promise<{ ok: true; hits: Array<{ group: string; name: string; visibility: Visibility }> }> {
+  const params = new URLSearchParams({ scope, q, limit: String(limit) });
+  if (eventId) params.set('eventId', eventId);
+  return req(`/api/governance/docs/search?${params.toString()}`);
+}
+
+export function addRefs(
+  scope: string,
+  eventId: string,
+  docs: Array<{ group: string; name: string; score?: number }>,
+  addedBy: 'ai' | 'manual' = 'manual',
+): Promise<{ ok: true; added: number; skipped: string[] }> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs`, {
     method: 'POST',
-    body: JSON.stringify({ scope, docs, addedBy: 'manual' }),
+    body: JSON.stringify({ scope, docs, addedBy }),
   });
 }
 

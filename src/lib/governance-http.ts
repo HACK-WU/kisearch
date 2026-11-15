@@ -29,6 +29,7 @@ import {
   listEvents, createEvent, updateEventTitle, transitionEvent, deleteEvent, reopenEvent, collectMembers,
 } from './events/event-service.js';
 import { listRefs, addRefs, removeRef, searchRefCandidates, searchDocsForAdd } from './events/refs-service.js';
+import { createSearchAdapter, type RefSearchFn } from './events/refs-search.js';
 import { readAllEvents, findEventIn } from './events/store.js';
 import { readStageLogs } from './events/stage-log.js';
 import { listTrash, readTrashSettings, writeTrashSettings, removeTrashItem } from './trash-store.js';
@@ -52,12 +53,42 @@ const STATUS_BY_CODE: Record<string, number> = {
   TYPE_IN_USE: 409,
   TYPE_BUILTIN: 409,
   REF_ALREADY_ASSOCIATED: 409,
+  REF_LIMIT_EXCEEDED: 409,
   EVENT_CLOSED: 409,
   EVENT_NOT_CLOSED: 409,
   DATASOURCE_LIFECYCLE_LOCKED: 403,
   FORBIDDEN_SCOPE: 403,
   DOC_NOT_FOUND: 404,
+  // 向量服务不可用是"暂时性外部故障"，不能伪装成 400 契约错误（前端据此给"改用手动添加"）
+  SEARCH_UNAVAILABLE: 503,
 };
+
+/**
+ * 检索实现按需加载。
+ *
+ * `search.ts` 会连带 vector-client / commander 等一整套检索栈；静态 import 会让
+ * `mcp-http-api` 的模块初始化多背一份（本项目对 jiti 启动耗时敏感，见项目架构记忆）。
+ * 首次调用后由 ESM 模块缓存兜住，后续零额外成本。
+ */
+let searchModulePromise: Promise<typeof import('../search.js')> | null = null;
+function getSearchModule(): Promise<typeof import('../search.js')> {
+  searchModulePromise ??= import('../search.js');
+  return searchModulePromise;
+}
+
+/**
+ * 检索适配器：懒加载 `executeSearch` 后交给 `events/refs-search.ts` 做窄化与错误翻译。
+ *
+ * 适配器只建一次（首调用时），之后复用；`getSearchModule` 保证 `ki mcp` 启动不背检索栈。
+ */
+let adapterCache: RefSearchFn | null = null;
+async function searchAdapter(args: { scope: string; query: string; topK: number }) {
+  if (!adapterCache) {
+    const { executeSearch } = await getSearchModule();
+    adapterCache = createSearchAdapter(executeSearch);
+  }
+  return adapterCache(args);
+}
 
 /**
  * 发送 JSON 并返回 `true`：本模块所有分支都是「写完就 return 已处理」，
@@ -399,14 +430,31 @@ export async function handleGovernanceRoutes(
         if (method === 'POST' && segs[3] === 'search') {
           const b = await body();
           const scope = scopeFromBody(b);
-          const q0 = str(b.query);
-          if (!q0) {
-            // 无自定义 query：走确定性候选（真实检索需注入 search 实现）
-            const result = await searchRefCandidates(scope, id, { search: async () => [] });
-            return sendJson(res, 200, { ok: true, scope, ...result, note: 'HTTP 层未接语义检索实现时返回空候选，请用手动搜索' });
+          /**
+           * **该路由只出 AI 候选**（S-05 §3.2 五步）。
+           *
+           * 2026-11-15 前这里按 `query` 有无分流：有 query 走按名子串搜索 —— 这正是
+           * 「AI 查找」把事件标题当搜索词、永远 0 命中的根因。现已拆开：
+           * 手动按名搜索走 `GET /governance/docs/search`。
+           */
+          if (str(b.query)) {
+            throw new GovernanceError(
+              'REF_SEARCH_QUERY_UNSUPPORTED',
+              '该接口只返回 AI 候选，不再接受 query；按名搜索请用 GET /governance/docs/search?scope=&q=',
+              { hint: '/governance/docs/search' },
+            );
           }
-          const hits = searchDocsForAdd(scope, q0, num(b.limit) ?? 20);
-          return sendJson(res, 200, { ok: true, scope, hits });
+          const result = await searchRefCandidates(
+            scope,
+            id,
+            { search: searchAdapter },
+            {
+              ...(num(b.topK) !== undefined ? { topK: num(b.topK) as number } : {}),
+              ...(num(b.limit) !== undefined ? { limit: num(b.limit) as number } : {}),
+              ...(num(b.threshold) !== undefined ? { threshold: num(b.threshold) as number } : {}),
+            },
+          );
+          return sendJson(res, 200, { ok: true, scope, ...result });
         }
         if (method === 'POST' && !segs[3]) {
           const b = await body();
@@ -489,7 +537,15 @@ export async function handleGovernanceRoutes(
     // ─── 文档搜索（手动添加参考文档）────────────────────
     if (segs[0] === 'docs' && segs[1] === 'search' && method === 'GET') {
       const scope = scopeFromQuery();
-      return sendJson(res, 200, { ok: true, scope, hits: searchDocsForAdd(scope, str(q.get('q')) ?? '', num(q.get('limit')) ?? 20) });
+      // 带 eventId 时排除「该事件已关联 / 已加入参考文档」（R31），排除放服务端而非前端
+      const eventId = str(q.get('eventId'));
+      return sendJson(res, 200, {
+        ok: true,
+        scope,
+        hits: searchDocsForAdd(scope, str(q.get('q')) ?? '', num(q.get('limit')) ?? 20, {
+          ...(eventId ? { eventId } : {}),
+        }),
+      });
     }
 
     // ─── 回收站 ─────────────────────────────────────────

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useAuth } from '@/lib/authContext';
 import {
   getTrashSettings, listTrash, purgeTrash, putTrashSettings, restoreTrash,
   GovernanceApiError,
@@ -44,6 +45,16 @@ export function TrashPage(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 「彻底删除」的两步确认态：勾选变化即撤销（避免选了 A 确认后误删 B） */
   const [purgeConfirm, setPurgeConfirm] = useState(false);
+
+  /**
+   * 只读账号（R34 / S-07 §3.4）：回收站可看（恢复/清理是写操作，一律禁用）。
+   * 「回收站设置」入口保持可用 —— 看设置是读；只有弹窗里的「保存」需要写权限。
+   */
+  const { can, status: authStatus } = useAuth();
+  const canWrite = can('knowledge.write');
+  const readOnlyHint = canWrite ? undefined : '需要写权限';
+  // 鉴权加载中（permissions 暂空）只禁用、不弹"只读"横幅，避免进页闪一下
+  const showReadOnlyHint = !canWrite && authStatus !== 'loading';
 
   const keyOf = (item: TrashItemView): string => `${item.group}\u0000${item.dirName}`;
 
@@ -121,8 +132,8 @@ export function TrashPage(): JSX.Element {
         <span className="gov-toolbar__spacer" />
         <button
           className="gov-btn gov-btn--sm"
-          disabled={busy || restorable.length === 0}
-          title={brokenSelected > 0 ? `${brokenSelected} 篇正文缺失，恢复只会得到空文档，已排除` : '恢复到原位置'}
+          disabled={busy || restorable.length === 0 || !canWrite}
+          title={!canWrite ? readOnlyHint : brokenSelected > 0 ? `${brokenSelected} 篇正文缺失，恢复只会得到空文档，已排除` : '恢复到原位置'}
           onClick={() => void (async () => {
             const targets = [...restorable];
             const skipped = brokenSelected;
@@ -141,7 +152,8 @@ export function TrashPage(): JSX.Element {
         </button>
         <button
           className="gov-btn gov-btn--sm gov-btn--danger-ghost"
-          disabled={busy || selectedItems.length === 0}
+          disabled={busy || selectedItems.length === 0 || !canWrite}
+          title={readOnlyHint}
           onClick={() => {
             // 不可逆操作：第一次点击只进入确认态，再点才执行
             if (!purgeConfirm) { setPurgeConfirm(true); return; }
@@ -164,6 +176,9 @@ export function TrashPage(): JSX.Element {
       </div>
 
       {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
+      {showReadOnlyHint ? (
+        <p className="gov-hint">当前账号为只读：可以查看回收站内容，恢复 / 彻底删除 / 保存设置需要写权限。</p>
+      ) : null}
 
       <div className="gov-card">
         <table className="gov-tbl">
@@ -223,16 +238,16 @@ export function TrashPage(): JSX.Element {
                     <span style={{ display: 'inline-flex', gap: 6 }}>
                       <button
                         className="gov-btn gov-btn--sm"
-                        disabled={busy || broken}
-                        title={broken ? '快照里没有正文，恢复会得到空文档；请彻底删除' : '恢复到原位置'}
+                        disabled={busy || broken || !canWrite}
+                        title={!canWrite ? readOnlyHint : broken ? '快照里没有正文，恢复会得到空文档；请彻底删除' : '恢复到原位置'}
                         onClick={() => void run(async () => {
                           const r = await restoreTrash(scope, { group: item.group, dirName: item.dirName });
                         return `已恢复「${item.name}」${r.expiresAtChanged ? '（已按原期限续期）' : ''}`;
                       })}>恢复</button>
                       <button
                         className="gov-btn gov-btn--ghost gov-btn--sm"
-                        disabled={busy || broken}
-                        title={broken ? '快照里没有正文' : '恢复并改为长期保留'}
+                        disabled={busy || broken || !canWrite}
+                        title={!canWrite ? readOnlyHint : broken ? '快照里没有正文' : '恢复并改为长期保留'}
                         onClick={() => void run(async () => {
                           const r = await restoreTrash(scope, { group: item.group, dirName: item.dirName, targetLifecycle: 'wiki' });
                         return `「${item.name}」已恢复并沉淀为 wiki（${r.lifecycle}）`;
@@ -311,11 +326,18 @@ export function TrashPage(): JSX.Element {
             </div>
             <div className="gov-modal__foot">
               <button className="gov-btn gov-btn--sm" onClick={() => setSettingsOpen(false)}>取消</button>
-              <button className="gov-btn gov-btn--sm gov-btn--primary" disabled={busy} onClick={() => void run(async () => {
-                const r = await putTrashSettings(scope, settings);
-                setSettingsOpen(false);
-                return `已保存：保留 ${r.settings.keepDays} 天 / ${r.settings.expireAction === 'purge' ? '自动清除' : '仅提醒'}`;
-              })}>保存</button>
+              <button
+                className="gov-btn gov-btn--sm gov-btn--primary"
+                disabled={busy || !canWrite}
+                title={readOnlyHint}
+                onClick={() => void run(async () => {
+                  const r = await putTrashSettings(scope, settings);
+                  setSettingsOpen(false);
+                  return `已保存：保留 ${r.settings.keepDays} 天 / ${r.settings.expireAction === 'purge' ? '自动清除' : '仅提醒'}`;
+                })}
+              >
+                保存
+              </button>
             </div>
           </div>
         </div>

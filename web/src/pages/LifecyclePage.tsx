@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useAuth } from '@/lib/authContext';
 import {
   applyLifecycle, applyLifecycleBatch, listEventTypes, listGovernanceDocs,
   GovernanceApiError,
@@ -72,6 +73,17 @@ export function LifecyclePage(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<EditTarget | null>(null);
   const [presetOpen, setPresetOpen] = useState(false);
+
+  /**
+   * 只读账号（R34 / S-07 §3.4）：**页面可进、数据可看，写入口一律禁用**。
+   * 前端禁用只是体验层——后端 `knowledge.write` 权限点仍会 403 兜底，
+   * 所以这里不做"藏起来"，而是禁用 + 说明原因，避免用户点了才发现没权限。
+   */
+  const { can, status: authStatus } = useAuth();
+  const canWrite = can('knowledge.write');
+  const readOnlyHint = canWrite ? undefined : '需要写权限';
+  // 鉴权还在加载时 permissions 为空 → 按钮先禁用（保守），但**不弹"只读"横幅**，避免每次进页闪一下
+  const showReadOnlyHint = !canWrite && authStatus !== 'loading';
 
   const keyOf = (doc: { group: string; name: string }): string => `${doc.group}\u0000${doc.name}`;
 
@@ -174,7 +186,14 @@ export function LifecyclePage(): JSX.Element {
           <span className="gov-cell-muted">{group || '全部 Group'}</span>
         </p>
         <div className="gov-head__actions">
-          <button className="gov-btn gov-btn--sm" onClick={() => setPresetOpen(true)}>＋ 新建分类</button>
+          <button
+            className="gov-btn gov-btn--sm"
+            disabled={!canWrite}
+            title={readOnlyHint}
+            onClick={() => setPresetOpen(true)}
+          >
+            ＋ 新建分类
+          </button>
         </div>
       </header>
 
@@ -207,14 +226,18 @@ export function LifecyclePage(): JSX.Element {
       </div>
 
       {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
+      {showReadOnlyHint ? (
+        <p className="gov-hint">当前账号为只读：可以查看分类与期限，改分类 / 新建分类入口已禁用。</p>
+      ) : null}
 
       {selectedDocs.length > 0 ? (
         <div className="gov-selbar">
           <strong>已选 {selectedDocs.length} 篇</strong>
-          <button className="gov-btn gov-btn--sm" disabled={busy} onClick={() => submitBatch('wiki')}>改为 wiki</button>
-          <button className="gov-btn gov-btn--sm" disabled={busy} onClick={() => submitBatch('temp', 7)}>改为临时 7 天</button>
-          <button className="gov-btn gov-btn--sm" disabled={busy} onClick={() => submitBatch('temp', 30)}>改为临时 30 天</button>
+          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('wiki')}>改为 wiki</button>
+          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('temp', 7)}>改为临时 7 天</button>
+          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('temp', 30)}>改为临时 30 天</button>
           <span className="gov-selbar__spacer" />
+          {/* 取消选择不改数据，只读账号照常可用 */}
           <button className="gov-btn gov-btn--sm gov-btn--ghost" disabled={busy} onClick={() => setSelected(new Set())}>
             取消选择
           </button>
@@ -272,8 +295,8 @@ export function LifecyclePage(): JSX.Element {
                 <td>
                   <button
                     className="gov-btn gov-btn--ghost gov-btn--sm"
-                    disabled={doc.imported}
-                    title={doc.imported ? '数据源文档固定长期保留' : '改分类'}
+                    disabled={doc.imported || !canWrite}
+                    title={!canWrite ? readOnlyHint : doc.imported ? '数据源文档固定长期保留' : '改分类'}
                     onClick={() => setEditing({
                       group: doc.group,
                       name: doc.name,
@@ -350,7 +373,12 @@ export function LifecyclePage(): JSX.Element {
             </div>
             <div className="gov-modal__foot">
               <button className="gov-btn gov-btn--sm" onClick={() => setEditing(null)}>取消</button>
-              <button className="gov-btn gov-btn--sm gov-btn--primary" disabled={busy || editing.imported} onClick={submitEdit}>
+              <button
+                className="gov-btn gov-btn--sm gov-btn--primary"
+                disabled={busy || editing.imported || !canWrite}
+                title={readOnlyHint}
+                onClick={submitEdit}
+              >
                 应用
               </button>
             </div>
@@ -384,6 +412,9 @@ function PresetModal(args: { scope: string; onClose: () => void; onSaved: (text:
   const [days, setDays] = useState(30);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // 弹窗虽只从禁用入口进不来，仍按「写按钮一律禁用」的口径兜住（将来换入口不会漏）
+  const { can } = useAuth();
+  const canWrite = can('knowledge.write');
 
   const save = async (): Promise<void> => {
     if (!name.trim()) {
@@ -469,7 +500,14 @@ function PresetModal(args: { scope: string; onClose: () => void; onSaved: (text:
         </div>
         <div className="gov-modal__foot">
           <button className="gov-btn gov-btn--sm" onClick={args.onClose}>取消</button>
-          <button className="gov-btn gov-btn--sm gov-btn--primary" disabled={busy} onClick={() => void save()}>新建分类</button>
+          <button
+            className="gov-btn gov-btn--sm gov-btn--primary"
+            disabled={busy || !canWrite}
+            title={canWrite ? undefined : '需要写权限'}
+            onClick={() => void save()}
+          >
+            新建分类
+          </button>
         </div>
       </div>
     </div>

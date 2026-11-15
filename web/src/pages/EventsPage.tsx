@@ -6,16 +6,18 @@
  * 可见性提示条、关联文档、参考文档（AI 查找 / 添加）、AI 同源操作代码块。
  *
  * 与 demo 的两处差异：
- *   · 「AI 分析」按钮未接（demo 里也只弹提示），暂不放置；
- *   · 参考文档的「AI 查找」走确定性检索（后端不在此接 LLM），无命中时给出手动搜索入口。
+ *   · 「AI 分析」是独立的仓库代码定位入口（`AiAnalyzeModal`），与知识库检索无关；
+ *   · 参考文档的「AI 查找」走**确定性检索**（不调 LLM），候选带分数与原因，由人勾选确认。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useAuth } from '@/lib/authContext';
+import { FindRefModal } from '@/components/governance/FindRefModal';
 import {
   addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts, listEventTypes, listEvents, listRefs, removeRef,
-  reopenEvent, searchRefs, setEventStage, updateEventType,
+  reopenEvent, searchRefDocs, setEventStage, updateEventType,
   GovernanceApiError,
   type EventDetail, type EventTypeView, type EventView, type RefItem, type StagePatch,
   type Visibility,
@@ -81,7 +83,21 @@ export function EventsPage(): JSX.Element {
   /** 「删除事件」两步确认（会清空阶段日志，不可恢复） */
   const [delConfirm, setDelConfirm] = useState(false);
   const [addRefOpen, setAddRefOpen] = useState(false);
+  /** 「AI 查找」弹窗：打开即请求候选，不再一点就自动加入（R28/R29） */
+  const [findRefOpen, setFindRefOpen] = useState(false);
   const [typeFilter, setTypeFilter] = useState('');
+
+  // 页面只判 capability，不判 role（authContext 的约定）
+  const { can, status: authStatus } = useAuth();
+  const canWrite = can('knowledge.write');
+  /**
+   * R34 / S-07 §3.4：只读账号可进页面、可看全部信息，写入口统一禁用并在 title 说明原因。
+   * 前端禁用只是体验层，后端 `knowledge.write` 仍会 403 兜底。
+   * 「AI 查找」不在此列 —— 检索是读，只有弹窗里的「加入」需要写（由弹窗自己门禁）。
+   */
+  const readOnlyHint = canWrite ? undefined : '需要写权限';
+  // 鉴权加载中（permissions 暂空）只禁用、不弹"只读"横幅，避免进页闪一下
+  const showReadOnlyHint = !canWrite && authStatus !== 'loading';
 
   const loadList = useCallback(async () => {
     try {
@@ -203,7 +219,12 @@ export function EventsPage(): JSX.Element {
           </span>
         </p>
         <div className="gov-head__actions">
-          <button className="gov-btn gov-btn--sm" onClick={() => setNewEventOpen(true)}>
+          <button
+            className="gov-btn gov-btn--sm"
+            disabled={!canWrite}
+            title={readOnlyHint}
+            onClick={() => setNewEventOpen(true)}
+          >
             ＋ 新建事件
           </button>
         </div>
@@ -236,6 +257,12 @@ export function EventsPage(): JSX.Element {
       </div>
 
       {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
+      {showReadOnlyHint ? (
+        <p className="gov-hint">
+          当前账号为只读：可以查看事件、阶段与可见性；新建 / 流转 / 删除 / 编辑类型需要写权限。
+          「AI 查找」可照常用，只有「加入参考文档」需要写权限。
+        </p>
+      ) : null}
 
       {tab === 'types' ? (
         <>
@@ -252,11 +279,18 @@ export function EventsPage(): JSX.Element {
             <span className="gov-cell-muted">
               {selectedType?.builtin ? '内置类型，不可删除' : '自定义类型'}
             </span>
-            <button className="gov-btn gov-btn--sm" disabled={busy} onClick={() => setNewTypeOpen(true)}>＋ 新建类型</button>
+            <button
+              className="gov-btn gov-btn--sm"
+              disabled={busy || !canWrite}
+              title={readOnlyHint}
+              onClick={() => setNewTypeOpen(true)}
+            >
+              ＋ 新建类型
+            </button>
             <button
               className="gov-btn gov-btn--sm gov-btn--danger-ghost"
-              disabled={busy || !selectedType || selectedType.builtin}
-              title={selectedType?.builtin ? '内置类型不可删除' : '删除该类型（仍有事件在用时会被拒绝）'}
+              disabled={busy || !selectedType || selectedType.builtin || !canWrite}
+              title={!canWrite ? readOnlyHint : selectedType?.builtin ? '内置类型不可删除' : '删除该类型（仍有事件在用时会被拒绝）'}
               onClick={() => void removeType()}
             >
               删除类型
@@ -297,7 +331,8 @@ export function EventsPage(): JSX.Element {
                                   key={value}
                                   type="button"
                                   aria-pressed={stage.visibility === value}
-                                  disabled={busy}
+                                  disabled={busy || !canWrite}
+                                  title={readOnlyHint}
                                   onClick={() => void patchType((stages) => {
                                     const next = [...stages];
                                     next[i] = { ...next[i], visibility: value };
@@ -319,8 +354,8 @@ export function EventsPage(): JSX.Element {
                           <td>
                             <button
                               className="gov-btn gov-btn--ghost gov-btn--sm"
-                              disabled={busy || i === selectedType.stages.length - 1}
-                              title={i === selectedType.stages.length - 1 ? '末位是终态，不能停用' : '停用后不能再流转到该阶段'}
+                              disabled={busy || i === selectedType.stages.length - 1 || !canWrite}
+                              title={!canWrite ? readOnlyHint : i === selectedType.stages.length - 1 ? '末位是终态，不能停用' : '停用后不能再流转到该阶段'}
                               onClick={() => void patchType((stages) => {
                                 const next = [...stages];
                                 next[i] = { ...next[i], disabled: !next[i].disabled };
@@ -338,7 +373,8 @@ export function EventsPage(): JSX.Element {
                 <div className="gov-card__foot">
                   <button
                     className="gov-btn gov-btn--sm"
-                    disabled={busy}
+                    disabled={busy || !canWrite}
+                    title={readOnlyHint}
                     onClick={() => setAddStageOpen(true)}
                   >
                     ＋ 追加阶段
@@ -435,15 +471,22 @@ export function EventsPage(): JSX.Element {
                       AI 分析
                     </button>
                     {closed ? (
-                      <button className="gov-btn gov-btn--sm" disabled={busy} onClick={() => void run(async () => {
-                        const r = await reopenEvent(scope, active.id);
-                        return r.hint;
-                      })}>重新打开</button>
+                      <button
+                        className="gov-btn gov-btn--sm"
+                        disabled={busy || !canWrite}
+                        title={readOnlyHint}
+                        onClick={() => void run(async () => {
+                          const r = await reopenEvent(scope, active.id);
+                          return r.hint;
+                        })}
+                      >
+                        重新打开
+                      </button>
                     ) : null}
                     <button
                       className="gov-btn gov-btn--sm gov-btn--danger-ghost"
-                      disabled={busy || !closed}
-                      title={closed ? '删除事件：关联文档改为长期保留' : '事件未收口不能删除，先流转到末位阶段'}
+                      disabled={busy || !closed || !canWrite}
+                      title={!canWrite ? readOnlyHint : closed ? '删除事件：关联文档改为长期保留' : '事件未收口不能删除，先流转到末位阶段'}
                       onClick={() => {
                         // 不可逆（事件与阶段日志一并删除）：第一次点击只进入确认态
                         if (!delConfirm) { setDelConfirm(true); return; }
@@ -460,7 +503,8 @@ export function EventsPage(): JSX.Element {
                     {closed ? null : (
                       <button
                         className="gov-btn gov-btn--sm gov-btn--primary"
-                        disabled={busy}
+                        disabled={busy || !canWrite}
+                        title={readOnlyHint}
                         onClick={() => setTransOpen(true)}
                       >
                         流转
@@ -518,21 +562,22 @@ export function EventsPage(): JSX.Element {
                     <span className="gov-sect__title">参考文档</span>
                     <span className="gov-sect__hint">外部引用，不随事件阶段变化</span>
                     <span className="gov-sect__actions">
+                      {/*
+                        打开弹窗即请求候选：不再"点一下自动加前 3 篇"。
+                        旧实现把事件标题当手动搜索词发出去，命中就静默加入 —— 既不是 AI 查找，
+                        也违反 R29（低分与未确认的项不该被默认采纳）。
+                      */}
                       <button
                         className="gov-btn gov-btn--sm"
                         disabled={busy}
-                        onClick={() => void run(async () => {
-                          const r = await searchRefs(scope, active.id, active.title);
-                          if (r.hits.length === 0) return '没有找到可加入的文档（可点「＋ 添加」手动搜索）';
-                          const add = await addRefs(scope, active.id, r.hits.slice(0, 3).map((h) => ({ group: h.group, name: h.name })));
-                          return `已加入 ${add.added} 篇参考文档`;
-                        })}
+                        onClick={() => setFindRefOpen(true)}
                       >
                         AI 查找
                       </button>
                       <button
                         className="gov-btn gov-btn--ghost gov-btn--sm"
-                        disabled={busy}
+                        disabled={busy || !canWrite}
+                        title={readOnlyHint}
                         onClick={() => setAddRefOpen(true)}
                       >
                         ＋ 添加
@@ -553,10 +598,15 @@ export function EventsPage(): JSX.Element {
                           <span className="gov-vis__dot" />
                           {VIS_TEXT[ref.visibility]}
                         </span>
-                        <button className="gov-btn gov-btn--ghost gov-btn--sm" disabled={busy} onClick={() => void run(async () => {
-                          await removeRef(scope, active.id, ref.group, ref.name);
-                          return `已移除参考文档「${ref.name}」`;
-                        })}>×</button>
+                        <button
+                          className="gov-btn gov-btn--ghost gov-btn--sm"
+                          disabled={busy || !canWrite}
+                          title={readOnlyHint ?? '移除该参考文档'}
+                          onClick={() => void run(async () => {
+                            await removeRef(scope, active.id, ref.group, ref.name);
+                            return `已移除参考文档「${ref.name}」`;
+                          })}
+                        >×</button>
                       </div>
                     </div>
                   ))}
@@ -629,6 +679,35 @@ export function EventsPage(): JSX.Element {
             const pending = r.pending.length > 0 ? `；索引重建中（${r.pending.join('/')}）` : '';
             return `已流转到「${r.to.name}」${r.closed ? '（已收口）' : ''}${pending}`;
           })}
+        />
+      ) : null}
+
+      {findRefOpen && active ? (
+        <FindRefModal
+          scope={scope}
+          eventId={active.id}
+          canWrite={canWrite}
+          context={{
+            title: active.title,
+            shortId: active.shortId,
+            ...(type?.name ? { typeName: type.name } : {}),
+            stageName: type?.stages.find((s) => s.key === active.stageKey)?.name ?? '—',
+            assocCount: memberCount,
+            scope,
+          }}
+          onClose={() => setFindRefOpen(false)}
+          onAdded={(added, skipped) => {
+            // 局部刷新参考文档区：搜索本身没写数据，不该触发整页重载与列表重排
+            setMessage({
+              tone: 'ok',
+              text: `已加入 ${added} 篇参考文档${skipped > 0 ? `，跳过 ${skipped} 篇（已存在）` : ''}`,
+            });
+            void loadDetail(active.id);
+          }}
+          onSwitchToManual={() => {
+            setFindRefOpen(false);
+            setAddRefOpen(true);
+          }}
         />
       ) : null}
 
@@ -845,20 +924,37 @@ function AddRefModal(args: {
 
   const keyOf = (h: { group: string; name: string }): string => `${h.group}/${h.name}`;
   const addedKeys = useMemo(() => new Set(args.existing.map(keyOf)), [args.existing]);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const query = q.trim();
-    if (!query) { setHits([]); setErr(null); setSearching(false); return; }
     let alive = true;
     setSearching(true);
+    // 空查询也发一次：后端 q 为空时返回"可加入的前 N 篇"（对齐 demo —— 打开弹窗就能看到有哪些可加，
+    // 此前空查询直接短路成空数组，弹窗里一片空白且没有任何提示）
+    const delay = q.trim() ? 250 : 0;
     const timer = window.setTimeout(() => {
-      void searchRefs(args.scope, args.eventId, query)
-        .then((r) => { if (alive) { setHits(r.hits); setErr(null); } })
+      // 手动搜索与 AI 候选是两个语义：走 docs/search，并把 eventId 带上让后端排除已关联/已加入（R31）
+      void searchRefDocs(args.scope, q.trim(), args.eventId)
+        .then((r) => {
+          if (!alive) return;
+          setHits(r.hits);
+          setErr(null);
+          // 结果换了一批就剪掉"看不见的选中"：否则按钮说"加入所选 1 篇"，
+          // 用户却在当前列表里找不到那一篇（demo 每轮重渲染会丢弃勾选，等价于这个剪枝）
+          setPicked((prev) => {
+            const visible = new Set(r.hits.map(keyOf));
+            const next = prev.filter((k) => visible.has(k));
+            return next.length === prev.length ? prev : next;
+          });
+        })
         .catch((e: Error) => { if (alive) { setHits([]); setErr(e.message); } })
         .finally(() => { if (alive) setSearching(false); });
-    }, 250);
+    }, delay);
     return () => { alive = false; window.clearTimeout(timer); };
   }, [q, args.scope, args.eventId]);
+
+  // 结果换了一批就回到顶部：否则上一批的 scrollTop 会让首行被裁掉半截（走查截图里就是这样）
+  useEffect(() => { listRef.current?.scrollTo({ top: 0 }); }, [hits]);
 
   const toggle = (key: string): void => setPicked((prev) => (
     prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
@@ -881,7 +977,7 @@ function AddRefModal(args: {
             value={q}
             onChange={(e) => setQ(e.target.value)}
           />
-          <div className="gov-cand-list">
+          <div className="gov-cand-list" ref={listRef}>
             {hits.map((h) => {
               const key = keyOf(h);
               const already = addedKeys.has(key);
@@ -895,24 +991,23 @@ function AddRefModal(args: {
                   />
                   <span>
                     <span className="gov-cand__name">{h.name}</span>
-                    <span className="gov-cand__meta">{h.group}</span>
-                  </span>
-                  {already ? (
-                    <span className="gov-cand__meta">已加入</span>
-                  ) : (
-                    <span className={`gov-vis gov-vis--${VIS_CLASS[h.visibility]}`}>
-                      <span className="gov-vis__dot" />
-                      {VIS_TEXT[h.visibility]}
+                    {/* 与 demo 同构：一行小字 `group · 可见性`，已加入的（竞态）额外标注 */}
+                    <span className="gov-cand__meta">
+                      {h.group} · {VIS_TEXT[h.visibility]}{already ? ' · 已加入' : ''}
                     </span>
-                  )}
+                  </span>
                 </label>
               );
             })}
           </div>
           {err ? <span className="gov-error">{err}</span> : null}
           {!err && searching ? <span className="gov-hint">搜索中…</span> : null}
-          {!err && !searching && q.trim() && hits.length === 0 ? (
-            <span className="gov-hint">{`scope「${args.scope}」下没有匹配的文档：换个关键词，或确认顶部 scope 是否选对（事件与知识文档可能不在同一个库）。`}</span>
+          {!err && !searching && hits.length === 0 ? (
+            <span className="gov-hint">
+              {q.trim()
+                ? '没有匹配的文档（已排除关联文档与已加入的参考文档）。若确信库里有，确认顶部 scope —— 事件与知识文档可能不在同一个库。'
+                : `scope「${args.scope}」里没有可加入的文档：可能都已关联 / 已加入，或这个库本身没有文档。`}
+            </span>
           ) : null}
           <span className="gov-hint">只建立引用，不修改文档本身的分类与可见性。</span>
         </div>
@@ -923,7 +1018,7 @@ function AddRefModal(args: {
             disabled={args.busy || pickedDocs.length === 0}
             onClick={() => { args.onClose(); args.onAdd(pickedDocs); }}
           >
-            加入所选{pickedDocs.length > 0 ? `（${pickedDocs.length}）` : ''}
+            {pickedDocs.length === 0 ? '未选择' : `加入所选 ${pickedDocs.length} 篇`}
           </button>
         </div>
       </div>

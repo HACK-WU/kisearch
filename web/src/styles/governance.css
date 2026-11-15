@@ -478,6 +478,193 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── AI 查找候选（demo .cand 的 AI 变体：多一行 why、右侧分数） ── */
+.gov-cand--ai { align-items: start; }
+.gov-cand__why {
+  margin: 2px 0 0;
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.6;
+  color: var(--ki-color-text-muted);
+}
+.gov-cand__score {
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ki-color-primary);
+  white-space: nowrap;
+}
+.gov-cand__score--weak { color: var(--ki-color-text-subtle); font-weight: 400; }
+
+/* ════════ AI 检索过程（demo .ai-proc*）════════
+   一段**可折叠的执行日志**，不是对话气泡：没有打字机、没有回复框。
+   数字全部来自后端 steps；后端是一次请求，所以不存在"逐步推进"的中间态。 */
+.gov-ai-proc {
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  overflow: hidden;
+}
+.gov-ai-proc__head {
+  display: flex;
+  align-items: center;
+  gap: var(--ki-space-2);
+  width: 100%;
+  padding: 8px var(--ki-space-3);
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: var(--ki-font-size-sm);
+  color: var(--ki-color-text);
+  text-align: left;
+  cursor: pointer;
+}
+.gov-ai-proc__head:disabled { cursor: default; }
+.gov-ai-proc__title { font-weight: 500; }
+.gov-ai-proc__time {
+  margin-left: auto;
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+  font-variant-numeric: tabular-nums;
+}
+.gov-ai-proc__chev {
+  font-size: 10px;
+  color: var(--ki-color-text-subtle);
+  transition: transform var(--ki-motion-fast);
+}
+.gov-ai-proc__head[aria-expanded='false'] .gov-ai-proc__chev { transform: rotate(-90deg); }
+.gov-ai-proc__spin {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--ki-color-primary);
+  border-top-color: transparent;
+  animation: gov-ai-spin 700ms linear infinite;
+}
+/* 完成态：转圈变实心圆点（内圈用底色挖空，不新增 token） */
+.gov-ai-proc__spin[data-done] {
+  animation: none;
+  border-color: var(--ki-color-primary);
+  background: var(--ki-color-primary);
+  box-shadow: inset 0 0 0 2.5px var(--ki-color-bg-secondary);
+}
+@keyframes gov-ai-spin { to { transform: rotate(360deg); } }
+.gov-ai-proc__steps {
+  margin: 0;
+  padding: var(--ki-space-2) var(--ki-space-3) var(--ki-space-3);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-top: 1px dashed var(--ki-color-border);
+}
+.gov-ai-step {
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr);
+  gap: 7px;
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.65;
+  color: var(--ki-color-text-muted);
+}
+.gov-ai-step__mark {
+  display: grid;
+  place-items: center;
+  width: 13px;
+  height: 13px;
+  margin-top: 2px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ki-color-primary);
+  background: var(--ki-color-primary);
+  font-size: 8px;
+  line-height: 1;
+  color: #fff;
+}
+.gov-ai-step b { color: var(--ki-color-text); font-weight: 600; }
+
+/* 真实调用行（S-05 §3.3）：结构**直接复用 AI 对话的工具行** ——
+   `.ki-chat-tl__node--tool`（绿点）/ `__skill`（紫胶囊）/ `__act` / `__tool` / `__stat`
+   都是 ki.css 里现成的类，这里只补容器节奏与降级说明色，不改那些类的任何属性。
+   之所以不新造 `.gov-ai-call*`：同一套"调用行"在站内应只有一种长相。 */
+.gov-ai-calls { display: flex; flex-direction: column; gap: 2px; margin-top: 3px; }
+.gov-ai-call__note { color: var(--ki-color-warning); font-size: var(--ki-font-size-xs); }
+
+/* 降级提示：语义不可用改走全文时**必须显式说出来**，不能让人以为跑的是 hybrid */
+.gov-ai-proc__degraded {
+  margin: 0;
+  padding: 5px var(--ki-space-3) 6px;
+  border-top: 1px dashed var(--ki-color-border);
+  background: var(--ki-color-warning-soft);
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.6;
+  color: var(--ki-color-warning);
+}
+.gov-ai-step__body { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.gov-ai-step__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gov-ai-step__head:disabled { cursor: default; }
+.gov-ai-step__text { min-width: 0; }
+.gov-ai-step__ms {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ki-color-text-subtle);
+}
+.gov-ai-step__chev {
+  flex: none;
+  margin-left: auto;
+  font-size: 9px;
+  line-height: 1.9;
+  color: var(--ki-color-text-subtle);
+  opacity: 0;
+  transition: opacity var(--ki-motion-fast), transform var(--ki-motion-fast);
+}
+.gov-ai-step__head:hover .gov-ai-step__chev,
+.gov-ai-step__head:focus-visible .gov-ai-step__chev,
+.gov-ai-step__head[aria-expanded='true'] .gov-ai-step__chev { opacity: 1; }
+.gov-ai-step__head[aria-expanded='true'] .gov-ai-step__chev { transform: rotate(180deg); }
+.gov-ai-step__detail {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 4px;
+  background: var(--ki-color-surface);
+  font-size: 10px;
+  line-height: 1.75;
+  color: var(--ki-color-text-muted);
+}
+.gov-ai-step__detail dl { margin: 0; display: grid; gap: 3px; }
+.gov-ai-step__detail dl > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; }
+.gov-ai-step__detail dt { color: var(--ki-color-text-subtle); white-space: nowrap; }
+.gov-ai-step__detail dd {
+  margin: 0;
+  font-family: var(--ki-font-mono);
+  color: var(--ki-color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* 检索失败：错误条 + 退路（不关弹窗，别让用户丢掉上下文） */
+.gov-ai-error {
+  display: grid;
+  gap: var(--ki-space-2);
+  padding: var(--ki-space-3);
+  border: 1px solid var(--ki-color-danger-soft);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-danger-soft);
+  color: var(--ki-color-danger-ink);
+  font-size: var(--ki-font-size-sm);
+}
+.gov-ai-error__actions { display: flex; gap: var(--ki-space-2); }
 /* 弹窗内的分段控件：白卡在弹窗底色上不够显，选中态补主色淡底（demo `.modal .seg` 同款） */
 .gov-modal .gov-seg button[aria-pressed='true'] {
   background: var(--ki-color-primary-soft);
