@@ -28,6 +28,8 @@ let root = '';
 let chatDir = '';
 let server: Server;
 let handleChatRoutes: (req: never, res: never, url: URL, ctx: unknown) => Promise<boolean>;
+/** 按请求覆盖 ctx（只读门禁用例）：缺省空对象 = 本地全权 */
+let ctxExtra: Record<string, unknown> = {};
 
 /** 配置文件落点（与 prompt-config.ts::promptConfigPath 同口径） */
 const configFile = (): string => path.join(chatDir, 'prompt-config.json');
@@ -69,6 +71,8 @@ before(async () => {
       const handled = await handleChatRoutes(rq as never, rs as never, url, {
         authScopes: null,
         configSnapshot: cfgSnapshot,
+        // 只读门禁用例按请求覆盖（缺省不传 = 本地全权，与既有用例口径一致）
+        ...ctxExtra,
       });
       if (!handled) {
         rs.writeHead(404, { 'Content-Type': 'application/json' });
@@ -235,6 +239,38 @@ describe('PUT /api/chat/prompt-config', () => {
     assert.equal(cfg.prompt.content, def.prompt.content, '基础提示词应回到当前默认规则');
     assert.deepEqual(cfg.skills.map((s) => [s.id, s.content]), def.skills.map((s) => [s.id, s.content]));
     assert.deepEqual(cfg.tools, def.tools, '工具开关应回到默认（只读开、写删关）');
+  });
+});
+
+/**
+ * 只读门禁（2026-11-15 · AI 设置入口）
+ *
+ * 此前 PUT 只看「是否持有全 scope」—— viewer 角色若拿到 all-scope token 仍能改全局 AI 配置。
+ * 本组锁住能力维度：缺 `knowledge.write` 一律 403，且**不落盘**。
+ */
+describe('PUT /api/chat/prompt-config · 只读能力门禁', () => {
+  it('capabilities 缺 knowledge.write → 403，且请求被拒时不落盘', async () => {
+    const before = fs.existsSync(configFile()) ? fs.readFileSync(configFile(), 'utf-8') : null;
+    ctxExtra = { capabilities: new Set(['knowledge.read', 'chat.use']) };
+    try {
+      const r = await api('PUT', '/api/chat/prompt-config', { prompt: { content: '只读不该写进来' } });
+      assert.equal(r.status, 403);
+      assert.match(String(r.json?.error ?? ''), /knowledge\.write/, '错误文案要点明缺哪个能力');
+      const after2 = fs.existsSync(configFile()) ? fs.readFileSync(configFile(), 'utf-8') : null;
+      assert.equal(after2, before, '被拒的请求不得改动配置文件');
+    } finally {
+      ctxExtra = {};
+    }
+  });
+
+  it('capabilities 含 knowledge.write → 放行（能力与 scope 两道都要过）', async () => {
+    ctxExtra = { capabilities: new Set(['knowledge.read', 'knowledge.write']) };
+    try {
+      const r = await api('PUT', '/api/chat/prompt-config', { prompt: { content: '有写权限应放行' } });
+      assert.equal(r.status, 200);
+    } finally {
+      ctxExtra = {};
+    }
   });
 });
 

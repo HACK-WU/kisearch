@@ -90,6 +90,7 @@ import { projectNextContextChars, runToolLoop } from './retrieval/tool-loop.js';
 import { summarizeForCompaction } from './compaction.js';
 import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
 import {
+  CAPABILITY_PROMPT_MAX_CHARS,
   CONTEXT_CHARS_MAX,
   MAX_SKILLS,
   MCP_TOOL_GROUPS,
@@ -236,8 +237,19 @@ function requireScope(ctx: ChatRouteContext, scope: string, via: string, res: Se
   return true;
 }
 
-/** 全局配置（包括内容外发确认）只能由本地或全局授权身份写入。 */
+/**
+ * 全局配置（包括内容外发确认）只能由本地或全局授权身份写入。
+ *
+ * ★ 2026-11-15（AI 设置入口）：在 scope 判定**之外**补一层能力判定。
+ *   此前只看「是否持有全 scope」—— 只读角色（viewer）若拿到 all-scope 的 token，
+ *   仍能改全局 AI 提示词。`capabilities` 缺省 = 不过滤（本地管理员 / 旧调用方 / 测试），
+ *   与 ctx 里其余能力判定的口径一致。
+ */
 function requireGlobalConfigWrite(res: ServerResponse, ctx: ChatRouteContext): boolean {
+  if (ctx.capabilities && !ctx.capabilities.has('knowledge.write')) {
+    sendErr(res, 403, 'FORBIDDEN', 'Forbidden: 当前角色无写权限（knowledge.write），不能修改全局 AI 配置');
+    return false;
+  }
   if (ctx.authScopes === null || ctx.authScopes.includes(ALL_SCOPES)) return true;
   sendErr(res, 403, 'SCOPE_FORBIDDEN', 'Forbidden: 无权修改全局对话配置');
   return false;
@@ -621,6 +633,10 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       searchHitsMin: 1,
       searchHitsMax: CHAT_BUDGET.maxHitsPerCallHardMax,
       searchHitsDefault: CHAT_BUDGET.maxHitsPerCall,
+      // ── 能力级提示词（AI 分析 / AI 查找，2026-11-15）──
+      // 前端不硬编码上限；旧 daemon 不返回这两个字段 → 前端据此判定「后端可能未重启」并 fail-loud
+      analysisPromptMaxChars: CAPABILITY_PROMPT_MAX_CHARS,
+      findPromptMaxChars: CAPABILITY_PROMPT_MAX_CHARS,
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,

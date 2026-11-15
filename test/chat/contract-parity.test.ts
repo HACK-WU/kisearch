@@ -20,6 +20,12 @@ import path from 'node:path';
 
 const BACK = path.resolve(import.meta.dirname, '../../src/lib/chat/chat-contract.ts');
 const FRONT = path.resolve(import.meta.dirname, '../../web/src/api/chatContract.ts');
+/**
+ * `PromptConfig` 的**后端定义不在 `chat-contract.ts`**，而在 `prompt-config.ts`
+ * （它是"用户可编辑配置"，不属于冻结的消息/事件契约）。前端那份副本写在 `chatContract.ts`，
+ * 于是这条契约此前**没有任何机械保证** —— 2026-11-15 新增能力级提示词时补上比对。
+ */
+const BACK_PROMPT_CONFIG = path.resolve(import.meta.dirname, '../../src/lib/chat/prompt-config.ts');
 
 function read(p: string): string {
   assert.ok(fs.existsSync(p), `契约文件缺失：${p}`);
@@ -113,6 +119,18 @@ describe('契约对齐 · 数据模型', () => {
       extractTypeAliasBody(read(BACK), 'ChatToolArgsDisplay'),
     );
     assert.equal(extractTypeAliasBody(read(BACK), 'ChatToolArgsDisplay'), 'Record<string, string | number | boolean>');
+  });
+
+  it('PromptConfig / CapabilityPrompt 字段集合两侧一致（2026-11-15 新增能力级提示词）', () => {
+    assert.deepEqual(
+      extractInterfaceFields(read(FRONT), 'PromptConfig'),
+      extractInterfaceFields(read(BACK_PROMPT_CONFIG), 'PromptConfig'),
+      'PromptConfig 漂移：前端 chatContract.ts 与后端 prompt-config.ts 字段不一致',
+    );
+    assert.deepEqual(
+      extractInterfaceFields(read(FRONT), 'CapabilityPrompt'),
+      extractInterfaceFields(read(BACK_PROMPT_CONFIG), 'CapabilityPrompt'),
+    );
   });
 
   it('CHAT_REF_* 上限常量两侧一致（REQ-20261009-002）', () => {

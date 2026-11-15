@@ -33,6 +33,7 @@ import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
 import { ChatStoreContext } from '@/chat/chatStoreContext';
 import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
+import { aiSettingsHref, isAiSettingsPath, resolveAiSettingsBack } from '@/lib/aiSettingsUrl';
 import { DOC_FIND_OPEN_EVENT, pickFindSeed, type DocFindOpenDetail } from '@/lib/docFind';
 import webPackage from '../../package.json';
 
@@ -347,13 +348,33 @@ export function AppShell(): JSX.Element {
    * 页面身份只剩页内小字面包屑，看起来像"没有标题"（2026-11-15 用户反馈）。
    */
   const govLabel = GOVERNANCE_LABELS.find(([path]) => location.pathname.startsWith(path))?.[1];
-  const currentLabel = govLabel ?? navItems.find((item) =>
-    item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
-  )?.label ?? (location.pathname.startsWith('/users')
-    ? '用户管理'
-    : location.pathname.startsWith('/profile')
-      ? '个人中心'
-      : '总览');
+  /**
+   * AI 设置（2026-11-15）：它不在 `NAV_MAIN` 里（不是一级导航项，只从顶栏入口进），
+   * 因此 H1 必须单独查表 —— 否则访问 `/settings/ai` 时标题会显示成「总览」。
+   */
+  const aiSettingsActive = isAiSettingsPath(location.pathname);
+  /**
+   * 顶栏「AI 设置」= **toggle**：已在设置页时再点一次 = 关闭并回到进入前的页面。
+   * 与「AI 对话」按钮同一种手感（用户 2026-11-15 反馈："再点一下应该能关闭"）。
+   * 关闭目标取 URL 上的 `from`（经白名单校验），因此从事件页 / 对话面板进来都能原路返回。
+   */
+  const toggleAiSettings = useCallback((): void => {
+    if (aiSettingsActive) {
+      navigate(resolveAiSettingsBack(new URLSearchParams(location.search).get('from')));
+      return;
+    }
+    navigate(aiSettingsHref({ from: `${location.pathname}${location.search}` }));
+  }, [aiSettingsActive, location.pathname, location.search, navigate]);
+
+  const currentLabel = aiSettingsActive
+    ? 'AI 设置'
+    : govLabel ?? navItems.find((item) =>
+      item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
+    )?.label ?? (location.pathname.startsWith('/users')
+      ? '用户管理'
+      : location.pathname.startsWith('/profile')
+        ? '个人中心'
+        : '总览');
   const { theme, toggle } = useTheme();
   /** 左侧主导航收起态：本地持久化（2026-10-13，此前只存 state、刷新即复位） */
   const [sidebarHidden, setSidebarHidden] = useState(readSidebarHidden);
@@ -680,6 +701,23 @@ export function AppShell(): JSX.Element {
                     <path d="M7 11h.01M11 11h.01M15 11h.01" strokeWidth="3" />
                   </svg>
                   <span className="ki-topbar__chat-label">AI 对话</span>
+                </button>
+                {/*
+                  AI 设置入口（2026-11-15）：与「AI 对话」并列，任意页可达。
+                  此前 AI 配置只能从对话面板头部的「配置」进入 —— 在事件页想调提示词
+                  必须"开面板 → 点配置 → 再关掉"，属于纯粹的绕路。
+                  `from` 带上当前地址，设置页的返回按钮据此回到来源页（白名单校验）。
+                */}
+                <button
+                  type="button"
+                  className="ki-topbar__chat-toggle"
+                  onClick={toggleAiSettings}
+                  title={aiSettingsActive ? '关闭 AI 设置（返回上一页）' : 'AI 设置：提示词 / Skill / 工具 / 预算'}
+                  aria-label={aiSettingsActive ? '关闭 AI 设置' : 'AI 设置'}
+                  aria-pressed={aiSettingsActive}
+                >
+                  <Icon name="sliders" />
+                  <span className="ki-topbar__chat-label">AI 设置</span>
                 </button>
                 <Link to="/tasks" className={`ki-global-task-link ki-global-task-link--${taskTone}`} aria-live="polite" title={failedTasks[0]?.error ?? partialTasks[0]?.error ?? taskStatus}>
                   {taskTone === 'running' ? <span className="ki-task-spinner" aria-hidden="true" /> : <span aria-hidden="true">{taskTone === 'failed' ? '!' : <Icon name="clock" className="ki-icon ki-icon--sm" />}</span>}

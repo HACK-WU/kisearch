@@ -97,7 +97,8 @@ import { buildTimeline, mergeInterleaveItems, layoutAnswerFlow, type TimelineNod
 import { SourcesList } from './SourcesList';
 import { clearStreamError, getStreamError, skillStep, toolEndStep, toolStartStep, useChatStream } from './useChatStream';
 import { ConversationList } from './ConversationList';
-import { PromptConfigLayer } from './PromptConfigLayer';
+import { aiSettingsHref } from '@/lib/aiSettingsUrl';
+import { onChatConfigSaved } from '@/lib/chatConfigEvents';
 
 export interface ChatPanelProps {
   store: ChatStore;
@@ -182,7 +183,13 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const [sendError, setSendError] = useState<string | null>(null);
   /** 会话切换器浮层开合（瞬时 UI 态，不进 store） */
   const [convPopOpen, setConvPopOpen] = useState(false);
-  /** 对话配置层开合（纯瞬时 UI 态，符合本文件"不得累积业务态"的约束） */
+  /**
+   * 对话配置层开合。
+   *
+   * ⚠️ 2026-11-15 起**面板不再就地渲染配置层**：AI 配置统一由 `/settings/ai` 承载
+   *   （`openAiSettings`）。两处各持一份草稿、保存又是整份 PUT ⇒ 后写覆盖先写且无版本号，
+   *   所以这里只保留状态位（仍被 skill 缓存失效的 effect 引用），不再置 true。
+   */
   const [cfgOpen, setCfgOpen] = useState(false);
   /** 引用选择器开合（纯瞬时 UI 态，REQ-20261009-002 需求 B） */
   const [refPickerOpen, setRefPickerOpen] = useState(false);
@@ -733,10 +740,25 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     }
   }, []);
 
-  /** 传给 `PromptConfigLayer`：对话配置保存成功后刷新（上下文面板的分母/预警随之立即变化） */
-  const handleConfigSaved = useCallback((): void => {
-    void refreshConfig();
-  }, [refreshConfig]);
+  /**
+   * 订阅「配置已保存」通知（2026-11-15）：保存动作搬到了 `/settings/ai`，而本面板
+   * 常驻不卸载（D15），挂载期那一次 GET 不会重来 —— 不重拉的话，
+   * 在设置页改完「上下文窗口」，面板的占比分母（`config.contextChars`）会一直是旧值。
+   */
+  useEffect(() => onChatConfigSaved(() => { void refreshConfig(); }), [refreshConfig]);
+
+  /**
+   * 打开 AI 设置页（2026-11-15）。
+   *
+   * 面板头 / 上下文条的「配置」由"就地展开配置层"改为"跳转设置页"：
+   * 一份配置只能有一个编辑入口，否则两个入口各自持有草稿、整份 PUT 互相覆盖。
+   * `from` 记录来源地址，设置页的返回按钮据它原路返回（白名单校验站内路径）。
+   */
+  const openAiSettings = useCallback((): void => {
+    setCfgOpen(false);
+    // 路径与 `from` 口径统一在 lib/aiSettingsUrl（顶栏 toggle / 事件页深链共用同一份）
+    navigate(aiSettingsHref({ from: `${window.location.pathname}${window.location.search}` }));
+  }, [navigate]);
 
   useEffect(() => {
     let alive = true;
@@ -1588,10 +1610,9 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
             <button
               type="button"
               className="ki-chat-cfg__entry"
-              title="对话配置"
-              aria-haspopup="dialog"
+              title="AI 设置（提示词 / Skill / 工具）"
               aria-expanded={cfgOpen}
-              onClick={() => setCfgOpen(true)}
+              onClick={openAiSettings}
             >
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
                 <path d="M2.6 5.4h10.8M2.6 10.6h10.8" />
@@ -1689,10 +1710,9 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
             <button
               type="button"
               className="ki-chat-cfg__entry"
-              title="对话配置"
-              aria-haspopup="dialog"
+              title="AI 设置（提示词 / Skill / 工具）"
               aria-expanded={cfgOpen}
-              onClick={() => setCfgOpen(true)}
+              onClick={openAiSettings}
             >
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
                 <path d="M2.6 5.4h10.8M2.6 10.6h10.8" />
@@ -2351,8 +2371,6 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           />
           <section className="ki-chatpage__main">
             {mainColumn}
-            {/* ── 对话配置层：absolute inset:0 相对 .ki-chat-panel，page 下覆盖整个双栏区 ── */}
-            {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} onSaved={handleConfigSaved} />}
           </section>
         </aside>
       ) : (
@@ -2389,8 +2407,6 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           )}
           {dockHeader}
           {mainColumn}
-          {/* ── 对话配置层：面板内层（absolute inset:0）；编辑模态由它 portal 到 body ── */}
-          {cfgOpen && <PromptConfigLayer onClose={() => setCfgOpen(false)} onSaved={handleConfigSaved} />}
         </aside>
       )}
 

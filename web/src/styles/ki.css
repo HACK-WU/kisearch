@@ -4845,6 +4845,19 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-cfg__del, .ki-chat-cfg__reset { flex: 0 0 auto; white-space: nowrap; }   /* 底栏文字钮不得被压缩（第四轮修正：原实现"恢复默认"被压成空方框） */
 .ki-chat-cfg__reset:hover { text-decoration: underline; }
 .ki-chat-cfg__hint { margin: 6px 0 0; color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-xs); line-height: 1.6; }
+/* 能力级提示词的说明块（2026-11-15，AI 分析 / AI 查找）：
+   与 cfg 其它规则同处一文件 —— 它是 PromptConfigLayer 的一部分，不是设置页专属样式，
+   放在页面样式表里会让"组件被复用到别处时样式消失"。 */
+.ki-chat-cfg__notice {
+  margin-bottom: var(--ki-space-4);
+  padding: var(--ki-space-3) var(--ki-space-4);
+  border: 1px dashed var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.7;
+  color: var(--ki-color-text-muted);
+}
 .ki-chat-cfg__ta {
   width: 100%; min-height: 132px; resize: vertical;   /* 第四轮补充：96px 太矮，编辑区像一条缝 */
   font: inherit; font-size: var(--ki-font-size-md); line-height: 1.6; color: var(--ki-color-text);

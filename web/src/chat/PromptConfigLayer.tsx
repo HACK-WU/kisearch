@@ -26,6 +26,7 @@ import {
 
 import type { PromptConfig, PromptSkill } from '@/api/chatContract';
 import { PromptConfigModal, type PromptEditDraft } from '@/chat/PromptConfigModal';
+import { clonePromptConfig } from '@/chat/promptConfigClone';
 import { usePromptConfig } from '@/chat/usePromptConfig';
 import {
   CONTEXT_LIMIT_K_MAX,
@@ -109,7 +110,10 @@ const CONFIRM_MIN_WIDTH = 240;
 type ModalState =
   | { kind: 'prompt' }
   | { kind: 'new-skill' }
-  | { kind: 'skill'; id: string };
+  | { kind: 'skill'; id: string }
+  /** 能力级提示词（2026-11-15）：AI 分析 / AI 查找 —— 当前都无消费方，仅"提前设计" */
+  | { kind: 'analysis' }
+  | { kind: 'find' };
 
 /** 条目类型图标（与 demo 同一套，纯装饰） */
 const ITEM_IC: Record<'prompt' | 'skill', ReactElement> = {
@@ -125,23 +129,14 @@ const ITEM_IC: Record<'prompt' | 'skill', ReactElement> = {
   ),
 };
 
-const cloneConfig = (c: PromptConfig): PromptConfig => ({
-  version: c.version,
-  prompt: { ...c.prompt },
-  skills: c.skills.map((s) => ({ ...s })),
-  tools: { ...c.tools },
-  // ★ 可选字段必须**显式搬运**：这是白名单式拷贝，漏掉它会让草稿静默丢掉用户覆盖值
-  //   （表现为"改了 skill 保存一下，上下文上限就被清回默认了"）
-  ...(c.contextChars !== undefined ? { contextChars: c.contextChars } : {}),
-  // REQ-20261015-001：工具预算的两个覆盖值同样必须显式搬运（同一个白名单拷贝坑）
-  ...(c.toolResponseChars !== undefined ? { toolResponseChars: c.toolResponseChars } : {}),
-  ...(c.searchHitsPerCall !== undefined ? { searchHitsPerCall: c.searchHitsPerCall } : {}),
-  // REQ-20261016-001：思考级别覆盖值——**第三个踩同一个坑的字段**，漏了就是"保存别的配置后档位被静默清空"
-  ...(c.reasoningEffort !== undefined ? { reasoningEffort: c.reasoningEffort } : {}),
-});
+// 白名单式深拷贝已抽到 `promptConfigClone.ts`（纯函数，有单测机械锁字段搬运）
+const cloneConfig = clonePromptConfig;
 
 /** 新增 skill 的 id：符合服务端 `SKILL_ID_RE`（小写字母/数字开头，允许连字符） */
 const newSkillId = () => `skill-${Date.now().toString(36)}`;
+
+/** 设置页的能力分组（与 `/settings/ai` 左栏一一对应） */
+export type CapabilitySection = 'chat' | 'analysis' | 'find';
 
 export interface PromptConfigLayerProps {
   onClose: () => void;
@@ -150,9 +145,20 @@ export interface PromptConfigLayerProps {
    * 立即跟着变（不刷新页面）。
    */
   onSaved: () => void;
+  /**
+   * 只渲染某一个能力区块（2026-11-15 设置页），缺省 `'chat'` = 对话配置（面板既有行为不变）。
+   *
+   * 为什么不是三份组件：三条能力的**存储、草稿、落盘队列、只读门禁完全同一份**，
+   * 拆成三个组件等于把 `commit / drain / cloneConfig` 抄三遍 —— 抄一份就漂一份。
+   */
+  capability?: CapabilitySection;
+  /** 隐藏自带头部（设置页已有 H1 + 返回，重复标题只会挤占高度） */
+  hideHeader?: boolean;
+  /** 只读账号：可查看全部配置，写控件禁用（后端 PUT 仍按 `knowledge.write` 403 兜底） */
+  readOnly?: boolean;
 }
 
-export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) {
+export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideHeader = false, readOnly = false }: PromptConfigLayerProps) {
   const { loading, loadError, data, saving, saveError, fieldErrors, savedAt, reload, save } =
     usePromptConfig(true);
 
@@ -202,8 +208,15 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     drainRef.current = () => { void drain(); };
   }, [drain]);
 
-  /** 提交一次改动：改草稿 + 立刻排队落盘 */
+  /**
+   * 提交一次改动：改草稿 + 立刻排队落盘。
+   *
+   * ★ 只读门禁的**最后一道前端闸门**（2026-11-15）：无写权限时任何改动都不入队。
+   *   界面上已禁用控件，这里再兜一次是为了覆盖键盘 / 程序化触发的路径；
+   *   真正的强约束仍在后端（`PUT` 按 `knowledge.write` 403）。
+   */
   const commit = useCallback((mutate: (d: PromptConfig) => PromptConfig): void => {
+    if (readOnly) return;
     const cur = draftRef.current;
     if (!cur) return;
     const next = mutate(cur);
@@ -211,7 +224,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     setDraft(next);
     queuedRef.current = next;
     drainRef.current();
-  }, []);
+  }, [readOnly]);
 
   /** 文本类输入：草稿即时跟随（不打断打字），落盘防抖 350ms */
   const commitDebounced = useCallback((mutate: (d: PromptConfig) => PromptConfig): void => {
@@ -529,11 +542,17 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
         closeConfirm();
         return;
       }
+      /**
+       * 页面模式（`hideHeader`）不把 Esc 绑成「退出本页」：
+       * 设置页是文档流页面，Esc 是用户随手按的取消键，把它变成一次路由跳转很突兀
+       * （「我只想取消一下，怎么被踢回事件页了」）。这层语义只属于面板覆盖层。
+       */
+      if (hideHeader) return;
       handleClose();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [modal, confirm, closeConfirm, handleClose]);
+  }, [modal, confirm, closeConfirm, handleClose, hideHeader]);
 
   const groups = data?.toolGroups ?? [];
   /** 只读组默认开，危险组默认关 —— 但以配置里的实际值为准 */
@@ -615,23 +634,54 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
     if (modal.kind === 'new-skill') {
       return { id: newSkillId(), name: '', description: '', content: '', builtin: false };
     }
+    if (modal.kind === 'analysis') {
+      // 能力级提示词：内置文案（不可改名 / 不可删除，可恢复默认内容）——
+      // 与"基础提示词"同一档，不是可调用的 skill
+      return {
+        id: 'analysis-prompt',
+        name: '代码定位提示词',
+        description: '',
+        content: draft.analysisPrompt?.content ?? data?.defaults.analysisPrompt?.content ?? '',
+        builtin: true,
+      };
+    }
+    if (modal.kind === 'find') {
+      return {
+        id: 'find-prompt',
+        name: '检索词改写提示词',
+        description: '',
+        content: draft.findPrompt?.content ?? data?.defaults.findPrompt?.content ?? '',
+        builtin: true,
+      };
+    }
     const s = draft.skills.find((x) => x.id === modal.id);
     return s ? { id: s.id, name: s.name, description: s.description, content: s.content, builtin: s.builtin } : null;
   })();
 
   return (
-    <section ref={cfgRef} className="ki-chat-cfg" data-open="true" role="dialog" aria-modal="true" aria-label="对话配置">
+    <section
+      ref={cfgRef}
+      className="ki-chat-cfg"
+      data-open="true"
+      data-capability={capability}
+      data-readonly={readOnly ? 'true' : 'false'}
+      role={hideHeader ? 'region' : 'dialog'}
+      aria-modal={hideHeader ? undefined : true}
+      aria-label={capability === 'chat' ? '对话配置' : 'AI 能力配置'}
+    >
       <div className="ki-chat-cfg__savedbar" data-open={showSavedBar} />
 
-      <header className="ki-chat-cfg__head">
-        <span className="ki-chat-cfg__title">对话配置</span>
-        <span className="ki-chat-cfg__spacer" />
-        <button type="button" className="ki-chat-iconbtn" aria-label="关闭配置" onClick={handleClose}>
-          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-            <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
-          </svg>
-        </button>
-      </header>
+      {!hideHeader && (
+        <header className="ki-chat-cfg__head">
+          <span className="ki-chat-cfg__title">对话配置</span>
+          <span className="ki-chat-cfg__spacer" />
+          <button type="button" className="ki-chat-iconbtn" aria-label="关闭配置" onClick={handleClose}>
+            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
+              <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
+            </svg>
+          </button>
+        </header>
+      )}
 
       <div className="ki-chat-cfg__body">
         {loading && <p className="ki-chat-cfg__hint">读取配置…</p>}
@@ -644,7 +694,7 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
         {/* 配置源损坏已回退默认：必须可见（fail-loud），否则用户会以为"我的改动没保存上" */}
         {data?.issue && <p className="ki-chat-cfg__warn">配置文件有问题，已回退默认：{data.issue}</p>}
 
-        {draft && data && (
+        {capability === 'chat' && draft && data && (
           <>
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
@@ -975,6 +1025,34 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
             </div>
           </>
         )}
+
+        {capability === 'analysis' && draft && data && (
+          <CapabilityPromptPanel
+            title="分析提示词"
+            name="代码定位提示词"
+            intro="「AI 分析」尚未接入：目前只是事件页上的方案说明弹窗，没有后端调用。下面这段提示词可以先写好并保存，但改动暂时不会产生行为 —— 接入后自动生效，无需再迁移。"
+            hint="决定 AI 拿到事件描述与关联文档后，如何在代码仓库里定位相关位置、以什么形式回报候选。"
+            prompt={draft.analysisPrompt ?? data.defaults.analysisPrompt}
+            defaultContent={data.defaults.analysisPrompt?.content ?? ''}
+            {...(data.limits.analysisPromptMaxChars !== undefined ? { maxChars: data.limits.analysisPromptMaxChars } : {})}
+            readOnly={readOnly}
+            onEdit={() => { if (!readOnly) setModal({ kind: 'analysis' }); }}
+          />
+        )}
+
+        {capability === 'find' && draft && data && (
+          <CapabilityPromptPanel
+            title="检索词改写提示词"
+            name="检索词改写提示词"
+            intro="「AI 查找」当前是确定性检索：从事件标题与关联文档名提取线索词直接走 ki_search，同一输入永远得到同一批候选（可复现、可断言），因此这里暂时没有生效点。是否引入「LLM 改写检索词」需先拍板。"
+            hint="若将来引入 LLM 改写，这段就是它的指令；关闭时仍走现有确定性路径。"
+            prompt={draft.findPrompt ?? data.defaults.findPrompt}
+            defaultContent={data.defaults.findPrompt?.content ?? ''}
+            {...(data.limits.findPromptMaxChars !== undefined ? { maxChars: data.limits.findPromptMaxChars } : {})}
+            readOnly={readOnly}
+            onEdit={() => { if (!readOnly) setModal({ kind: 'find' }); }}
+          />
+        )}
       </div>
 
       {/* 底栏只作状态说明（2026-11-11 用户拍板）：**没有「取消 / 保存」按钮** ——
@@ -1006,15 +1084,26 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
       {modalItem && modal && (
         <PromptConfigModal
           mode={modal.kind === 'new-skill' ? 'new' : 'edit'}
-          group={modal.kind === 'prompt' ? 'prompt' : 'skill'}
+          readOnly={readOnly}
+          // 能力级提示词与「基础提示词」同档：不是可调用的 skill，没有描述字段
+          group={modal.kind === 'skill' || modal.kind === 'new-skill' ? 'skill' : 'prompt'}
           item={modalItem}
-          maxChars={modal.kind === 'prompt' ? data!.limits.promptMaxChars : data!.limits.skillMaxChars}
+          maxChars={
+            modal.kind === 'analysis'
+              ? data!.limits.analysisPromptMaxChars ?? 4000
+              : modal.kind === 'find'
+                ? data!.limits.findPromptMaxChars ?? 4000
+                : modal.kind === 'prompt'
+                  ? data!.limits.promptMaxChars
+                  : data!.limits.skillMaxChars
+          }
           nameMaxChars={data!.limits.skillNameMaxChars}
           descMaxChars={data!.limits.skillDescMaxChars}
           descSuggestedChars={data!.limits.skillDescSuggestedChars}
-          canRename={modal.kind !== 'prompt' && !modalItem.builtin}
+          // 内置条目不改名；能力级提示词同理（名称由界面固定，避免两处文案漂移）
+          canRename={modal.kind === 'skill' && !modalItem.builtin}
           canReset={modal.kind !== 'new-skill' && modalItem.builtin}
-          canDelete={modal.kind !== 'new-skill' && !modalItem.builtin}
+          canDelete={modal.kind === 'skill' && !modalItem.builtin}
           checkName={(name) =>
             // ★ 名称必须英文（2026-11-11 用户拍板）：与后端 `SKILL_NAME_RE` **手工同源**
             //   （服务端仍是最终闸门；这里只为省一次 400 往返，改动需两侧同步）
@@ -1029,6 +1118,13 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
             // 模态里的「保存」= 该条目的提交动作：提交即落盘（层底栏不再有整体保存）
             commit((d) => {
               if (modal.kind === 'prompt') return { ...d, prompt: { ...d.prompt, content } };
+              // 能力级提示词（2026-11-15）：**只写配置，当前无消费方**（分析未接入 / 查找不调 LLM）
+              if (modal.kind === 'analysis') {
+                return { ...d, analysisPrompt: { content, at: new Date().toISOString() } };
+              }
+              if (modal.kind === 'find') {
+                return { ...d, findPrompt: { content, at: new Date().toISOString() } };
+              }
               if (modal.kind === 'new-skill') {
                 return {
                   ...d,
@@ -1042,6 +1138,15 @@ export function PromptConfigLayer({ onClose, onSaved }: PromptConfigLayerProps) 
           onReset={() => {
             if (modal.kind === 'prompt') {
               commit((d) => ({ ...d, prompt: { ...d.prompt, content: data!.defaults.prompt.content } }));
+              setModal(null);
+              return;
+            }
+            if (modal.kind === 'analysis' || modal.kind === 'find') {
+              // 恢复默认 = 回填内置文案（与「基础提示词」同口径，不写死前端常量）
+              const def = modal.kind === 'analysis' ? data!.defaults.analysisPrompt : data!.defaults.findPrompt;
+              commit((d) => (modal.kind === 'analysis'
+                ? { ...d, analysisPrompt: { content: def?.content ?? '', at: new Date().toISOString() } }
+                : { ...d, findPrompt: { content: def?.content ?? '', at: new Date().toISOString() } }));
               setModal(null);
               return;
             }
@@ -1185,5 +1290,59 @@ function ItemCard(props: {
         />
       ) : null}
     </div>
+  );
+}
+
+/**
+ * 能力级提示词区块（AI 分析 / AI 查找，2026-11-15）。
+ *
+ * 两块刻意共用同一个组件：它们的**共同点**才是本需求的重点 ——
+ * 「当前都没有生效点，但允许提前设计」。因此「未接入」徽标与说明是组件内置的，
+ * 不允许调用方传个开关把它关掉（检查点 F1/F2：不得让配置看起来已生效）。
+ */
+function CapabilityPromptPanel(props: {
+  title: string;
+  /** 条目名（弹窗标题与卡片名共用） */
+  name: string;
+  /** 顶部说明（说清"为什么改了不生效"） */
+  intro: string;
+  /** 字段说明（这条提示词决定什么） */
+  hint: string;
+  prompt: { content: string; at: string } | undefined;
+  defaultContent: string;
+  /** 服务端下发上限；缺失 = 旧 daemon（下面会 fail-loud 提示） */
+  maxChars?: number;
+  readOnly: boolean;
+  onEdit: () => void;
+}) {
+  const { title, name, intro, hint, prompt, defaultContent, maxChars, readOnly, onEdit } = props;
+  return (
+    <>
+      <div className="ki-chat-cfg__notice">{intro}</div>
+      <div className="ki-chat-cfg__field">
+        <span className="ki-chat-cfg__label">
+          {title}
+          <em className="ki-chat-cfg__badge ki-chat-cfg__badge--warn">未接入 · 改动暂不生效</em>
+        </span>
+        <p className="ki-chat-cfg__hint">{hint}</p>
+        <div className="ki-chat-cfg__list">
+          <ItemCard
+            group="prompt"
+            name={name}
+            content={prompt?.content ?? ''}
+            isDefault={(prompt?.content ?? '') === defaultContent}
+            onClick={onEdit}
+          />
+        </div>
+        {/* 旧 daemon 不返回上限 = 新字段会被它静默丢弃：必须前置告知，否则"保存成功但值没变" */
+        }
+        {maxChars === undefined && (
+          <p className="ki-chat-cfg__warn">
+            服务端未返回本项的字符上限：通常是后端尚未重启，本项的保存可能不会生效。
+          </p>
+        )}
+        {readOnly && <p className="ki-chat-cfg__hint">当前账号为只读：可以查看内容，修改需要写权限。</p>}
+      </div>
+    </>
   );
 }

@@ -11,9 +11,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
+import { aiSettingsHref } from '@/lib/aiSettingsUrl';
 import { FindRefModal } from '@/components/governance/FindRefModal';
 import {
   addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts, listEventTypes, listEvents, listRefs, removeRef,
@@ -90,6 +92,16 @@ export function EventsPage(): JSX.Element {
   // 页面只判 capability，不判 role（authContext 的约定）
   const { can, status: authStatus } = useAuth();
   const canWrite = can('knowledge.write');
+
+  /**
+   * 就近深链（2026-11-15）：从「AI 分析 / AI 查找」弹窗直达 AI 设置的对应分组。
+   * 任务现场调提示词不必再绕到顶栏 —— 这是本需求的 R7。
+   */
+  const navigate = useNavigate();
+  const openAiSettings = useCallback((cap: 'analysis' | 'find'): void => {
+    // 路径与 `from` 口径统一在 lib/aiSettingsUrl（与顶栏 toggle 共用同一份白名单）
+    navigate(aiSettingsHref({ cap, from: `${window.location.pathname}${window.location.search}` }));
+  }, [navigate]);
   /**
    * R34 / S-07 §3.4：只读账号可进页面、可看全部信息，写入口统一禁用并在 title 说明原因。
    * 前端禁用只是体验层，后端 `knowledge.write` 仍会 403 兜底。
@@ -664,7 +676,12 @@ export function EventsPage(): JSX.Element {
         />
       ) : null}
 
-      {aiOpen ? <AiAnalyzeModal onClose={() => setAiOpen(false)} /> : null}
+      {aiOpen ? (
+        <AiAnalyzeModal
+          onClose={() => setAiOpen(false)}
+          onOpenSettings={() => { setAiOpen(false); openAiSettings('analysis'); }}
+        />
+      ) : null}
 
       {transOpen && active ? (
         <TransitionModal
@@ -707,6 +724,7 @@ export function EventsPage(): JSX.Element {
             setFindRefOpen(false);
             setAddRefOpen(true);
           }}
+          onOpenSettings={() => { setFindRefOpen(false); openAiSettings('find'); }}
         />
       ) : null}
 
@@ -1029,7 +1047,7 @@ function AddRefModal(args: {
  * AI 分析（demo 的占位入口）：demo 里也只弹说明，不做成死按钮。
  * 代码定位尚未接入，这里如实写清方案与前置条件，避免点了没反应。
  */
-function AiAnalyzeModal(args: { onClose: () => void }): JSX.Element {
+function AiAnalyzeModal(args: { onClose: () => void; onOpenSettings: () => void }): JSX.Element {
   return (
     <div className="gov-modal-mask" onClick={args.onClose}>
       <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
@@ -1056,6 +1074,9 @@ function AiAnalyzeModal(args: { onClose: () => void }): JSX.Element {
           <span className="gov-hint">当前版本只说明方案与前置条件，代码定位尚未接入。</span>
         </div>
         <div className="gov-modal__foot">
+          {/* 就近入口：直达 AI 设置的「分析」分组（提示词已可预设，但当前不生效） */}
+          <button className="gov-btn gov-btn--sm gov-btn--ghost" onClick={args.onOpenSettings}>⚙ 提示词设置</button>
+          <span style={{ flex: 1 }} />
           <button className="gov-btn gov-btn--sm" onClick={args.onClose}>知道了</button>
         </div>
       </div>

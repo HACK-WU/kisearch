@@ -47,6 +47,13 @@ import { CHAT_BUDGET, type PromptInjectionSnapshot } from './chat-contract.js';
 // ─── 上限（服务端强制；前端字数提示只是辅助）─────────────────
 
 export const PROMPT_MAX_CHARS = 4000;
+/**
+ * 能力级提示词上限（AI 分析 / AI 查找，2026-11-15）。
+ *
+ * 与基础提示词同额度：两者都只占一个「指令位」，要写长内容应做成 skill（按需加载），
+ * 而不是把长文塞进一个每次调用都要带上的提示词。
+ */
+export const CAPABILITY_PROMPT_MAX_CHARS = 4000;
 export const SKILL_MAX_CHARS = 8000;
 export const SKILL_NAME_MAX_CHARS = 64;
 /**
@@ -233,7 +240,36 @@ export interface PromptConfig {
    *    工具开关一起显示成默认值（磁盘内容其实未变）。
    */
   reasoningEffort?: string;
+  /**
+   * **能力级提示词 · AI 分析**（2026-11-15）。
+   *
+   * ⚠️ **当前没有任何消费方**：事件页的「AI 分析」仍是方案说明弹窗（无后端调用）。
+   *    本字段只为"提前设计"存在，改了**不产生行为** —— 界面必须如实标注「未接入」，
+   *    不得显示成已生效（检查点 F1）。
+   * 缺省 = 未覆盖 → 用 `DEFAULT_ANALYSIS_PROMPT`（`defaultPromptConfig()` 已填入，故读取后恒有值）。
+   */
+  analysisPrompt?: CapabilityPrompt;
+  /**
+   * **能力级提示词 · AI 查找**（2026-11-15）。
+   *
+   * ⚠️ 同上：现有「AI 查找」是**确定性检索**（`events/refs-service.ts` 明确不调 LLM），
+   *    因此这里**没有生效点**；只有将来引入「LLM 改写检索词」后才会被读取（检查点 F2）。
+   */
+  findPrompt?: CapabilityPrompt;
 }
+
+/**
+ * 能力级提示词载体（AI 分析 / AI 查找）：形状与 `prompt` 同构，
+ * 便于复用同一套编辑弹窗与时间戳口径。
+ */
+export interface CapabilityPrompt {
+  content: string;
+  at: string;
+}
+
+/** 能力级提示词的字段名（校验 / 时间戳 / 前端遍历共用，避免三处各写一份字符串） */
+export const CAPABILITY_PROMPT_KEYS = ['analysisPrompt', 'findPrompt'] as const;
+export type CapabilityPromptKey = (typeof CAPABILITY_PROMPT_KEYS)[number];
 
 export interface PromptConfigIssue {
   path: string;
@@ -325,6 +361,31 @@ export const BUILTIN_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_SKILL_NA
  */
 const BUILTIN_AT = '1970-01-01T00:00:00.000Z';
 
+/**
+ * AI 分析的内置提示词（占位，功能未接入）。
+ *
+ * 刻意**不写死工具名与输出格式的字段名**：接入方案（只读工具集 / 返回结构）未定，
+ * 写死会让用户按"已定方案"去调，接入时又要集体返工。
+ */
+const DEFAULT_ANALYSIS_PROMPT = `你是代码定位助手。基于事件标题、描述与关联文档，在 Git 仓库里定位相关代码。
+
+步骤：
+1. 从事件里提取技术线索（错误信息、组件名、接口名、关键路径）。
+2. 用只读文件检索能力在仓库里定位候选文件与行号区间。
+3. 读关键片段确认因果，不要凭文件名猜测。
+4. 输出「候选位置 + 判断依据 + 置信度」，全部标为待确认。
+
+约束：只读。不修改文件，不执行命令，不臆造未在事件或代码中出现的信息。`;
+
+/** AI 查找的内置提示词（占位；当前 AI 查找是确定性检索，本提示词无生效点）。 */
+const DEFAULT_FIND_PROMPT = `把「事件标题 + 关联文档名」改写成 3-8 个用于知识库检索的关键词。
+
+规则：
+1. 保留专有名词、错误码、组件名、接口名。
+2. 去掉「排查 / 问题 / 记录」这类无区分度的词。
+3. 不要臆造事件里没有出现的词。
+4. 只输出关键词，空格分隔，不作解释。`;
+
 export function defaultPromptConfig(): PromptConfig {
   return {
     version: 1,
@@ -332,6 +393,9 @@ export function defaultPromptConfig(): PromptConfig {
     // 顺序 = `BUILTIN_SKILL_NAMES` 的声明顺序；描述与正文都取自同一常量，避免文案漂移
     skills: BUILTIN_SKILL_IDS.map((id) => builtinSkill(id)),
     tools: defaultTools(),
+    // 能力级提示词：默认即"内置文案"，因此读取后恒有值（界面据此判断"默认 / 已修改"）
+    analysisPrompt: { content: DEFAULT_ANALYSIS_PROMPT, at: BUILTIN_AT },
+    findPrompt: { content: DEFAULT_FIND_PROMPT, at: BUILTIN_AT },
   };
 }
 
@@ -392,6 +456,7 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
     softNotes,
     skillNameSoft: true,
     skillDependencySoft: true,
+    capabilityPromptSoft: true,
   });
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
@@ -442,6 +507,14 @@ export interface NormalizePromptConfigOptions {
    * 保存路径（缺省）严格：400 + 指出缺哪个工具（防 API 直连绕过前端拦截）。
    */
   skillDependencySoft?: boolean;
+  /**
+   * `true` = **读取路径**：`analysisPrompt` / `findPrompt` 非法时**只忽略该字段**并写 `softNotes`。
+   *
+   * 与 `effortSoft` 同一动机，且风险更大：这两个字段是"提前设计"的可选能力，
+   * 一旦在读取路径报 issue，会让用户的**对话提示词 / skill / 工具开关一起**显示成默认值。
+   * 保存路径（缺省）保持严格 —— 400 + 字段级 details，且**不落盘**（不会写坏文件）。
+   */
+  capabilityPromptSoft?: boolean;
 }
 
 export function normalizePromptConfig(
@@ -471,6 +544,41 @@ export function normalizePromptConfig(
         out.prompt = { content, at: typeof (p as Record<string, unknown>).at === 'string' ? String((p as Record<string, unknown>).at) : BUILTIN_AT };
       }
     }
+  }
+
+  // 能力级提示词（AI 分析 / AI 查找，2026-11-15）—— **读取宽松 / 保存严格**
+  //   读取路径（capabilityPromptSoft）非法时只忽略该字段并写 softNotes：
+  //   这两个字段是"提前设计"的可选能力，若报 issue 会触发整份回退默认，
+  //   把用户的对话提示词 / skill / 工具开关一起打回内置值（磁盘内容其实没变）。
+  for (const key of CAPABILITY_PROMPT_KEYS) {
+    const raw = obj[key];
+    if (raw === undefined) continue;
+    /** 非法：软通道 → 忽略该字段 + 说明；严格（保存）→ 进 issues（400 且不落盘） */
+    const reject = (message: string): void => {
+      if (opts?.capabilityPromptSoft === true) {
+        opts.softNotes?.push(`${key}：${message}（已忽略该字段，其余配置照常读取）`);
+        return;
+      }
+      issues.push({ path: key, message });
+    };
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+      reject('应为对象 { content }');
+      continue;
+    }
+    const item = raw as Record<string, unknown>;
+    const content = item.content;
+    if (typeof content !== 'string') {
+      reject('content 应为字符串');
+      continue;
+    }
+    if (content.length > CAPABILITY_PROMPT_MAX_CHARS) {
+      reject(`content 不得超过 ${CAPABILITY_PROMPT_MAX_CHARS} 字，实际 ${content.length}`);
+      continue;
+    }
+    out[key] = {
+      content,
+      at: typeof item.at === 'string' ? item.at : BUILTIN_AT,
+    };
   }
 
   // skills
@@ -722,10 +830,33 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
     effortOptions: config.llm?.reasoningEfforts,
   });
   if (issues.length > 0) throw new PromptConfigError(issues);
+  /**
+   * ★ 旧前端兼容（2026-11-15）：`PUT` 是**整份替换**，而旧版前端不认识能力级提示词 ——
+   *   请求体里没有这两个键，`normalize` 会从 `defaultPromptConfig()` 取内置默认，
+   *   于是「在一个没刷新的旧标签页里改一下工具开关」就会把用户写好的分析提示词
+   *   **重置为默认**（保存成功、无任何提示，是最难排查的一类丢失）。
+   *
+   *   处理：入参**缺该键** ⇒ 视为「本次不涉及」，沿用磁盘现值；显式传 `{content}` 才是覆盖。
+   *   （注意与可选覆盖值不同：`contextChars` 缺省 = 未覆盖，天然不会写坏。）
+   */
+  const rawInput = (input !== null && typeof input === 'object' && !Array.isArray(input))
+    ? (input as Record<string, unknown>)
+    : {};
+  if (rawInput.analysisPrompt === undefined && existing.analysisPrompt) {
+    next.analysisPrompt = existing.analysisPrompt;
+  }
+  if (rawInput.findPrompt === undefined && existing.findPrompt) {
+    next.findPrompt = existing.findPrompt;
+  }
   const now = new Date().toISOString();
   // 时间戳由服务端打（客户端时间不可信）
   next.prompt.at = now;
   next.skills = next.skills.map((s) => ({ ...s, at: now }));
+  // 能力级提示词（2026-11-15）：与 prompt / skills 同口径，时间戳由服务端覆盖
+  for (const key of CAPABILITY_PROMPT_KEYS) {
+    const p = next[key];
+    if (p) p.at = now;
+  }
   const file = promptConfigPath(config);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   atomicWriteConfig(file, JSON.stringify(next, null, 2) + '\n');

@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  CAPABILITY_PROMPT_MAX_CHARS,
   MAX_SKILLS,
   MCP_TOOL_NAMES,
   PROMPT_MAX_CHARS,
@@ -550,5 +551,84 @@ describe('接入后：buildSystemMessages 渲染注入块（2026-10-13 改口径
 
   it('显式传空块数组 → 只剩会话 prompt（调用方保留"清空注入"的能力）', () => {
     assert.deepEqual(buildSystemMessages('仅会话提示', []).map((m) => m.content), ['仅会话提示']);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 能力级提示词（AI 分析 / AI 查找，2026-11-15）
+ *
+ * 这两条的核心风险**不是功能**（当前都没有消费方），而是"提前设计的可选字段"不能连累已有配置：
+ * 读取路径非法时必须只忽略该字段，绝不能触发「任一字段非法 → 整份回退默认」。
+ */
+describe('能力级提示词（analysisPrompt / findPrompt）', () => {
+  it('默认配置带两个非空提示词，且 save → read 往返一致（时间戳由服务端覆盖）', () => {
+    const base = defaultPromptConfig();
+    assert.ok(base.analysisPrompt!.content.length > 0);
+    assert.ok(base.findPrompt!.content.length > 0);
+
+    const saved = savePromptConfig(cfg, {
+      analysisPrompt: { content: '我的分析提示词', at: '1970-01-01T00:00:00.000Z' },
+      findPrompt: { content: '我的查找提示词' },
+    });
+    assert.equal(saved.analysisPrompt!.content, '我的分析提示词');
+    assert.equal(saved.findPrompt!.content, '我的查找提示词');
+    assert.notEqual(saved.analysisPrompt!.at, '1970-01-01T00:00:00.000Z', '时间戳必须由服务端打');
+
+    const back = readPromptConfig(cfg);
+    assert.equal(back.issue, null);
+    assert.deepEqual(back.config, saved);
+  });
+
+  it('只提交其中一个 → 另一个**沿用磁盘现值**（缺键 ≠ 回默认，更 ≠ 清空）', () => {
+    const saved = savePromptConfig(cfg, { analysisPrompt: { content: '只改分析' } });
+    assert.equal(saved.analysisPrompt!.content, '只改分析');
+    // 2026-11-15 修订：缺键语义由「回落内置默认」改为「本次不涉及」——
+    // 前者会让旧标签页的一次保存把用户写的提示词重置（见下一条 ★ 用例）。
+    assert.equal(saved.findPrompt!.content, '我的查找提示词', '应保留上一条用例写入的磁盘值');
+  });
+
+  it('★ 读取路径非法 → 只忽略该字段，其余配置照常（不得整份回退默认）', () => {
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({
+      prompt: { content: '用户自己的对话提示词' },
+      analysisPrompt: { content: 42 },
+      findPrompt: 'not-an-object',
+    }), 'utf-8');
+    const r = readPromptConfig(cfg);
+    assert.equal(r.config.prompt.content, '用户自己的对话提示词', '不得整份回退默认（护栏 #3）');
+    assert.equal(r.config.analysisPrompt!.content, defaultPromptConfig().analysisPrompt!.content, '非法字段回落内置');
+    assert.ok(r.issue && r.issue.includes('analysisPrompt'), `issue 应点名被忽略的字段，实际：${r.issue}`);
+  });
+
+  it('★ 保存路径非法 → 400 且指出字段（不落盘、不静默丢弃）', () => {
+    assert.throws(
+      () => savePromptConfig(cfg, { analysisPrompt: { content: 'x'.repeat(CAPABILITY_PROMPT_MAX_CHARS + 1) } }),
+      (err: unknown) => err instanceof PromptConfigError
+        && err.issues.some((i) => i.path === 'analysisPrompt'),
+    );
+  });
+
+  it('老配置缺该字段 → 读回内置文案；显式空串才是"空"', () => {
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({ prompt: { content: '老配置' } }), 'utf-8');
+    const r = readPromptConfig(cfg);
+    assert.equal(r.issue, null);
+    assert.equal(r.config.analysisPrompt!.content, defaultPromptConfig().analysisPrompt!.content);
+
+    const saved = savePromptConfig(cfg, { analysisPrompt: { content: '' }, findPrompt: { content: '' } });
+    assert.equal(saved.analysisPrompt!.content, '', '显式空串 = 用户主动清空，不是回默认');
+  });
+
+  /**
+   * ★ 旧前端兼容（2026-11-15）：PUT 是整份替换，旧 bundle 的请求体里没有这两个键。
+   *   若走"缺键 = 内置默认"，那么「在一个没刷新的旧标签页里改一下工具开关」
+   *   就会把用户写好的分析提示词静默重置 —— 保存成功、无任何提示，属最难排查的丢失。
+   */
+  it('★ 入参缺该键 → 沿用磁盘现值（旧前端保存不得重置能力级提示词）', () => {
+    savePromptConfig(cfg, { analysisPrompt: { content: '用户写好的分析提示词' } });
+    // 模拟旧前端：请求体里完全没有 analysisPrompt / findPrompt
+    const saved = savePromptConfig(cfg, { prompt: { content: '只改基础提示词' }, tools: { ki_search: false } });
+    assert.equal(saved.analysisPrompt!.content, '用户写好的分析提示词', '缺键不得写成内置默认');
+    assert.equal(saved.prompt.content, '只改基础提示词', '其它字段仍按提交覆盖');
   });
 });

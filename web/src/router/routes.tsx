@@ -9,6 +9,7 @@ import { TasksPage } from '@/pages/TasksPage';
 import { DataSourcePage } from '@/pages/DataSourcePage';
 import { ChatPage } from '@/pages/ChatPage';
 import { ResourcesPage } from '@/pages/ResourcesPage';
+import { AiSettingsPage } from '@/pages/AiSettingsPage';
 import { LifecyclePage } from '@/pages/LifecyclePage';
 import { EventsPage } from '@/pages/EventsPage';
 import { TrashPage } from '@/pages/TrashPage';
@@ -89,6 +90,8 @@ export function AppRoutes(): JSX.Element {
         <Route path="resources" element={<ResourcesPage />} />
         {/* :topic 为目录深链（/resources/import 等），刷新与分享可复原 */}
         <Route path="resources/:topic" element={<ResourcesPage />} />
+        {/* AI 设置（2026-11-15）：不分 scope 的全局 AI 配置，只读账号也可进入查看 */}
+        <Route path="settings/ai" element={<AiSettingsPage />} />
         {/* 知识治理（REQ-20261113-004 · S-07）：分类 / 事件 / 回收站三页 */}
         <Route
           path="governance/lifecycle"

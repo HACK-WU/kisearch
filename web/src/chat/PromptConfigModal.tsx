@@ -41,6 +41,11 @@ export interface PromptConfigModalProps {
   canDelete: boolean;
   /** 名称查重：返回错误文案表示不合法（仅 skill 用） */
   checkName?: (name: string) => string | null;
+  /**
+   * 只读账号（2026-11-15）：**可查看内容、不可保存**。
+   * 只读不等于"打不开"—— 用户需要能读到当前提示词，所以这里禁用而不是隐藏入口。
+   */
+  readOnly?: boolean;
   onCancel: () => void;
   onSubmit: (patch: { name: string; content: string; description: string }) => void;
   onDelete?: () => void;
@@ -50,7 +55,7 @@ export interface PromptConfigModalProps {
 const TITLE: Record<'new' | 'edit', string> = { new: '新增 skill', edit: '编辑' };
 
 export function PromptConfigModal(props: PromptConfigModalProps) {
-  const { mode, group, item, maxChars, nameMaxChars, descMaxChars, descSuggestedChars, canRename, canReset, canDelete } = props;
+  const { mode, group, item, maxChars, nameMaxChars, descMaxChars, descSuggestedChars, canRename, canReset, canDelete, readOnly = false } = props;
 
   const [name, setName] = useState(item.name);
   const [description, setDescription] = useState(item.description ?? '');
@@ -109,6 +114,7 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
   });
 
   const submit = () => {
+    if (readOnly) return;
     const nextName = canRename ? name.trim() : item.name;
     if (canRename && !nextName) {
       setErr('名称不能为空');
@@ -247,6 +253,8 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
                   spellCheck={false}
                   placeholder="写清这个 skill 什么时候用、按什么顺序调用哪些工具。例：先 ki_search 找片段，命中不足时再看结构；每次回答都要附来源。"
                   value={content}
+                  readOnly={readOnly}
+                  aria-readonly={readOnly}
                   onChange={(e) => { setContent(e.target.value); setErr(''); }}
                   aria-invalid={over}
                 />
@@ -259,7 +267,7 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
           </div>
 
           <div className="ki-chat-cfg__card-acts">
-            {canReset && (
+            {canReset && !readOnly && (
               <button type="button" className="ki-chat-btn ki-chat-btn--ghost ki-chat-cfg__reset" onClick={props.onReset}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="M3 11a9 9 0 1 1 2.6 7.4M3 4v7h7" />
@@ -267,17 +275,22 @@ export function PromptConfigModal(props: PromptConfigModalProps) {
                 恢复默认
               </button>
             )}
-            {canDelete && (
+            {canDelete && !readOnly && (
               <button type="button" className="ki-chat-cfg__del" onClick={props.onDelete}>删除</button>
             )}
             <span className="ki-chat-cfg__spacer" />
-            <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={requestClose}>取消</button>
+            {readOnly && <span className="ki-chat-cfg__hint">只读账号：可查看，不能保存</span>}
+            <button type="button" className="ki-chat-btn ki-chat-btn--ghost" onClick={requestClose}>
+              {readOnly ? '关闭' : '取消'}
+            </button>
             <button
               type="button"
               className="ki-chat-btn"
               onClick={submit}
               // 名称非法 / 为空时禁掉保存（原因已在名称字段下方写明，不是无提示的灰色按钮）
-              disabled={over || (nameEditableSkill && (name.trim() === '' || nameErr !== ''))}
+              // 只读账号追加最后一条；顺序保持 `over || (nameEditableSkill …)` 在前，
+              // 因为 `web/test/skill-name-english.test.mjs` 按这段源码形状做守卫断言。
+              disabled={over || (nameEditableSkill && (name.trim() === '' || nameErr !== '')) || readOnly}
             >
               保存
             </button>

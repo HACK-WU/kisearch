@@ -43,6 +43,11 @@ export interface FindRefModalProps {
   onAdded: (added: number, skipped: number) => void;
   /** 失败时的一键退路：关掉本弹窗、打开「＋ 添加」 */
   onSwitchToManual: () => void;
+  /**
+   * 就近入口（2026-11-15）：跳到 AI 设置的「查找」分组。
+   * 该分组当前**无生效点**（本弹窗是确定性检索、不调 LLM），入口只为"提前设计"提供落点。
+   */
+  onOpenSettings?: () => void;
 }
 
 const keyOf = (c: { group: string; name: string }): string => `${c.group}\u0000${c.name}`;
@@ -208,6 +213,11 @@ export function FindRefModal(args: FindRefModalProps): JSX.Element {
         </div>
 
         <div className="gov-modal__foot">
+          {args.onOpenSettings ? (
+            <button type="button" className="gov-btn gov-btn--ghost" onClick={args.onOpenSettings}>
+              ⚙ 提示词设置
+            </button>
+          ) : null}
           <button type="button" className="gov-btn gov-btn--ghost" onClick={args.onClose}>
             取消
           </button>

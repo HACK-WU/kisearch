@@ -1,0 +1,174 @@
+/**
+ * AI 设置页（2026-11-15）
+ *
+ * 边界：本文件**只新增**选择器，不改 `.ki-chat-cfg__*` 既有规则的语义 ——
+ * 那套类同时被对话面板的配置层使用，改它等于连带改面板（护栏 #6）。
+ *
+ * 复用关系：页面外壳（导航 / 说明）在这里；配置项本体的样式来自 `ki.css` 的
+ * `.ki-chat-cfg__*`（label / badge / hint / item / sw / tool / group / ctxrow）。
+ */
+
+.ai-set {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ki-space-3);
+}
+
+.ai-set__note {
+  margin: 0;
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.6;
+  color: var(--ki-color-text-subtle);
+}
+.ai-set__note b { color: var(--ki-color-text-muted); font-weight: 600; }
+
+.ai-set__ro {
+  margin: 0;
+  padding: var(--ki-space-2) var(--ki-space-3);
+  border: 1px solid var(--ki-color-warning-soft);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-warning-soft);
+  font-size: var(--ki-font-size-sm);
+  color: var(--ki-color-warning);
+}
+.ai-set__ro code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--ki-color-surface-muted);
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-xs);
+}
+
+.ai-set__body {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  gap: var(--ki-space-4);
+  align-items: start;
+}
+
+/* ── 左栏：能力导航 ── */
+.ai-set__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  position: sticky;
+  top: calc(var(--ki-header-height) + var(--ki-space-4));
+}
+
+.ai-set__cap {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 10px;
+  text-align: left;
+  cursor: pointer;
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  transition: border-color var(--ki-motion-fast), background var(--ki-motion-fast);
+}
+.ai-set__cap:hover { border-color: var(--ki-color-border-strong); }
+.ai-set__cap[aria-current="true"] {
+  background: var(--ki-color-primary-soft);
+  border-color: var(--ki-color-primary);
+}
+
+/* 左侧能力卡：图标 + 两级文字（与侧栏导航同一套结构，避免"只有文字"显得像列表项）
+   ⚠️ 元素同时带 `ki-icon`（描边/空心由它提供），这里只覆盖尺寸与颜色。
+   选择器多带一层 `.ai-set__cap`：`.ki-icon` 写的是 18px，靠特异性而不是加载顺序取胜。 */
+.ai-set__cap .ai-set__cap-ic {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--ki-color-text-subtle);
+}
+.ai-set__cap[aria-current="true"] .ai-set__cap-ic { color: var(--ki-color-primary); }
+
+.ai-set__cap-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ai-set__cap-name { font-size: 13px; font-weight: 600; }
+.ai-set__cap[aria-current="true"] .ai-set__cap-name { color: var(--ki-color-primary); }
+
+.ai-set__cap-state {
+  font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 右栏：配置宿主 ──
+   面板里 `.ki-chat-cfg` 是 `position:absolute; inset:0` 的**覆盖层**（卡内滚动）。
+   页面里必须还原成**文档流**：整页滚动 + 每个分组独立成卡（对齐 demo）。
+
+   ⚠️ 全部规则都限定在 `.ai-set__panel` 作用域内 —— 面板那份配置层若将来复用，
+   仍应保持"平铺 + 卡内滚动"，不能吃到这里的分组卡片样式。 */
+.ai-set__panel {
+  position: relative;
+  min-width: 0;
+}
+
+.ai-set__panel .ki-chat-cfg {
+  position: static;
+  inset: auto;
+  /* 覆盖层自带的白底：页面里由"每张卡片"承担底色，容器本身必须透明 */
+  background: transparent;
+}
+
+/* 卡内滚动 → 整页滚动（此前固定高度 + overflow 会在右栏里出现第二条滚动条） */
+.ai-set__panel .ki-chat-cfg__body {
+  overflow: visible;
+  padding: 0;
+}
+
+/* 每个分组独立成卡：面板里 380px 宽再套卡会拥挤，故只在页面作用域生效 */
+.ai-set__panel .ki-chat-cfg__field {
+  margin: 0 0 var(--ki-space-3);
+  padding: var(--ki-space-4);
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-lg);
+}
+.ai-set__panel .ki-chat-cfg__field:last-child { margin-bottom: 0; }
+
+/* 能力级提示词的说明块：与卡片同圆角，视觉上属同一列 */
+.ai-set__panel .ki-chat-cfg__notice { border-radius: var(--ki-radius-lg); }
+
+/* 底栏：页面顶部已写明「全局一份 / 生效范围」，这里只保留保存状态与失败重试，
+   且去掉横条观感（否则页面底部会多出一条像工具栏的灰带） */
+.ai-set__panel .ki-chat-cfg__scope { display: none; }
+.ai-set__panel .ki-chat-cfg__bar {
+  border-top: 0;
+  background: transparent;
+  padding: 0;
+}
+
+/* ── 只读账号：写控件禁用（视觉层；逻辑兜底在 commit 与后端 PUT） ── */
+.ki-chat-cfg[data-readonly="true"] .ki-chat-cfg__sw,
+.ki-chat-cfg[data-readonly="true"] .ki-chat-cfg__ctxinput,
+.ki-chat-cfg[data-readonly="true"] .ki-chat-cfg__select,
+.ki-chat-cfg[data-readonly="true"] .ki-chat-cfg__add,
+.ki-chat-cfg[data-readonly="true"] .ki-chat-cfg__reset {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* 只读下条目仍可点击（查看内容），但不再有"可编辑"的悬停暗示 */
+.ki-chat-cfg[data-readonly="true"] .ki-chat-cfg__item:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+/* ── 响应式 ── */
+@media (max-width: 1000px) {
+  .ai-set__body { grid-template-columns: minmax(0, 1fr); }
+  .ai-set__nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .ai-set__cap { width: auto; flex: 0 0 auto; }
+  .ai-set__cap-state { display: none; }
+}

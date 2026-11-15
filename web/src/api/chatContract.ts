@@ -193,6 +193,11 @@ export interface ConversationFile {
   version: 1;
   id: string;
   scope: string;
+  /**
+   * 会话归属（REQ-20261103-001）：session 用户 id；local-admin / token 为 null；旧会话缺省。
+   * 2026-11-15 补：后端早已下发，前端副本漏了这两个字段 → 契约对齐测试恒红（既有漂移，非本次引入）。
+   */
+  ownerUserId?: string | null;
   title: string;
   systemPrompt: string;
   archived: boolean;
@@ -214,6 +219,8 @@ export interface ConversationFile {
 export interface ConversationSummary {
   id: string;
   scope: string;
+  /** 会话归属（REQ-20261103-001）；2026-11-15 补齐，与后端 chat-contract.ts 对齐 */
+  ownerUserId?: string | null;
   title: string;
   archived: boolean;
   updatedAt: string;
@@ -375,6 +382,22 @@ export interface PromptConfig {
    * 缺省 = 未覆盖；面板的「跟随配置默认（不覆盖）」= **删除本字段**（哨兵 `__follow_default__` 不落盘）。
    */
   reasoningEffort?: string;
+  /**
+   * **能力级提示词 · AI 分析**（2026-11-15）。
+   *
+   * ⚠️ 当前**没有消费方**（AI 分析尚未接入，事件页只弹方案说明）：改了不产生行为。
+   * 界面必须如实标注「未接入 · 改动暂不生效」，不得显示成已生效（检查点 F1）。
+   * 缺省 = 未覆盖 → 用 `defaults.analysisPrompt.content`（服务端已填内置文案）。
+   */
+  analysisPrompt?: CapabilityPrompt;
+  /** **能力级提示词 · AI 查找**。现有「AI 查找」是确定性检索（不调 LLM），同样无生效点（检查点 F2）。 */
+  findPrompt?: CapabilityPrompt;
+}
+
+/** 能力级提示词载体（与后端 `CapabilityPrompt` 同形状） */
+export interface CapabilityPrompt {
+  content: string;
+  at: string;
 }
 
 export interface PromptConfigLimits {
@@ -401,6 +424,13 @@ export interface PromptConfigLimits {
   searchHitsMax?: number;
   /** 检索条数的内置默认（「恢复默认」的目标值） */
   searchHitsDefault?: number;
+  /**
+   * 能力级提示词上限（字符；2026-11-15）。
+   * **缺失 = 旧版 daemon 不返回** → 设置页据此 fail-loud 提示「后端可能未重启」，
+   * 而不是让用户以为保存成功（新字段会被旧服务端静默丢弃）。
+   */
+  analysisPromptMaxChars?: number;
+  findPromptMaxChars?: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
