@@ -137,7 +137,7 @@ test('阶段 3：真实 restore/rebuild 中途取消', {
     JSON.stringify({ version: 1, scope: SCOPE, groups: { [GROUP]: {} } }, null, 2),
   );
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  execFileSync('tar', [...tarPathArgs(), ...tarFormatArgs(), '-czf', tarPath(snapshotFile), '-C', tarPath(snapshotRoot), SCOPE], { stdio: 'ignore' });
+  execFileSync('tar', [...tarPathArgs(), ...tarFormatArgs(), '-czf', tarPath(snapshotFile), '-C', tarPath(snapshotRoot), SCOPE], { stdio: 'ignore', timeout: 120_000 });
 
   try {
     isolatedHealth = await startIsolatedDaemon({ configPath, env, port });

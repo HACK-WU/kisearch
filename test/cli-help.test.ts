@@ -17,7 +17,6 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
 import { execCli } from './test-config.js';
 
 const CLI = path.resolve(import.meta.dirname, '..', 'bin', 'ki.mjs');

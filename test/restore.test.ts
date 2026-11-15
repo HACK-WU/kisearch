@@ -15,8 +15,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { spawnSync } from 'child_process';
-import { JITI_CLI, execCli, execCommand } from './test-config.js';
+import { execCli, execCliRaw, execCommand, getTestEnv } from './test-config.js';
 import { tarPathArgs, tarFormatArgs, tarPath } from '../src/lib/tar-compat.js';
 
 const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'src', 'restore.ts');
@@ -105,7 +104,7 @@ function runRestore(configPath: string, args: string[]): any {
   try {
     const stdout = execCli(SCRIPT_PATH, {
       args,
-      env: { ...process.env, KI_CONFIG_PATH: configPath, NODE_NO_WARNINGS: '1' },
+      env: { ...getTestEnv(), KI_CONFIG_PATH: configPath },
     });
     return JSON.parse(stdout);
   } catch (err: any) {
@@ -299,9 +298,10 @@ describe('NEG：--group/--tags 参数负向防护（不得静默降级为全量�
 
   it('列表模式误传重建参数的警告内容：stderr 明确提示需配合 --rebuild-vector', () => {
     const { configPath, scope } = setupScope();
-    const res = spawnSync(process.execPath, [JITI_CLI, SCRIPT_PATH, scope, '--group', 'wiki'], {
-      encoding: 'utf-8',
-      env: { ...process.env, KI_CONFIG_PATH: configPath, NODE_NO_WARNINGS: '1' },
+    // 统一出口：默认 120s 超时 + SIGKILL（REQ-20261115-002 R1）
+    const res = execCliRaw(SCRIPT_PATH, {
+      args: [scope, '--group', 'wiki'],
+      env: { ...getTestEnv(), KI_CONFIG_PATH: configPath },
     });
     assert.strictEqual(res.status, 0);
     const parsed = JSON.parse(res.stdout);

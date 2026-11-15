@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { resetConfigCache } from '../src/lib/config.js';
 import { readAllGroupCaches, hasShardedLayout, getRelationsRoot, getRelationsManifestPath } from '../src/lib/group-cache.js';
 import { getKbDir } from '../src/lib/scope.js';

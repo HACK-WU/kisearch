@@ -8,20 +8,27 @@
  *
  * 运行：npx jiti test/group-cli.test.ts
  */
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execCliRaw, getTestEnv, cleanupTestConfig } from './test-config.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bin = path.join(root, 'bin', 'ki.mjs');
 
+after(() => {
+  cleanupTestConfig();
+});
+
 function run(args: string[]) {
-  return spawnSync(process.execPath, [bin, ...args], {
+  // 统一出口：默认 120s 超时 + SIGKILL（REQ-20261115-002 R1），避免子进程挂住拖死整个文件
+  return execCliRaw(bin, {
+    entry: 'node',
+    args,
     cwd: root,
-    encoding: 'utf8',
-    env: { ...process.env, KI_CONFIG_PATH: process.env.KI_CONFIG_PATH ?? '' },
+    // getTestEnv 会剥离 IDE 注入的 NODE_OPTIONS / safe-delete 钩子——那正是子进程被挂起的常见根因
+    env: getTestEnv(),
   });
 }
 

@@ -30,7 +30,7 @@ const SAMPLE = [
 ].join('\n');
 
 const flockAvailable = process.platform === 'linux'
-  && spawnSync('flock', ['--version'], { stdio: 'ignore' }).status === 0;
+  && spawnSync('flock', ['--version'], { stdio: 'ignore', timeout: 5_000 }).status === 0;
 const skipReason = !flockAvailable ? 'flock(1) 不可用（非 Linux 或未安装 util-linux）' : false;
 
 test('① 只认主行：等待者（-> 行）不得被当成持锁者', () => {

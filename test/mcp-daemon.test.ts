@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { daemonIdentityFingerprint } from '../src/lib/scope-collection.js';
 import { execCli } from './test-config.js';
 

@@ -18,7 +18,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { tarPathArgs, tarPath } from '../src/lib/tar-compat.js';
 import { execCommand } from './test-config.js';
 
