@@ -46,6 +46,7 @@ import type { VectorizationStopReason } from '../zvec-engine/errors.js';
 import { logInfo, logProgress, logWarn } from './progress.js';
 import { parseContentTags } from './constants.js';
 import { ftsDeleteByIds } from './fts-client.js';
+import { collectHiddenRelations } from './visibility-index.js';
 
 /** 向量化分批大小（与 import 链路 bulkVectorize 对齐：批间输出进度，避免单次 upsert 无中间态） */
 const VECTORIZE_BATCH_SIZE = 200;
@@ -768,6 +769,19 @@ async function rebuildScopeVectorsUnlocked(
   let rawContentEntries: RebuildVectorEntry[];
   try {
     rawContentEntries = collectContentEntries(scopeDir, groupFilter, needsStaging);
+    /**
+     * ★ 档位过滤（S-03 §3.5）：hidden 文档不得被重建回可检索。
+     * 手动重建是最容易绕过阶段语义的地方 —— 结果还显示"重建成功 N 篇"，
+     * 没人会发现"排查中"的文档已经能被语义搜到。
+     */
+    const hiddenRelations = collectHiddenRelations(scope);
+    if (hiddenRelations.size > 0) {
+      const before = rawContentEntries.length;
+      rawContentEntries = rawContentEntries.filter((entry) => !hiddenRelations.has(`${entry.groupPath ?? ''}\u0000${entry.relationName ?? ''}`));
+      if (rawContentEntries.length !== before) {
+        console.log(`[rebuild-vector] 跳过 ${before - rawContentEntries.length} 条不可见（hidden）文档的索引重建`);
+      }
+    }
   } catch (error) {
     return { ok: false, scope, partial, stats, errors: [{ type: 'migration-source', path: scopeDir, error: `迁移前读取 KB 失败，旧集合未更改：${(error as Error).message}` }] };
   }

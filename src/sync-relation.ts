@@ -36,6 +36,7 @@ import { precheckLifecycle, applyLifecyclePlan, type LifecycleSummary } from './
 import { readAllEvents } from './lib/events/store.js';
 import { readGovernance } from './lib/governance-store.js';
 import { purgeExpired } from './lib/trash-service.js';
+import { resolveVisibilityOfRelation, applyVisibility } from './lib/visibility-index.js';
 import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { VectorizationStopReason } from './zvec-engine/errors.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -503,7 +504,7 @@ export type BulkSyncRelationResult =
  * 写入独立 FTS-only Collection。该路径不创建 embedding provider，也不触碰
  * hybrid collection；只有整条内容完整写入后才清理旧 FTS ID。
  */
-async function fullTextWriteBack(params: {
+export async function fullTextWriteBack(params: {
   scope: string;
   group: string;
   relation: string;
@@ -1235,7 +1236,7 @@ export type SyncRelationResult =
  * 失败仅记日志，不抛，不阻塞主流程；返回 { stored, reason? } 供上层透出
  * 部分写入状态（cache/wiki 成功但向量未写时，调用方需要感知）。
  */
-async function vectorWriteBack(params: {
+export async function vectorWriteBack(params: {
   relation: string;
   group: string;
   moduleInfo: string;
@@ -1453,7 +1454,15 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       if (params.sourcePath) relRec.sourcePath = params.sourcePath;
     }
 
-    const fts = params.vector === false
+    /**
+     * ★ 档位守卫（S-03 §3.5）：hidden 文档不能被任何写入路径重新索引回去。
+     * 少了这一句，AI 每次覆盖写一份"排查中"的事件文档，它就会重新变成可检索 ——
+     * 阶段设计的语义被静默推翻，且没有任何测试会红。
+     */
+    const visibility = resolveVisibilityOfRelation(scope, relRec);
+    const hiddenByStage = visibility.mode === 'hidden';
+
+    const fts = (params.vector === false && !hiddenByStage)
       ? await fullTextWriteBack({
           scope,
           group,
@@ -1503,9 +1512,23 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     // 但把写入结果透出到返回值（vectorStored/vectorReason），避免部分写入被静默吞掉。
     // 非向量化模式（vector=false）：FTS ID 已由 fullTextWriteBack 回写；此处只跳过
     // dense embedding 与 memoryId 回写，不应再描述为“仅写 KB 层”。
-    const vec = params.vector === false
-      ? { stored: false, reason: '非向量化模式（--no-vector），不写 dense 向量' }
+    const vec = (params.vector === false || hiddenByStage)
+      ? {
+        stored: false,
+        reason: hiddenByStage
+          ? `阶段不可见（hidden），跳过索引写入${visibility.warning ? `；${visibility.warning}` : ''}`
+          : '非向量化模式（--no-vector），不写 dense 向量',
+      }
       : await vectorWriteBack({ relation, group, moduleInfo, scope, tags: params.tags });
+
+    // 覆盖写可能把旧索引带回来（之前是 full / 摘除曾失败）：补一次同步摘除
+    if (hiddenByStage && relRec) {
+      try {
+        await applyVisibility({ scope, group, relation, to: 'hidden', from: 'full' });
+      } catch (err) {
+        console.warn(`[sync-relation] hidden 档位摘除失败（不影响写入）：${(err as Error).message}`);
+      }
+    }
 
     // ★ 从 FTS-only 切到 dense：旧全文索引必须在 dense **写入成功之后**清理
     // （REQ-20261113-002）。上面只把 `ftsIndexComplete` 置 false 是不够的——检索链路不读

@@ -52,6 +52,8 @@ import { DEFAULT_UPLOAD_MAX_BYTES } from './open-api/constants.js';
 import { handleOpenApiRequest, isOpenApiPath } from './open-api/index.js';
 import { sendOpenApiError } from './open-api/respond.js';
 import { describeUploadApiReuseMismatch, resolveUploadApi } from './upload-api-flag.js';
+import { purgeExpired } from './trash-service.js';
+import { resumePendingOnStartup, pendingCount } from './visibility-queue.js';
 
 // S0-4：事件循环延迟采样（导入后高负载归因证据：busy 与 idle 一目了然）。
 // 进程生命周期均值——长期运行后近期尖峰会被稀释，归因时建议配合两次采样看增量。
@@ -1385,6 +1387,8 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
    * 放在 listen 之后——此时单例守卫已过，本进程尚未创建任何任务，台账里的 `queued`/`running`
    * 全部属于已退出进程。不抛错，台账异常不阻断启动。
    */
+  resumeGovernanceTasks(loadConfig());
+
   const interrupted = markInterruptedTasks(loadConfig());
   if (interrupted.length > 0) {
     process.stderr.write(
@@ -1520,4 +1524,37 @@ function getPackageRoot(): string {
   }
   // 兜底：cwd（通常是项目根，如 jiti src/mcp-server.ts）
   return process.cwd();
+}
+
+/**
+ * 启动时恢复治理任务（REQ-20261113-004 · S-03 §3.6 ④ / S-04 §3.5）。
+ *
+ * 修的是"半态无人收尾"：索引 pending 只在内存里消费的话，daemon 重启就把任务丢了，
+ * 文档会永久停在「档位已变、索引没跟上」，而任何断言都看不出来。
+ *
+ * fire-and-forget：不阻塞启动。pending 为空时直接跳过，避免每次启动都拉一次 embed。
+ */
+function resumeGovernanceTasks(config: ReturnType<typeof loadConfig>): void {
+  for (const scope of Object.keys(config.scopes ?? {})) {
+    try {
+      const purged = purgeExpired({ scope });
+      if (purged.purged.length > 0 || purged.notified.length > 0) {
+        console.log(`[governance] ${scope} 回收站清理：删除 ${purged.purged.length} 篇 / 待提醒 ${purged.notified.length} 篇`);
+      }
+    } catch (err) {
+      console.warn(`[governance] 回收站清理失败（${scope}）：${(err as Error).message}`);
+    }
+
+    if (pendingCount(scope) === 0) continue;
+    void resumePendingOnStartup(scope)
+      .then((result) => {
+        if (result.failed.length > 0) {
+          console.warn(`[governance] ${scope} 有 ${result.failed.length} 条索引补齐失败，将在下次写入时重试`);
+        }
+        if (result.blocked.length > 0) {
+          console.warn(`[governance] ${scope} 有 ${result.blocked.length} 条索引多次失败已标记 blocked，需人工重试`);
+        }
+      })
+      .catch((err) => console.warn(`[governance] 索引补齐异常（${scope}）：${(err as Error).message}`));
+  }
 }

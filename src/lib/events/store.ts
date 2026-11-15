@@ -17,7 +17,8 @@ import fs from 'fs';
 import path from 'path';
 import { getKbDir, validateScope } from '../scope.js';
 import { readJson } from '../store.js';
-import type { EventRecord, EventTypeRecord, EventTypesDoc } from './types.js';
+import { walWrite } from '../wal.js';
+import type { EventRecord, EventTypeRecord, EventTypesDoc, EventsMeta } from './types.js';
 
 export function getEventsDir(scope: string): string {
   validateScope(scope);
@@ -89,4 +90,87 @@ export function findEvent(scope: string, ref: string): EventRecord | null {
 /** 事件是否已收口（唯一权威是 closedAt，不看是否停在末位阶段） */
 export function isEventClosed(event: EventRecord): boolean {
   return event.closedAt !== null && event.closedAt !== undefined;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 写路径（B3）：事件 / 类型 / meta。调用方必须已持 scope 写锁
+// ─────────────────────────────────────────────────────────────
+
+export function getEventPath(scope: string, eventId: string): string {
+  return path.join(getEventsDir(scope), `${eventId}.json`);
+}
+
+export function getTypesPath(scope: string): string {
+  return path.join(getEventsDir(scope), '_types.json');
+}
+
+export function getMetaPath(scope: string): string {
+  return path.join(getEventsDir(scope), '_meta.json');
+}
+
+/** 写事件文件（walWrite 原子写） */
+export function writeEvent(scope: string, event: EventRecord): void {
+  const dir = getEventsDir(scope);
+  fs.mkdirSync(dir, { recursive: true });
+  walWrite(getEventPath(scope, event.id), event as unknown as Record<string, unknown>);
+}
+
+export function removeEventFile(scope: string, eventId: string): void {
+  try {
+    fs.rmSync(getEventPath(scope, eventId), { force: true });
+  } catch (err) {
+    console.warn(`[events] 删除事件文件失败 ${eventId}: ${(err as Error).message}`);
+  }
+}
+
+/** 读完整类型文档（含 revision）；文件不存在返回 null，由调用方决定是否用内置缺省 */
+export function readTypesDoc(scope: string): EventTypesDoc | null {
+  try {
+    return readJson<EventTypesDoc>(getTypesPath(scope));
+  } catch (err) {
+    throw new Error(`事件类型文件损坏（${getTypesPath(scope)}）：${(err as Error).message}`);
+  }
+}
+
+export function writeTypesDoc(scope: string, doc: EventTypesDoc): void {
+  const dir = getEventsDir(scope);
+  fs.mkdirSync(dir, { recursive: true });
+  walWrite(getTypesPath(scope), doc as unknown as Record<string, unknown>);
+}
+
+export function readMeta(scope: string): EventsMeta {
+  try {
+    const meta = readJson<EventsMeta>(getMetaPath(scope));
+    if (meta && Number.isInteger(meta.nextShortId) && meta.nextShortId > 0) return meta;
+  } catch (err) {
+    // meta 损坏不该让整个事件模块不可用：从现有事件重算一个安全起点
+    console.warn(`[events] _meta.json 损坏，按现有事件重算 shortId：${(err as Error).message}`);
+  }
+  const maxShortId = readAllEvents(scope).reduce((max, e) => Math.max(max, e.shortId ?? 0), 0);
+  return { version: 1, nextShortId: maxShortId + 1 };
+}
+
+export function writeMeta(scope: string, meta: EventsMeta): void {
+  const dir = getEventsDir(scope);
+  fs.mkdirSync(dir, { recursive: true });
+  walWrite(getMetaPath(scope), meta as unknown as Record<string, unknown>);
+}
+
+/**
+ * 分配下一个 shortId 并立即落盘。
+ *
+ * `shortId` 会出现在 AI 参数与聊天记录里，**删除后不复用**（S-02 决策 7）：
+ * 复用会把"历史对话里的 #3"绑到另一个事件上。
+ */
+export function allocateShortId(scope: string): number {
+  const meta = readMeta(scope);
+  const next = meta.nextShortId;
+  writeMeta(scope, { version: 1, nextShortId: next + 1 });
+  return next;
+}
+
+/** 事件 id：时间戳 base36 + 6 位随机（项目无 ulid 依赖，不引新包） */
+export function newEventId(now = Date.now()): string {
+  const rand = Math.random().toString(36).slice(2, 8).padEnd(6, '0');
+  return `evt_${now.toString(36)}_${rand}`;
 }

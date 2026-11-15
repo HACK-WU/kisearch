@@ -15,6 +15,7 @@ import { writeBackToWiki } from './wiki-sync.js';
 import { beginPublishLease, contentRevision, endPublishLease, metadataRevision, loadDraft, saveDraft,
   type RelationEditDraft } from './relation-edit-draft.js';
 import { readLiveRelation, relationIndexMode } from './relation-edit-live.js';
+import { resolveVisibilityOfRelation, applyVisibility } from './visibility-index.js';
 
 type IndexEntry = { text: string; tags: string; group?: string };
 type FtsEntry = { text: string; scope: string; group: string; relation: string; tag: string };
@@ -357,6 +358,28 @@ async function runFinish(editId: string, scope: string): Promise<void> {
         if (current.revision !== draft.publishedRevision) {
           // 新一轮正式写入已经接管目标；只能清理无引用的旧 ID，不能用旧草稿重写 Wiki。
           await cleanupOldIds(draft);
+
+    /**
+     * 档位复核（S-03 §3.5）：hidden 文档编辑完成后不得留下新索引。
+     * 发布路径按 `plan.mode` 直接重写 dense/fts，不认阶段 —— 少这一句，
+     * 「排查中」的文档被编辑一次就重新变成可检索，而所有断言仍然通过。
+     */
+    try {
+      const latest = loadGroupCache(draft.scope, draft.group)
+        ?.hot_relations.find((item) => item.text === draft.relation);
+      const visibility = resolveVisibilityOfRelation(draft.scope, latest);
+      if (visibility.mode !== 'full') {
+        await applyVisibility({
+          scope: draft.scope,
+          group: draft.group,
+          relation: draft.relation,
+          to: visibility.mode,
+          from: 'full',
+        });
+      }
+    } catch (err) {
+      console.warn(`[edit-publish] 档位复核失败（发布已成功，索引可能多留）：${(err as Error).message}`);
+    }
           draft.status = 'published';
           delete draft.error;
           saveDraft(draft);
