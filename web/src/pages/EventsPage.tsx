@@ -212,11 +212,10 @@ export function EventsPage(): JSX.Element {
       <header className="gov-head">
         <p className="gov-head__path">
           <span className="gov-badge gov-badge--kb">{scope}</span>
-          <span>事件</span>
-          <span className="gov-head__sep">·</span>
-          <span className="gov-cell-muted">
-            {counts ? `未收口 ${counts.open} · 已收口 ${counts.closed}` : null}
-          </span>
+          {/* 计数读取失败时整段不渲染：留空 span 会让 flex gap 多出一段空白，也会让人以为"0 个" */}
+          {counts ? (
+            <span className="gov-cell-muted">未收口 {counts.open} · 已收口 {counts.closed}</span>
+          ) : null}
         </p>
         <div className="gov-head__actions">
           <button

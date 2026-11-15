@@ -3,6 +3,8 @@
  *
  * 视觉基线 = `CodeWikiHub/kisearch/requirements/2026-11-13-knowledge-governance/demo/index.html`
  * （demo 与全站 ki.css 同源：暖中性色板 + 墨绿 #2d6755、圆角 6/10/14、字号 11/12/14）。
+ * ⚠️ 唯一刻意偏离 demo 的地方：横向留白。demo `.page-body` 是 24px，本站统一由
+ * `.ki-content` 给 16px，页面容器**不得**再补 —— 见 `.gov-page` 注释（2026-11-15 用户报障）。
  *
  * ⚠️ 本文件**不再写任何字面色值**，一律取自 ki.css 的 `--ki-*` token：
  * 治理三页曾用一套 Tailwind 灰蓝字面量（#101828 / #667085 / #2f6f9f / #14715b），
@@ -15,17 +17,18 @@
 /* ════════ 页面骨架 ════════ */
 
 .gov-page {
-  /* .ki-content 已给 8px 16px，这里补到 24px 横向（= demo .page-body 的 24px） */
+  /* 横向留白统一交给 `.ki-content`（16px），与其它 tab 左边界齐平。
+     此前这里额外补 8px 凑 demo 的 24px，三页内容比「数据源」等页右移 8px（2026-11-15 用户反馈）。 */
   display: flex;
   flex-direction: column;
   gap: var(--ki-space-4);
-  padding: 0 var(--ki-space-2) var(--ki-space-8);
+  padding: 0 0 var(--ki-space-8);
   font-size: var(--ki-font-size-md);
   line-height: 1.55;
   color: var(--ki-color-text);
 }
 
-/* 页头：面包屑 + 右侧动作（demo .page-head 的分栏在 AppShell 顶栏，这里只留分隔线） */
+/* 副标题行：scope 徽标 + 一句口径说明（页面身份由顶栏 H1 承载，这里不再重复页面名） */
 .gov-head {
   display: flex;
   align-items: center;
@@ -42,7 +45,6 @@
   margin: 0;
   font-size: var(--ki-font-size-md);
 }
-.gov-head__sep { color: var(--ki-color-border-strong); }
 .gov-head__actions { margin-left: auto; display: flex; align-items: center; gap: var(--ki-space-2); }
 /* 页头里的说明是正文口径（14px），表格里才用 12px */
 .gov-head__path .gov-cell-muted { font-size: var(--ki-font-size-md); color: var(--ki-color-text-muted); }
@@ -932,9 +934,6 @@
 
 /* ════════ 回收站 ════════ */
 .gov-strike { text-decoration: line-through; text-decoration-thickness: 1px; color: var(--ki-color-text-subtle); }
-
-/* 治理页不显示全局大标题（AppShell 对 /governance/* 传空串） */
-.ki-workspace-title:empty { display: none; }
 
 /* ════════ 焦点态（demo 全局 :focus-visible）════════ */
 .gov-btn:focus-visible,

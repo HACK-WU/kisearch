@@ -79,6 +79,16 @@ const NAV_MAIN = [
   { to: '/resources', label: '资源', icon: 'compass' },
 ];
 
+/**
+ * 知识治理三页的顶栏标题（与侧栏「知识治理」分组的 label 保持一致）。
+ * 它们挂在 `NAV_MAIN` 之外，`currentLabel` 的常规查表命中不到，故单列一张表。
+ */
+const GOVERNANCE_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ['/governance/lifecycle', '分类'],
+  ['/governance/events', '事件'],
+  ['/governance/trash', '回收站'],
+];
+
 function useTheme(): { theme: string; toggle: () => void } {
   const [theme, setTheme] = useState(() => {
     try {
@@ -332,11 +342,12 @@ export function AppShell(): JSX.Element {
     setSearchParams((prev) => withChatOpenParam(prev, intent), { replace: true });
   }, [isChatRoute, chatOpen, chatStore, searchParams, setSearchParams]);
   /**
-   * 知识治理三页自带页头（scope 徽标 + 面包屑），demo 里没有全局大标题那一层。
-   * 这里对 /governance/* 返回空串，配合 CSS `.ki-workspace-title:empty{display:none}` 收起。
+   * 顶栏 H1 是**页面身份的唯一出口**（与「数据源」等页同口径）。
+   * 知识治理三页不在 `NAV_MAIN` 里，故单独查表；此前对 /governance/* 返回空串把它藏起来，
+   * 页面身份只剩页内小字面包屑，看起来像"没有标题"（2026-11-15 用户反馈）。
    */
-  const isGovernanceRoute = location.pathname.startsWith('/governance');
-  const currentLabel = isGovernanceRoute ? '' : navItems.find((item) =>
+  const govLabel = GOVERNANCE_LABELS.find(([path]) => location.pathname.startsWith(path))?.[1];
+  const currentLabel = govLabel ?? navItems.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
   )?.label ?? (location.pathname.startsWith('/users')
     ? '用户管理'

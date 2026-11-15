@@ -181,8 +181,6 @@ export function LifecyclePage(): JSX.Element {
       <header className="gov-head">
         <p className="gov-head__path">
           <span className="gov-badge gov-badge--kb">{scope}</span>
-          <span>文档分类</span>
-          <span className="gov-head__sep">·</span>
           <span className="gov-cell-muted">{group || '全部 Group'}</span>
         </p>
         <div className="gov-head__actions">

@@ -107,8 +107,6 @@ export function TrashPage(): JSX.Element {
       <header className="gov-head">
         <p className="gov-head__path">
           <span className="gov-badge gov-badge--kb">{scope}</span>
-          <span>回收站</span>
-          <span className="gov-head__sep">·</span>
           <span className="gov-cell-muted">
             保留 {settings.keepDays} 天，{settings.expireAction === 'purge' ? '到期自动清除' : '到期仅提醒'}
           </span>
