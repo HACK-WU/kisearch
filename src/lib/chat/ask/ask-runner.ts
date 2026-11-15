@@ -43,6 +43,7 @@ import {
   type AskInput,
   type AskResult,
 } from './ask-contract.js';
+import { MCP_ASK_ADAPT_BLOCK, composeAskUserText } from './ask-prompt.js';
 import {
   appendAskTurn,
   askSessionExpiresAt,
@@ -208,7 +209,8 @@ async function resolveAskSession(
       ok: false,
       error: {
         code: 'ASK_CONTEXT_EXPIRED',
-        message: `上下文已过期（最后一次交互超过 ${Math.round(ttlMs / 60_000)} 分钟）：请开启新会话并带上必要上文。`,
+        message: `上下文已过期（最后一次交互超过 ${Math.round(ttlMs / 60_000)} 分钟）：请开启新会话；`
+          + '必要前提可用 background 随新问题一起传（背景是一次性的，不落盘，过期后不会自动继承）。',
         retryable: false,
       },
     };
@@ -358,8 +360,12 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
     for await (const ev of runToolLoop({
       scope: input.scope,
       conv,
-      userText: input.question,
-      convSystemPrompt: '',
+      // ★ 背景只拼进**本轮** user 消息：下方 `appendAskTurn` 写的仍是 `input.question` 原文，
+      //   因此背景永不进短会话（R4 的"不落盘"由这一处结构性保证，不靠额外判断）
+      userText: composeAskUserText(input.question, input.background),
+      // ★ MCP 通道适配块：`buildSystemMessages` 会把它追加在注入块之后（硬性规则之后），
+      //   故无需改 tool-loop（见 ask-prompt.ts 文件头）
+      convSystemPrompt: MCP_ASK_ADAPT_BLOCK,
       ...(input.capabilities ? { capabilities: input.capabilities } : {}),
       // 始终传内部 controller：它已与 input.signal 联动（任一触发即中止）
       signal: controller.signal,

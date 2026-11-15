@@ -52,7 +52,7 @@ interface Harness {
   captured: CapturedRequest[];
   chatDir: string;
   runAsk: (input: {
-    scope: string; question: string; contextId?: string; principalKey?: string;
+    scope: string; question: string; background?: string; contextId?: string; principalKey?: string;
     capabilities?: ReadonlySet<string>; signal?: AbortSignal;
   }) => Promise<AskResultShape>;
   cleanup: () => Promise<void>;
@@ -324,6 +324,11 @@ it('⑧ 过期 contextId → ASK_CONTEXT_EXPIRED：删文件且零上游请求',
     const result = await h.runAsk({ scope: 'default', question: 'x', contextId: staleId });
     assert.equal(result.ok, false);
     assert.equal(result.error?.code, 'ASK_CONTEXT_EXPIRED');
+    assert.match(
+      result.error?.message ?? '',
+      /background/,
+      '过期文案必须告诉调用方：一次性背景不会自动继承，可用 background 随新问题重传',
+    );
     assert.equal(h.captured.length, 0, '过期必须在发起上游请求之前就拒绝');
     assert.ok(!fs.existsSync(filePath), '判定过期后必须删除文件，不留脏数据');
   } finally {
@@ -376,6 +381,83 @@ it('⑪ 上下文超预算 → ASK_CONTEXT_BUDGET_EXCEEDED', async () => {
     assert.equal(result.ok, false);
     assert.equal(result.error?.code, 'ASK_CONTEXT_BUDGET_EXCEEDED');
     assert.equal(h.captured.length, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+// ── 三期（REQ-20261115-001）：问题背景 background ─────────────────────
+
+it('⑫ 背景进 user 消息、不进 system 组；MCP 适配块是最后一块 system', async () => {
+  const h = await createHarness(retrievalThenAnswer(0));
+  try {
+    const background = '项目：kisearch；环境：本机 macOS；已试：重启 daemon 无效';
+    const result = await h.runAsk({ scope: 'default', question: '为什么导入卡住', background });
+    assert.equal(result.ok, true);
+    const messages = h.captured[0]!.messages;
+    const systems = messages.filter((m) => m.role === 'system').map((m) => m.content);
+    const users = messages.filter((m) => m.role === 'user');
+    const user = users[users.length - 1]!;
+    assert.match(user.content, /【问题背景/, '背景必须有独立段标记，避免被当成问题正文');
+    assert.ok(user.content.includes(background), '背景原文必须出现在 user 消息里');
+    assert.ok(user.content.endsWith('为什么导入卡住'), '问题在背景之后，且是 user 消息的收尾');
+    assert.ok(systems.some((s) => s.includes('【本次回答的通道与环境】')), 'MCP 适配块必须注入');
+    assert.ok(
+      systems[systems.length - 1]!.includes('【本次回答的通道与环境】'),
+      '适配块必须在注入块之后（buildSystemMessages 的 convSystemPrompt 位）',
+    );
+    assert.equal(systems.some((s) => s.includes(background)), false, '背景不得进 system 组（R2）');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+it('⑬ 缺省背景：user 消息逐字节等于问题（R1 向后兼容）', async () => {
+  const h = await createHarness(retrievalThenAnswer(0));
+  try {
+    const question = '为什么导入卡住';
+    const result = await h.runAsk({ scope: 'default', question });
+    assert.equal(result.ok, true);
+    const users = h.captured[0]!.messages.filter((m) => m.role === 'user');
+    assert.equal(users[users.length - 1]!.content, question);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+it('⑭ 背景不落盘：短会话只存问题原文（一次性语义，R4）', async () => {
+  const h = await createHarness(retrievalThenAnswer(0));
+  try {
+    const background = '项目：kisearch；版本：0.1.0';
+    const result = await h.runAsk({ scope: 'default', question: 'Q1', background });
+    assert.equal(result.ok, true);
+    const file = path.join(h.chatDir, 'default', `${result.contextId}.json`);
+    const saved = JSON.parse(fs.readFileSync(file, 'utf-8')) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const userMsg = saved.messages.find((m) => m.role === 'user')!;
+    assert.equal(userMsg.content, 'Q1', '背景不得写入短会话（否则会跨轮继承 + 占消息预算）');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+it('⑮ 续接不继承背景：第二轮任何消息都不含首轮背景（一次性语义）', async () => {
+  const h = await createHarness(retrievalThenAnswer(0));
+  try {
+    const background = '项目：kisearch；版本：0.1.0';
+    const first = await h.runAsk({ scope: 'default', question: 'Q1', background });
+    assert.equal(first.ok, true);
+    const second = await h.runAsk({ scope: 'default', question: 'Q2', contextId: first.contextId });
+    assert.equal(second.ok, true);
+    const round2 = h.captured[1]!.messages;
+    const users = round2.filter((m) => m.role === 'user');
+    assert.equal(users[users.length - 1]!.content, 'Q2', '本轮问题不应被首轮背景污染');
+    assert.equal(
+      round2.some((m) => m.content.includes(background)),
+      false,
+      '首轮背景不得以任何形式出现在第二轮（历史只回放 role + content 的原文）',
+    );
   } finally {
     await h.cleanup();
   }

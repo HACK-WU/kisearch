@@ -29,6 +29,7 @@ import { runAsk } from '../chat/ask/ask-runner.js';
 import { acquireAskSlot, releaseAskSlot } from '../chat/ask/ask-limiter.js';
 import { ASK_LOG_EVENTS, askLog } from '../chat/ask/ask-log.js';
 import { ASK_QUESTION_MAX_CHARS, type AskResult } from '../chat/ask/ask-contract.js';
+import { normalizeAskBackground } from '../chat/ask/ask-prompt.js';
 import type { Capability } from '../auth/capabilities.js';
 import { TOOL_TIMEOUT, ToolTimeoutError, withTimeout } from './util.js';
 
@@ -81,6 +82,8 @@ function okResult(result: AskResult, scope: string): { content: Array<{ type: 't
 /** 工具描述：外部 AI 决定"要不要用 / 怎么用"的唯一依据，四要素缺一不可 */
 const TOOL_DESCRIPTION = '让 ki 用它自己的模型 + 指定知识库回答一个问题：内部会自动多轮检索再合成，返回答案与来源。'
   + '默认每次调用都是全新问答；要追问就把上一次返回的 contextId 作为 context_id 传回（10 分钟内有效，每次交互顺延）。'
+  + '问题有前提（项目 / 版本 / 环境 / 约束 / 已试方案）时用 background 传：只对本轮生效、不占上下文，2~3 句即可；'
+  + '背景是"前提"不是"材料"，整段日志或代码请改用 ki_search 取片段后自行归纳。'
   + '适合"需要知识库综合结论"的问题；若只要原始文档片段，请用 ki_search。'
   + '单次耗时通常 5~30 秒，超过 45 秒会返回已生成的部分答案（truncated=true）。';
 
@@ -98,6 +101,12 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
       ),
       question: z.string().min(1).describe(
         '自然语言问题（建议一句话并带上必要限定条件）',
+      ),
+      background: z.string().optional().describe(
+        '本次提问的简短背景（可选，≤2000 字符）：项目 / 版本 / 环境 / 约束 / 已试过的方案，2~3 句即可。'
+        + '例："项目 kisearch 0.1.0，本机 macOS，启动 daemon 时报 worker not open，已试重启无效"。'
+        + '只对本轮生效、不写入上下文（要跨轮沿用请每轮重传，或把前提写进首轮问题再用 context_id 续接）。'
+        + '⚠️ 它是"前提"不是"材料"：整段日志 / 代码请改用 ki_search 取片段。',
       ),
       context_id: z.string().optional().describe(
         '续接上一次问答：传回它返回的 contextId。缺省（推荐）＝每次全新问答。'
@@ -120,6 +129,12 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
           + '若要引用大段材料，请改用 ki_search 取片段后自行归纳（问答不负责"读长文"）。',
           false,
         );
+      }
+
+      // ①.5 背景（REQ-20261115-001）：可省略；空串 / 全空白等同未传，超上限 fail-loud
+      const background = normalizeAskBackground(args.background);
+      if (!background.ok) {
+        return failResult(background.code, background.message, false);
       }
 
       // ② scope 形态：一期只支持单个具体知识库
@@ -177,7 +192,7 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
       if (!slot.ok) {
         const code = slot.code;
         askLog(ASK_LOG_EVENTS.THROTTLED, {
-          scope, principalKey, questionChars: question.length, code, retryable: true,
+          scope, principalKey, questionChars: question.length, backgroundChars: background.value.length, code, retryable: true,
         });
         return failResult(
           code,
@@ -196,6 +211,7 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
           runAsk({
             scope,
             question,
+            ...(background.value.length > 0 ? { background: background.value } : {}),
             ...(contextIdArg.length > 0 ? { contextId: contextIdArg } : {}),
             // 归属校验用：不同 Token 不能续接同一个 contextId（S-03 §4.3）
             principalKey,
@@ -212,6 +228,7 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
           truncated: result.truncated,
           ...(result.truncatedReason ? { truncatedReason: result.truncatedReason } : {}),
           questionChars: question.length,
+          backgroundChars: background.value.length,
           ...(result.usage?.promptTokens !== undefined ? { promptTokens: result.usage.promptTokens } : {}),
           ...(result.usage?.completionTokens !== undefined ? { completionTokens: result.usage.completionTokens } : {}),
           ...(result.error ? { code: result.error.code, retryable: result.error.retryable } : {}),
@@ -226,7 +243,7 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
         const timedOut = err instanceof ToolTimeoutError;
         const code = timedOut ? 'ASK_TIMEOUT' : 'ASK_INTERNAL';
         askLog(ASK_LOG_EVENTS.ERROR, {
-          scope, principalKey, questionChars: question.length, code, retryable: true,
+          scope, principalKey, questionChars: question.length, backgroundChars: background.value.length, code, retryable: true,
         });
         return failResult(
           code,

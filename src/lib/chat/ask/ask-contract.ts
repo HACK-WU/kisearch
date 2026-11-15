@@ -35,6 +35,17 @@ import type { SourceRef } from '../chat-contract.js';
  */
 export const ASK_QUESTION_MAX_CHARS = 4000;
 
+/**
+ * 背景长度上限（字符，REQ-20261115-001 · R3）。
+ *
+ * **语义是「简短前提」**：项目 / 版本 / 环境 / 约束 / 已试过的方案。2000 ≈ 1000 汉字，
+ * 足以容纳 20~30 行报错摘要；再长就不是背景而是「材料」，应改用 `ki_search` 取片段。
+ *
+ * ⚠️ 与 `ASK_QUESTION_MAX_CHARS` **各自独立校验**（不合并计算）：
+ * 两者语义不同，合并会让"问得长"挤掉"交代前提"的空间，反之亦然。
+ */
+export const ASK_BACKGROUND_MAX_CHARS = 2000;
+
 /** 内层工具循环的默认轮次上限（可被 `llm.askMaxRounds` 覆盖） */
 export const ASK_MAX_ROUNDS_DEFAULT = 6;
 /**
@@ -71,6 +82,14 @@ export interface AskInput {
   scope: string;
   /** 用户问题原文（非空由 S-02 校验） */
   question: string;
+  /**
+   * **一次性问题背景**（可选，REQ-20261115-001）：项目 / 版本 / 环境 / 约束 / 已试方案等简短前提。
+   *
+   * · 生效范围：**只对本轮**（拼进本轮 user 消息），**不写入短会话**（拍板 §10-1）；
+   * · 缺省 / 空串 ⇒ 行为与改造前**逐字节一致**（R1 的硬约束）；
+   * · 长度由工具面按 `ASK_BACKGROUND_MAX_CHARS` 校验，本层不再判（与 `question` 同一分工）。
+   */
+  background?: string;
   /**
    * 续接：传回上一次返回的 `contextId`；**缺省 = 全新问答**（一期语义，行为与一期逐字段一致）。
    *

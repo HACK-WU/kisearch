@@ -45,6 +45,11 @@ export interface AskLogFields {
   truncatedReason?: string;
   /** 问题**字符数**（★ 只记长度，绝不记正文） */
   questionChars?: number;
+  /**
+   * 背景**字符数**（REQ-20261115-001 · R8；★ 只记长度，绝不记正文）。
+   * `0` = 本次未传背景；用于观察真实背景长度分布，据此复核 2000 上限是否合适。
+   */
+  backgroundChars?: number;
   /** 规范化错误码（`ASK_*`） */
   code?: string;
   /** 是否可重试 */
@@ -56,7 +61,7 @@ export interface AskLogFields {
 /** 输出字段顺序（固定，便于日志并排比较与 grep） */
 const FIELD_ORDER: readonly (keyof AskLogFields)[] = [
   'scope', 'principalKey', 'rounds', 'elapsedMs', 'truncated', 'truncatedReason',
-  'questionChars', 'code', 'retryable', 'promptTokens', 'completionTokens',
+  'questionChars', 'backgroundChars', 'code', 'retryable', 'promptTokens', 'completionTokens',
 ];
 
 /** 高置信度敏感形态（纵深防御：即便调用方误传也在出口遮罩） */
