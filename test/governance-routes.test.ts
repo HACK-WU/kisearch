@@ -33,7 +33,7 @@ import { handleGovernanceRoutes } from '../src/lib/governance-http.js';
 
 const ROOT = process.cwd();
 
-/** 30 条治理路由：`[method, path, 期望能力]`。改路由必须同步改这张表（表就是契约） */
+/** 31 条治理路由：`[method, path, 期望能力]`。改路由必须同步改这张表（表就是契约） */
 const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['GET', '/governance/lifecycle/list', 'knowledge.read'],
   ['POST', '/governance/lifecycle/apply', 'knowledge.write'],
@@ -56,6 +56,7 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['POST', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['DELETE', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['POST', '/governance/events/evt_1/refs/search', 'knowledge.read'],
+  ['GET', '/governance/docs', 'knowledge.read'],
   ['GET', '/governance/docs/search', 'knowledge.read'],
   ['GET', '/governance/trash', 'knowledge.read'],
   ['POST', '/governance/trash/restore', 'knowledge.write'],
@@ -87,8 +88,8 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
     assert.deepEqual(problems, [], `以下路由登记有误：\n${problems.join('\n')}`);
   });
 
-  it('表里正好 30 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 30);
+  it('表里正好 31 条（新增/删除路由必须同步这张表）', () => {
+    assert.equal(ROUTES.length, 31);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {

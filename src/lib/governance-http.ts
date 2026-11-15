@@ -21,6 +21,8 @@ import {
   type GovernanceConfig, type LifecyclePreset,
 } from './governance-store.js';
 import { changeLifecycle } from './relation-lifecycle.js';
+import { resolveLifecycle } from './lifecycle.js';
+import { resolveVisibilityOfRelation } from './visibility-index.js';
 import { readAllGroupCaches } from './group-cache.js';
 import { listTypes, createType, updateType, deleteType } from './events/type-service.js';
 import {
@@ -406,6 +408,47 @@ export async function handleGovernanceRoutes(
           return sendJson(res, 200, { ok: true, scope, removed: true });
         }
       }
+    }
+
+    /**
+     * GET /governance/docs —— 文档列表**带分类**（分类页列表与批量条的数据源）。
+     *
+     * 为什么不复用 `/api/doc/list`：那个接口只回 group/name，不含 lifecycle。
+     * 前端拿它渲染列表就只能显示"未知分类"，再去逐篇查分类等于 N+1 次调用。
+     * 这里直接读分片 + 现算档位，一次返回列表所需的全部字段。
+     */
+    if (segs[0] === 'docs' && method === 'GET' && !segs[1]) {
+      const scope = scopeFromQuery();
+      const groupFilter = str(q.get('group'));
+      const keyword = (str(q.get('q')) ?? '').toLowerCase();
+      const limit = Math.min(Math.max(num(q.get('limit')) ?? 50, 1), 200);
+      const offset = Math.max(num(q.get('offset')) ?? 0, 0);
+      const now = Date.now();
+
+      const all: Array<Record<string, unknown>> = [];
+      for (const [group, doc] of readAllGroupCaches(scope)) {
+        if (groupFilter && group !== groupFilter) continue;
+        for (const rel of doc.hot_relations) {
+          if (keyword && !rel.text.toLowerCase().includes(keyword)) continue;
+          const lifecycle = resolveLifecycle(rel);
+          const visibility = resolveVisibilityOfRelation(scope, rel).mode;
+          all.push({
+            group,
+            name: rel.text,
+            lifecycle: lifecycle.kind,
+            ...(lifecycle.expiresAt !== undefined ? { expiresAt: lifecycle.expiresAt } : {}),
+            ...(rel.ttlDays !== undefined ? { ttlDays: rel.ttlDays } : {}),
+            ...(rel.eventId ? { eventId: rel.eventId } : {}),
+            ...(lifecycle.inconsistent ? { lifecycleWarning: lifecycle.reason } : {}),
+            visibility,
+            imported: rel.isImported === true,
+            remainDays: lifecycle.expiresAt !== undefined
+              ? Math.max(0, Math.ceil((lifecycle.expiresAt - now) / 86_400_000))
+              : null,
+          });
+        }
+      }
+      return sendJson(res, 200, { ok: true, scope, total: all.length, items: all.slice(offset, offset + limit) });
     }
 
     // ─── 文档搜索（手动添加参考文档）────────────────────

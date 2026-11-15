@@ -129,6 +129,7 @@ const RULES: Rule[] = [
   pattern('GET', /^\/governance\/events\/[^/]+$/, 'permission', 'knowledge.read'),
   pattern('PATCH', /^\/governance\/events\/[^/]+$/, 'permission', 'knowledge.write'),
   pattern('DELETE', /^\/governance\/events\/[^/]+$/, 'permission', 'knowledge.write'),
+  exact('GET', '/governance/docs', 'permission', 'knowledge.read'),
   exact('GET', '/governance/docs/search', 'permission', 'knowledge.read'),
   exact('GET', '/governance/trash', 'permission', 'knowledge.read'),
   exact('POST', '/governance/trash/restore', 'permission', 'knowledge.write'),

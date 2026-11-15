@@ -293,3 +293,41 @@ export interface GovernanceDiagnostics {
 export function getGovernanceDiagnostics(scope: string): Promise<GovernanceDiagnostics> {
   return req(`/api/governance/diagnostics?${new URLSearchParams({ scope }).toString()}`);
 }
+
+// ─── 文档列表（带分类，供分类页）──────────────────────
+
+export interface GovernanceDocItem {
+  group: string;
+  name: string;
+  lifecycle: LifecycleKind;
+  expiresAt?: number;
+  ttlDays?: number;
+  eventId?: string;
+  lifecycleWarning?: string;
+  visibility: Visibility;
+  imported: boolean;
+  /** 仅 temp：剩余天数（服务端算）；其他档位为 null */
+  remainDays: number | null;
+}
+
+export function listGovernanceDocs(
+  scope: string,
+  opts: { group?: string; q?: string; limit?: number; offset?: number } = {},
+): Promise<{ ok: true; scope: string; total: number; items: GovernanceDocItem[] }> {
+  const params = new URLSearchParams({ scope });
+  if (opts.group) params.set('group', opts.group);
+  if (opts.q) params.set('q', opts.q);
+  if (opts.limit) params.set('limit', String(opts.limit));
+  if (opts.offset) params.set('offset', String(opts.offset));
+  return req(`/api/governance/docs?${params.toString()}`);
+}
+
+export function applyLifecycleBatch(
+  scope: string,
+  items: Array<{ group: string; name: string; lifecycle: LifecycleKind; ttlDays?: number; eventId?: string }>,
+): Promise<{ ok: true; scope: string; succeeded: number; failed: Array<{ group: string; name: string; code?: string; error: string }> }> {
+  return req('/api/governance/lifecycle/batch-apply', {
+    method: 'POST',
+    body: JSON.stringify({ scope, items }),
+  });
+}
