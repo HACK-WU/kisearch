@@ -308,6 +308,8 @@ a:hover { text-decoration: underline; }
 @media (prefers-reduced-motion: reduce) { .ki-nav-item__busy { animation: none; } }
 .ki-nav-item__name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ki-nav-item__ext { font-size: 10px; font-weight: 600; color: var(--ki-color-text-subtle); background: var(--ki-color-surface-muted); padding: 1px 5px; border-radius: var(--ki-radius-tag); flex-shrink: 0; }
+/* 导航项右侧计数（知识治理三项）：与页面数字同源，弱化展示 */
+.ki-nav-item__count { margin-left: auto; font-size: 11px; color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums; }
 
 /* 图标：对齐 demo .icon（24 视框、1.8px 描边、currentColor） */
 .ki-icon {

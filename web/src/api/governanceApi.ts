@@ -112,10 +112,24 @@ export function listEventTypes(scope: string): Promise<{ ok: true; scope: string
   return req(`/api/governance/event-types?${new URLSearchParams({ scope }).toString()}`);
 }
 
+export interface StagePatch {
+  /** 已有阶段必须带 key；新增阶段**不带** key（服务端生成 st_N） */
+  key?: string;
+  name: string;
+  visibility: Visibility;
+  disabled?: boolean;
+}
+
 export function updateEventType(
   scope: string,
   id: string,
-  patch: { revision: number; name?: string; terminalAction?: 'keep' | 'trash'; fallbackDays?: number | null },
+  patch: {
+    revision: number;
+    name?: string;
+    stages?: StagePatch[];
+    terminalAction?: 'keep' | 'trash';
+    fallbackDays?: number | null;
+  },
 ): Promise<{ ok: true; type: EventTypeView }> {
   return req(`/api/governance/event-types/${encodeURIComponent(id)}`, {
     method: 'PATCH',
@@ -135,6 +149,8 @@ export interface EventView {
   stageIndex: number;
   closedAt: number | null;
   revision: number;
+  /** 最后更新时间（列表第二行显示「N 小时前」） */
+  updatedAt?: number;
   stage?: { key: string; name: string; index: number; visibility: Visibility };
   memberTotal?: number;
   docsPreview?: Array<{ group: string; name: string }>;
@@ -160,7 +176,10 @@ export function listEvents(
   return req<EventListResponse>(`/api/governance/events?${params.toString()}`);
 }
 
-export function createEvent(scope: string, args: { title: string; typeId: string }): Promise<{ ok: true; event: EventView }> {
+export function createEvent(
+  scope: string,
+  args: { title: string; typeId: string; stageKey?: string },
+): Promise<{ ok: true; event: EventView }> {
   return req('/api/governance/events', {
     method: 'POST',
     body: JSON.stringify({ scope, ...args }),
@@ -287,7 +306,13 @@ export interface GovernanceDiagnostics {
   scope: string;
   pending: { count: number; items: Array<{ group: string; relation: string; target: string; attempts: number }> };
   failures: { items: Array<{ group: string; relation: string; kind: string; code: string; message: string; attempts: number }> };
-  trash: { total: number };
+  trash: {
+    total: number;
+    /** 正文缺失（sizeBytes===0）的条目：恢复只会写回空串，UI 应禁止恢复 */
+    emptyContent: Array<{ group: string; name: string; dirName: string; reason: string }>;
+    /** emptyContent 只扫最近 200 条，这里给出实际扫描条数 */
+    scanned: number;
+  };
 }
 
 export function getGovernanceDiagnostics(scope: string): Promise<GovernanceDiagnostics> {
@@ -334,4 +359,53 @@ export function applyLifecycleBatch(
     method: 'POST',
     body: JSON.stringify({ scope, items }),
   });
+}
+
+// ─── 事件详情（右栏）───────────────────────────────────
+
+export interface EventDetail {
+  ok: true;
+  scope: string;
+  event: EventView & { typeName?: string };
+  members: Array<{ group: string; name: string }>;
+  logs: Array<{ fromKey: string | null; toKey: string; at: number; by: string; note?: string }>;
+}
+
+export function getEventDetail(scope: string, eventId: string): Promise<EventDetail> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}?${new URLSearchParams({ scope }).toString()}`);
+}
+
+// ─── 参考文档 ─────────────────────────────────────────
+
+export interface RefItem {
+  group: string;
+  name: string;
+  addedBy: 'ai' | 'manual';
+  addedAt: number;
+  score?: number;
+  stale: boolean;
+  visibility: Visibility;
+}
+
+export function listRefs(scope: string, eventId: string): Promise<{ ok: true; refs: RefItem[] }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs?${new URLSearchParams({ scope }).toString()}`);
+}
+
+export function searchRefs(scope: string, eventId: string, query: string): Promise<{ ok: true; hits: Array<{ group: string; name: string; visibility: Visibility }> }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs/search`, {
+    method: 'POST',
+    body: JSON.stringify({ scope, query }),
+  });
+}
+
+export function addRefs(scope: string, eventId: string, docs: Array<{ group: string; name: string }>): Promise<{ ok: true; added: number; skipped: string[] }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs`, {
+    method: 'POST',
+    body: JSON.stringify({ scope, docs, addedBy: 'manual' }),
+  });
+}
+
+export function removeRef(scope: string, eventId: string, group: string, name: string): Promise<{ ok: true }> {
+  const params = new URLSearchParams({ scope, group, name });
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs?${params.toString()}`, { method: 'DELETE' });
 }

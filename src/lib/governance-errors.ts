@@ -23,6 +23,8 @@ export const GOVERNANCE_CODE_NUMBERS = {
   PRESET_BUILTIN: 1008,
   GROUP_DEFAULT_EVENT_UNSUPPORTED: 1009,
   LIFECYCLE_STATE_INVALID: 1010,
+  /** 预设档位越界：`LifecyclePreset.kind` 只允许 wiki / temp（event 必须落到具体事件，预设表达不了） */
+  PRESET_KIND_INVALID: 1011,
 
   // ── S-02 事件（1100-1199）──
   EVENT_NOT_FOUND: 1101,
@@ -54,6 +56,8 @@ export const GOVERNANCE_CODE_NUMBERS = {
   EMPTY_SELECTION: 1305,
   PURGE_CONFIRM_MISMATCH: 1306,
   TRASH_SETTINGS_INVALID: 1307,
+  /** 快照拿不到正文：进站会得到空文档，必须中止删除（fail-closed） */
+  TRASH_CONTENT_MISSING: 1308,
 
   // ── S-05 参考文档（1400-1499）──
   REF_ALREADY_ASSOCIATED: 1401,

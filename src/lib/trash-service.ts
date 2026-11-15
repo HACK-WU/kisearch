@@ -52,7 +52,7 @@ export interface MoveToTrashArgs {
 
 export type MoveToTrashOutcome =
   | { ok: true; item: TrashItem }
-  | { ok: false; code: 'TRASH_WRITE_FAILED'; error: string };
+  | { ok: false; code: 'TRASH_WRITE_FAILED' | 'TRASH_CONTENT_MISSING'; error: string };
 
 /**
  * 把文档快照写进回收站。
@@ -63,6 +63,20 @@ export function moveToTrash(args: MoveToTrashArgs): MoveToTrashOutcome {
   const now = args.now ?? Date.now();
   try {
     const content = readLocalKbContent(args.scope, args.group, args.relation);
+    /**
+     * 正文为空 → **拒绝进站**（fail-closed）。
+     *
+     * 空快照不是"可逆快照"：调用方据此继续删除，文档就只剩一个 0 字节条目，
+     * 恢复只会写回空串（challenger C1 的存量坏条目正是这么产生的）。
+     * 与本文档头「必须保证可恢复才允许删除」的事务边界一致。
+     */
+    if (!content.trim()) {
+      return {
+        ok: false,
+        code: 'TRASH_CONTENT_MISSING',
+        error: `读不到「${args.group}/${args.relation}」的正文，进站会得到空文档，已中止删除（未删除任何数据）`,
+      };
+    }
     const settings = readTrashSettings(args.scope);
     const item = writeTrashItem({
       scope: args.scope,
@@ -84,7 +98,8 @@ export function moveToTrash(args: MoveToTrashArgs): MoveToTrashOutcome {
 
 /** 读 local KB 里某文档的原文（结构：`{ [relation]: string | { moduleInfo | content } }`） */
 function readLocalKbContent(scope: string, group: string, relation: string): string {
-  const kbPath = path.join(getLocalKbDir(scope, group), 'index.json');
+  // getLocalKbDir 返回的就是 index.json 文件路径，不能再 join 一次（否则变成 index.json/index.json）
+  const kbPath = getLocalKbDir(scope, group);
   const kb = readJson<Record<string, unknown>>(kbPath);
   if (!kb) return '';
   const raw = kb[relation];
@@ -140,9 +155,15 @@ export function restoreFromTrash(args: RestoreArgs): RestoreOutcome {
   }
 
   // ② 还原原文 + 附件
-  const kbDir = getLocalKbDir(args.scope, item.group);
-  fs.mkdirSync(kbDir, { recursive: true });
-  const kbPath = path.join(kbDir, 'index.json');
+  /**
+   * ⚠ `getLocalKbDir` 名字像目录，**实际返回的是 `<group>/index.json` 文件路径**
+   * （src/lib/scope.ts:115-118）。此前把它的返回值当目录用，导致：
+   *   ① `mkdirSync(文件路径)` → EEXIST，恢复直接失败；
+   *   ② 即使建目录成功，`path.join(它, 'index.json')` 也会变成 `index.json/index.json`。
+   * 正确写法：拿文件路径 → 只建它的父目录。
+   */
+  const kbPath = getLocalKbDir(args.scope, item.group);
+  fs.mkdirSync(path.dirname(kbPath), { recursive: true });
   const kb = readJson<Record<string, unknown>>(kbPath) ?? {};
   kb[item.name] = content;
   writeJson(kbPath, kb);
@@ -226,8 +247,16 @@ function recomputeLifecycle(
   if (target === 'wiki') return { lifecycle: 'wiki', changed: true, ttlAssumed: false };
 
   const originalTtl = snapshot?.ttlDays;
-  const ttlDays = typeof originalTtl === 'number' && originalTtl > 0 ? originalTtl : item.ttlDays > 0 ? item.ttlDays : FALLBACK_TTL_DAYS;
-  const ttlAssumed = !(typeof originalTtl === 'number' && originalTtl > 0) && !(item.ttlDays > 0);
+  const hasOriginalTtl = typeof originalTtl === 'number' && originalTtl > 0;
+  const ttlDays = hasOriginalTtl ? originalTtl : item.ttlDays > 0 ? item.ttlDays : FALLBACK_TTL_DAYS;
+  /**
+   * 「用了回退值」必须读**入站时落盘的** `ttlAssumed`：
+   * 入站时已把缺省 ttlDays 规范成 7（`writeTrashItem`），恢复侧再靠 `item.ttlDays > 0` 判断
+   * 永远为真 → 「原期限未知」的提示会丢。旧条目没有该字段时才回退到按 ttlDays 推断。
+   */
+  const ttlAssumed = hasOriginalTtl
+    ? false
+    : item.ttlAssumed !== undefined ? item.ttlAssumed : !(item.ttlDays > 0);
 
   // 事件文档：保留阶段可见性（B4 由事件决定档位），此处只保留 eventId
   if (snapshot?.eventId && target !== 'temp') {

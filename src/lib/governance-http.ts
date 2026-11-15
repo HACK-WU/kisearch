@@ -17,7 +17,7 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import { readJson } from './store.js';
 import { GovernanceError } from './governance-errors.js';
 import {
-  readGovernance, writeGovernance, validateTrashSettings, BUILTIN_PRESETS, TRASH_KEEP_DAYS,
+  readGovernance, writeGovernance, validateTrashSettings, validatePresetKind, BUILTIN_PRESETS, TRASH_KEEP_DAYS,
   type GovernanceConfig, type LifecyclePreset,
 } from './governance-store.js';
 import { changeLifecycle } from './relation-lifecycle.js';
@@ -218,18 +218,28 @@ export async function handleGovernanceRoutes(
       }
 
       if (segs[1] === 'presets') {
-        const scope = scopeFromQuery();
-        const config = readGovernance(scope);
         if (method === 'GET') {
+          const scope = scopeFromQuery();
+          const config = readGovernance(scope);
           return sendJson(res, 200, { ok: true, scope, presets: config.lifecyclePresets });
         }
         if (method === 'POST') {
           const b = await body();
-          const kind = str(b.kind) ?? 'temp';
+          /**
+           * scope 必须取**请求体**：页面把 scope 放 body 里，此前这里读 query
+           * → 非 default 库新建的分类会静默写进 default 的 governance.json。
+           */
+          const scope = scopeFromBody(b);
+          const config = readGovernance(scope);
+          // 档位只允许 wiki / temp：event 预设无法表达"绑哪个事件"，落盘即契约外数据
+          const kindCheck = validatePresetKind(str(b.kind) ?? 'temp');
+          if (!kindCheck.ok) {
+            return sendJson(res, 400, { ok: false, code: 'PRESET_KIND_INVALID', error: kindCheck.message });
+          }
           const preset: LifecyclePreset = {
             id: str(b.id) ?? `preset_${Date.now().toString(36)}`,
             name: String(b.name ?? '').trim(),
-            kind: kind as LifecyclePreset['kind'],
+            kind: kindCheck.kind,
             ...(num(pick(b, 'ttlDays', 'ttl_days')) !== undefined ? { ttlDays: num(pick(b, 'ttlDays', 'ttl_days')) } : {}),
           };
           if (!preset.name) return sendJson(res, 400, { ok: false, code: 'PRESET_NAME_REQUIRED', error: '预设名不能为空' });
@@ -242,6 +252,8 @@ export async function handleGovernanceRoutes(
           return sendJson(res, 200, { ok: true, scope, preset });
         }
         if (method === 'DELETE') {
+          const scope = scopeFromQuery();
+          const config = readGovernance(scope);
           const id = str(segs[2]);
           const next: GovernanceConfig = {
             ...config,
@@ -324,6 +336,7 @@ export async function handleGovernanceRoutes(
         const event = await createEvent(scope, {
           title: String(b.title ?? ''),
           typeId: String(b.typeId ?? b.type_id ?? ''),
+          ...(str(pick(b, 'stageKey', 'stage_key')) ? { stageKey: str(pick(b, 'stageKey', 'stage_key'))! } : {}),
           ...(Array.isArray(b.docs) ? { docs: b.docs as Array<{ group: string; name: string }> } : {}),
           by: 'user',
         });
@@ -556,12 +569,26 @@ export async function handleGovernanceRoutes(
         const raw = readJson<FailureFile>(failureFilePath(scope));
         if (raw && Array.isArray(raw.items)) failures = raw;
       } catch { /* 诊断文件损坏时按空处理 */ }
+      // 只遍历一次回收站目录：total 与实际条目必须来自同一份快照，否则两次数值可能不一致
+      const trash = listTrash(scope, { limit: 200 });
       return sendJson(res, 200, {
         ok: true,
         scope,
         pending: { count: pendingCount(scope), items: listPending(scope) },
         failures,
-        trash: { total: listTrash(scope).total },
+        trash: {
+          total: trash.total,
+          /**
+           * 正文缺失的条目（challenger C1）：`sizeBytes === 0` 意味着快照里没有正文，
+           * 恢复只会写进空串。历史上因 `getLocalKbDir` 双 join 产生过一批，
+           * 这里持续暴露，避免它们被误恢复成空文档。
+           */
+          emptyContent: trash.items
+            .filter((item) => item.sizeBytes === 0)
+            .map((item) => ({ group: item.group, name: item.name, dirName: item.dirName, reason: item.reason })),
+          /** `emptyContent` 只扫最近 200 条（limit 上限），更老的条目可能未覆盖 */
+          scanned: trash.items.length,
+        },
       });
     }
 

@@ -111,6 +111,20 @@ function normalizeTrashSettings(input?: Partial<TrashSettings>): TrashSettings {
   return { keepDays, expireAction };
 }
 
+/**
+ * 预设档位校验：只允许 wiki / temp。
+ *
+ * `event` 不能做预设——它必须落到**具体事件**上，预设表达不了绑哪个事件；
+ * 放行会写出一份无法应用的预设（`LifecyclePreset.kind` 本就不含该值）。
+ */
+export function validatePresetKind(kind: unknown): { ok: true; kind: 'wiki' | 'temp' } | { ok: false; message: string } {
+  if (kind === 'wiki' || kind === 'temp') return { ok: true, kind };
+  return {
+    ok: false,
+    message: `分类预设的档位只能是 wiki / temp，收到「${String(kind)}」（跟随事件请在文档行内绑定具体事件）`,
+  };
+}
+
 export function validateTrashSettings(input: Partial<TrashSettings>): { ok: true; value: TrashSettings } | { ok: false; message: string } {
   if (input.keepDays !== undefined && !TRASH_KEEP_DAYS.includes(input.keepDays)) {
     return { ok: false, message: `保留天数只能是 ${TRASH_KEEP_DAYS.join(' / ')}，收到「${String(input.keepDays)}」` };

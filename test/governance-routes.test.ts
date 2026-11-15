@@ -251,4 +251,41 @@ describe('⑤ 真实 HTTP 冒烟（body 只读一次）', () => {
       await close();
     }
   });
+
+  it('POST /lifecycle/presets：kind=event 被拒；scope 取请求体而非 query', { timeout: 10_000 }, async () => {
+    const presetScope = `gov-http-preset-${Date.now()}`;
+    registerTestScope(presetScope);
+    created.push(presetScope);
+    initScope(presetScope);
+    const { base, close } = await startServer(null);
+    try {
+      // ① 越界档位 → 400 + PRESET_KIND_INVALID（不能把 event 落成预设）
+      const bad = await fetch(`${base}/api/governance/lifecycle/presets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: presetScope, name: '跟随事件', kind: 'event' }),
+      });
+      assert.equal(bad.status, 400);
+      const badBody = await bad.json() as { code?: string };
+      assert.equal(badBody.code, 'PRESET_KIND_INVALID');
+
+      // ② 合法档位 → 写入 body 指定的 scope
+      const okRes = await fetch(`${base}/api/governance/lifecycle/presets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: presetScope, name: '七天内清理', kind: 'temp', ttlDays: 7 }),
+      });
+      assert.equal(okRes.status, 200);
+      const okBody = await okRes.json() as { scope?: string; preset?: { kind?: string } };
+      assert.equal(okBody.scope, presetScope);
+      assert.equal(okBody.preset?.kind, 'temp');
+
+      // ③ 该 scope 读得到它（此前读 query scope → 会写进 default 的 governance.json）
+      const got = await fetch(`${base}/api/governance/lifecycle/presets?scope=${presetScope}`);
+      const gotBody = await got.json() as { presets: Array<{ name: string }> };
+      assert.ok(gotBody.presets.some((p) => p.name === '七天内清理'), '预设必须落在请求体指定的 scope');
+    } finally {
+      await close();
+    }
+  });
 });

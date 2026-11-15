@@ -160,6 +160,12 @@ function summarizeVisibility(memberTotal: number, visibility: Visibility): { ful
 export interface CreateEventInput {
   title: string;
   typeId: string;
+  /**
+   * 起始阶段 key（可选，缺省 = 首阶段）。
+   * 必须是该类型已定义且**未停用**的阶段——前端弹窗有「起始阶段」选择，
+   * 若这里不认这个参数，UI 的选择会被静默丢弃（事件落在首阶段，可能是 hidden）。
+   */
+  stageKey?: string;
   /** 初始成员（可选） */
   docs?: Array<{ group: string; name: string }>;
   by?: 'user' | 'ai';
@@ -176,6 +182,22 @@ export async function createEvent(scope: string, input: CreateEventInput): Promi
       });
     }
 
+    // 起始阶段：缺省首阶段；指定时必须存在且未停用（停用阶段不允许新事件进入）
+    const startIndex = input.stageKey
+      ? type.stages.findIndex((s) => s.key === input.stageKey)
+      : 0;
+    if (startIndex < 0) {
+      throw new GovernanceError('STAGE_NOT_FOUND', `阶段「${input.stageKey}」不在类型「${type.name}」中`, {
+        available: type.stages.map((s) => ({ key: s.key, name: s.name, disabled: s.disabled === true })),
+      });
+    }
+    const startStage = type.stages[startIndex];
+    if (startStage.disabled) {
+      throw new GovernanceError('STAGE_DISABLED', `阶段「${startStage.name}」已停用，不能作为新事件的起始阶段`, {
+        available: type.stages.filter((s) => !s.disabled).map((s) => ({ key: s.key, name: s.name })),
+      });
+    }
+
     const now = Date.now();
     const event: EventRecord = {
       id: newEventId(now),
@@ -183,8 +205,8 @@ export async function createEvent(scope: string, input: CreateEventInput): Promi
       scope,
       title,
       typeId: type.id,
-      stageKey: type.stages[0].key,
-      stageIndex: 0,
+      stageKey: startStage.key,
+      stageIndex: startIndex,
       closedAt: null,
       revision: 1,
       createdAt: now,

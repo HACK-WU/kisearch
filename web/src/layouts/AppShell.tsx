@@ -189,6 +189,22 @@ export function AppShell(): JSX.Element {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  // 顶栏 scope 必须在计数 effect 之前声明（deps 里要引用它）
+  const scope = useScopeValue();
+  // 知识治理三项的计数（REQ-20261113-004 · S-07）：与页面同源，避免侧栏与表格口径漂移
+  const [govCounts, setGovCounts] = useState<{ docs: number; eventsOpen: number; trash: number } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    // scope 必须跟着顶栏选择器走：写死 'default' 会让侧栏显示别的库的数字
+    fetch(`/api/governance/counts?scope=${encodeURIComponent(scope)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((payload) => {
+        if (!alive || !payload || payload.ok !== true) return;
+        setGovCounts({ docs: payload.docs, eventsOpen: payload.eventsOpen, trash: payload.trash });
+      })
+      .catch(() => { /* 计数失败不影响导航 */ });
+    return () => { alive = false; };
+  }, [scope]);
   const displayName = user?.username ?? (source === 'token' ? 'Token' : '未登录');
   const roleLabel = formatRole(user?.role);
   const initial = displayName.trim().slice(0, 1).toUpperCase() || 'U';
@@ -315,7 +331,12 @@ export function AppShell(): JSX.Element {
     if (chatOpenFromSearch(searchParams.toString()) === intent) return;
     setSearchParams((prev) => withChatOpenParam(prev, intent), { replace: true });
   }, [isChatRoute, chatOpen, chatStore, searchParams, setSearchParams]);
-  const currentLabel = navItems.find((item) =>
+  /**
+   * 知识治理三页自带页头（scope 徽标 + 面包屑），demo 里没有全局大标题那一层。
+   * 这里对 /governance/* 返回空串，配合 CSS `.ki-workspace-title:empty{display:none}` 收起。
+   */
+  const isGovernanceRoute = location.pathname.startsWith('/governance');
+  const currentLabel = isGovernanceRoute ? '' : navItems.find((item) =>
     item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
   )?.label ?? (location.pathname.startsWith('/users')
     ? '用户管理'
@@ -334,7 +355,6 @@ export function AppShell(): JSX.Element {
   }, [sidebarHidden]);
   const [editorRequest, setEditorRequest] = useState<DocumentEditorRequest | null>(null);
   const queryClient = useQueryClient();
-  const scope = useScopeValue();
   const lastDimensionTaskFinish = useRef(Date.now());
   const taskQuery = useQuery({
     queryKey: ['tasks'],
@@ -570,9 +590,9 @@ export function AppShell(): JSX.Element {
             <span className="ki-sidebar__section-label">知识治理</span>
           </div>
           {[
-            { to: '/governance/lifecycle', label: '分类', icon: 'layers' },
-            { to: '/governance/events', label: '事件', icon: 'clock' },
-            { to: '/governance/trash', label: '回收站', icon: 'database' },
+            { to: '/governance/lifecycle', label: '分类', icon: 'layers', count: govCounts?.docs },
+            { to: '/governance/events', label: '事件', icon: 'clock', count: govCounts?.eventsOpen },
+            { to: '/governance/trash', label: '回收站', icon: 'database', count: govCounts?.trash },
           ].map((item) => (
             <NavLink
               key={item.to}
@@ -581,6 +601,9 @@ export function AppShell(): JSX.Element {
             >
               <span className="ki-nav-item__icon"><Icon name={item.icon} /></span>
               <span className="ki-nav-item__name">{item.label}</span>
+              {typeof item.count === 'number' ? (
+                <span className="ki-nav-item__count">{item.count}</span>
+              ) : null}
             </NavLink>
           ))}
         </nav>

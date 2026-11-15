@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { precheckLifecycle, applyLifecyclePlan } from '../src/lib/relation-lifecycle.js';
-import { DEFAULT_TRASH_SETTINGS, BUILTIN_PRESETS } from '../src/lib/governance-store.js';
+import { DEFAULT_TRASH_SETTINGS, BUILTIN_PRESETS, validatePresetKind } from '../src/lib/governance-store.js';
 import type { GovernanceConfig } from '../src/lib/governance-store.js';
 import type { EventRecord } from '../src/lib/events/types.js';
 import type { Relation } from '../src/lib/scoring.js';
@@ -263,5 +263,15 @@ describe('⑦ 防线源码断言（防后续被删）', () => {
     const src = fs.readFileSync(path.join(root, 'src/sync-relation.ts'), 'utf8');
     const hits = [...src.matchAll(/precheckLifecycle\(/g)].length;
     assert.equal(hits, 2, `应有两处调用（单条 + 批量），实际 ${hits}`);
+  });
+});
+
+describe('⑧ 预设档位校验（契约面）', () => {
+  it('只允许 wiki / temp，event 被拒（不能落盘为预设）', () => {
+    assert.equal(validatePresetKind('wiki').ok, true);
+    assert.equal(validatePresetKind('temp').ok, true);
+    const bad = validatePresetKind('event');
+    assert.equal(bad.ok, false);
+    assert.match(bad.ok === false ? bad.message : '', /wiki \/ temp/);
   });
 });

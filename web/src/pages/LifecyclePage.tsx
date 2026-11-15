@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import '@/styles/governance.css';
+import { useScopeValue } from '@/lib/scopeContext';
 import {
   applyLifecycle, applyLifecycleBatch, listEventTypes, listGovernanceDocs,
   GovernanceApiError,
@@ -58,7 +59,8 @@ interface EditTarget {
 
 export function LifecyclePage(): JSX.Element {
   // scope 目前只读（页头展示）：真正的切换器在顶栏，治理页跟随顶栏 scope
-  const [scope] = useState('default');
+  // 跟顶部 scope 选择器走（写死 'default' 会让页头徽标与实际查询的库不一致）
+  const scope = useScopeValue();
   const [group] = useState('');
   const [keyword, setKeyword] = useState('');
   const [filter, setFilter] = useState<Filter>('all');
@@ -366,17 +368,26 @@ export function LifecyclePage(): JSX.Element {
   );
 }
 
-/** 新建分类预设（demo 的「＋ 新建分类」）：命名 + 档位 + 天数，仅页面侧便利 */
+/**
+ * 新建分类（demo 的「＋ 新建分类」）
+ *
+ * 与 demo 的两点差异：
+ *   · 「删除时机」只给**两档**（永久保留 / 到期删除）——`跟随事件` 必须落到具体事件，
+ *     预设表达不了，服务端也会以 `PRESET_KIND_INVALID` 拒绝，因此改用文案引导；
+ *   · 「有效期」只在「到期删除」时出现。
+ *
+ * 页面底部另有灰底说明：预设只影响档位与期限，不影响已有文档的分类。
+ */
 function PresetModal(args: { scope: string; onClose: () => void; onSaved: (text: string) => void }): JSX.Element {
   const [name, setName] = useState('');
-  const [kind, setKind] = useState<LifecycleKind>('temp');
-  const [days, setDays] = useState(7);
+  const [kind, setKind] = useState<'wiki' | 'temp'>('temp');
+  const [days, setDays] = useState(30);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const save = async (): Promise<void> => {
     if (!name.trim()) {
-      setError('预设名不能为空');
+      setError('分类名不能为空');
       return;
     }
     setBusy(true);
@@ -385,11 +396,16 @@ function PresetModal(args: { scope: string; onClose: () => void; onSaved: (text:
       const res = await fetch('/api/governance/lifecycle/presets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope: args.scope, name: name.trim(), kind, ...(kind === 'temp' ? { ttlDays: days } : {}) }),
+        body: JSON.stringify({
+          scope: args.scope,
+          name: name.trim(),
+          kind,
+          ...(kind === 'temp' ? { ttlDays: days } : {}),
+        }),
       });
       const payload = await res.json() as { ok?: boolean; error?: string };
       if (!res.ok || payload.ok === false) throw new Error(payload.error ?? `HTTP ${res.status}`);
-      args.onSaved(`已新建分类预设「${name.trim()}」`);
+      args.onSaved(`已新建分类「${name.trim()}」`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -400,36 +416,60 @@ function PresetModal(args: { scope: string; onClose: () => void; onSaved: (text:
   return (
     <div className="gov-modal-mask" onClick={args.onClose}>
       <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="gov-modal__head">
-          <span>新建分类</span>
-          <button className="gov-btn gov-btn--ghost gov-btn--sm" onClick={args.onClose}>✕</button>
+        <div className="gov-modal__head gov-modal__head--stack">
+          <div>新建分类</div>
+          <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>
+            把常用的「组别+档位」存成预设，写入文档时直接选
+          </div>
         </div>
         <div className="gov-modal__body">
           <label className="gov-field">
-            <span>名称</span>
-            <input className="gov-input" value={name} placeholder="如：周报临时" onChange={(e) => setName(e.target.value)} />
+            <span>分类名称</span>
+            <input
+              className="gov-input"
+              value={name}
+              placeholder="如：「周报临时」「性能报告」"
+              onChange={(e) => setName(e.target.value)}
+            />
           </label>
-          <label className="gov-field">
-            <span>档位</span>
-            <select className="gov-select" value={kind} onChange={(e) => setKind(e.target.value as LifecycleKind)}>
-              <option value="wiki">wiki（永久保留）</option>
-              <option value="temp">临时（到期进回收站）</option>
-            </select>
-          </label>
+
+          <div className="gov-field">
+            <span>删除时机</span>
+            <div className="gov-seg" role="group" aria-label="删除时机" style={{ width: 'fit-content' }}>
+              {([
+                ['wiki', '永久保留'],
+                ['temp', '到期删除'],
+              ] as Array<['wiki' | 'temp', string]>).map(([value, label]) => (
+                <button key={value} aria-pressed={kind === value} onClick={() => setKind(value)}>{label}</button>
+              ))}
+            </div>
+            {/* 「跟随事件」不能做预设：它必须绑到具体事件上，预设表达不了 → 服务端也会拒绝 kind=event */}
+            <span className="gov-hint">
+              需要跟随事件时，请在文档行内「改」里直接选具体事件 —— 预设只保存长期保留 / 到期删除两档。
+            </span>
+          </div>
+
           {kind === 'temp' ? (
             <label className="gov-field">
-              <span>期限</span>
+              <span>有效期</span>
               <select className="gov-select" value={days} onChange={(e) => setDays(Number(e.target.value))}>
                 {[7, 30, 90].map((d) => <option key={d} value={d}>{d} 天</option>)}
               </select>
             </label>
           ) : null}
-          <span className="gov-hint">预设只是命名模板，改预设不影响已按它分类的文档。</span>
+
+          <div className="gov-rowbox">
+            <span className="gov-hint">
+              预设只影响 wiki / 临时 / 事件 三档，这里是把它们连同期限一起存成预设；
+              预设本身不会影响已有文档的分类。
+            </span>
+          </div>
+
           {error ? <span className="gov-error">{error}</span> : null}
         </div>
         <div className="gov-modal__foot">
           <button className="gov-btn gov-btn--sm" onClick={args.onClose}>取消</button>
-          <button className="gov-btn gov-btn--sm gov-btn--primary" disabled={busy} onClick={() => void save()}>保存</button>
+          <button className="gov-btn gov-btn--sm gov-btn--primary" disabled={busy} onClick={() => void save()}>新建分类</button>
         </div>
       </div>
     </div>

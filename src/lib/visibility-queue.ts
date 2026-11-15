@@ -78,7 +78,8 @@ function appendFailure(scope: string, failure: VisibilityFailure): void {
 /** 默认读原文：local KB 的 `index.json` */
 function defaultReadContent(scope: string, group: string, relation: string): string | null {
   try {
-    const kb = readJson<Record<string, unknown>>(path.join(getLocalKbDir(scope, group), 'index.json'));
+    // 同上：getLocalKbDir 已是文件路径
+    const kb = readJson<Record<string, unknown>>(getLocalKbDir(scope, group));
     const raw = kb?.[relation];
     if (typeof raw === 'string') return raw;
     if (raw && typeof raw === 'object') {

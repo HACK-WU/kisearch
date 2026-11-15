@@ -171,7 +171,14 @@ export function writeTrashItem(args: WriteTrashArgs): TrashItem {
     snapshot = rest;
   }
 
-  const ttlDays = snapshot?.ttlDays ?? 0;
+  /**
+   * 缺省回退 7 天，**不能是 0**（challenger C2）：
+   * 0 天会让 `expiresAt = now + 0` —— 条目进站即到期，下次清理直接删除，
+   * 恢复出来也会立刻再过期。设计要求是「回退默认保留天数并标 ttlAssumed」。
+   */
+  const fallbackDays = 7;
+  const assumedTtl = typeof snapshot?.ttlDays !== 'number' || snapshot.ttlDays <= 0;
+  const ttlDays = assumedTtl ? fallbackDays : snapshot!.ttlDays!;
   const item: TrashItem = {
     scope,
     group,
@@ -180,7 +187,7 @@ export function writeTrashItem(args: WriteTrashArgs): TrashItem {
     deletedAt: now,
     expiresAt: now + keepDays * 86_400_000,
     ttlDays,
-    ttlAssumed: ttlDays === 0,
+    ttlAssumed: assumedTtl,
     restoreCount: args.restoreCount ?? 0,
     dirName,
     hasAssets,

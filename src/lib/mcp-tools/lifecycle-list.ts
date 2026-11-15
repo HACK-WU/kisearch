@@ -40,7 +40,13 @@ export function registerLifecycleListTool(server: McpServer): void {
             const config = readGovernance(args.scope);
             const trash = readTrashSettings(args.scope);
 
-            const presets = [...BUILTIN_PRESETS, ...config.lifecyclePresets].map((p) => ({
+            /**
+             * 按 id 去重（验收 M-04）：`readGovernance()` 已把内置预设合并进
+             * `lifecyclePresets`，再叠一次 `BUILTIN_PRESETS` 会让每个内置项出现两遍。
+             */
+            const byId = new Map<string, { id: string; name: string; kind: 'wiki' | 'temp' | 'event'; ttlDays?: number }>();
+            for (const preset of [...BUILTIN_PRESETS, ...config.lifecyclePresets]) byId.set(preset.id, preset);
+            const presets = [...byId.values()].map((p) => ({
               id: p.id,
               name: p.name,
               kind: p.kind,

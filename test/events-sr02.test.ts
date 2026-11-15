@@ -44,9 +44,9 @@ function seedDoc(name: string, extra: Partial<Relation> = {}): Relation {
   doc.hot_relations.push(rel);
   writeGroupCache(scope, GROUP, doc);
 
-  const kbDir = getLocalKbDir(scope, GROUP);
-  fs.mkdirSync(kbDir, { recursive: true });
-  const kbPath = path.join(kbDir, 'index.json');
+  // ⚠ `getLocalKbDir()` 返回的是 `<group>/index.json` **文件路径**，不是目录
+  const kbPath = getLocalKbDir(scope, GROUP);
+  fs.mkdirSync(path.dirname(kbPath), { recursive: true });
   const kb = readJson<Record<string, string>>(kbPath) ?? {};
   kb[name] = `# ${name}\n正文`;
   writeJson(kbPath, kb);
@@ -172,6 +172,51 @@ describe('② 事件创建与流转', () => {
     await deleteEvent(scope, { event: a.id, docAction: 'wiki' });
     const c = await createEvent(scope, { title: '第三个', typeId: 'et_1' });
     assert.ok(c.shortId > b.shortId, `shortId 不得复用：b=${b.shortId} c=${c.shortId}`);
+  });
+
+  it('起始阶段：缺省首阶段 / 指定生效 / 未知或停用被拒', async () => {
+    // ① 缺省 = 首阶段
+    const plain = await createEvent(scope, { title: '缺省起始', typeId: 'et_1' });
+    assert.equal(plain.stageKey, 'st_1');
+    assert.equal(plain.stageIndex, 0);
+
+    // ② 显式指定：落在该阶段，且列表可见性跟随该阶段（st_3 修复中 = fts-only）
+    const at3 = await createEvent(scope, { title: '从修复中开始', typeId: 'et_1', stageKey: 'st_3' });
+    assert.equal(at3.stageKey, 'st_3');
+    assert.equal(at3.stageIndex, 2);
+    const listed = listEvents(scope, { status: 'open', limit: 100 }).items.find((i) => i.event.id === at3.id);
+    assert.equal(listed?.stage?.visibility, 'fts-only');
+
+    // ③ 未知阶段 → STAGE_NOT_FOUND + 可选阶段清单
+    await assert.rejects(
+      () => createEvent(scope, { title: '非法起始', typeId: 'et_1', stageKey: 'st_99' }),
+      (err: { code?: string; details?: { available?: unknown[] } }) =>
+        err.code === 'STAGE_NOT_FOUND' && (err.details?.available?.length ?? 0) === 4,
+    );
+
+    // ④ 停用阶段 → STAGE_DISABLED（三段类型停用**中间**那段：末位是终态，服务端不允许停用）
+    const custom = await createType(scope, {
+      name: '起始阶段校验',
+      stages: [
+        { name: '一', visibility: 'hidden' },
+        { name: '二', visibility: 'fts-only' },
+        { name: '三', visibility: 'full' },
+      ],
+    });
+    await updateType(scope, custom.id, {
+      revision: custom.revision,
+      stages: custom.stages.map((s, i) => ({
+        key: s.key,
+        name: s.name,
+        visibility: s.visibility,
+        ...(i === 1 ? { disabled: true } : {}),
+      })),
+    });
+    await assert.rejects(
+      () => createEvent(scope, { title: '停用起始', typeId: custom.id, stageKey: custom.stages[1].key }),
+      (err: { code?: string }) => err.code === 'STAGE_DISABLED',
+    );
+    await deleteType(scope, custom.id);
   });
 
   it('流转更新 stageKey；与当前相同 → STAGE_UNCHANGED', async () => {

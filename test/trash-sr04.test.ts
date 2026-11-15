@@ -45,9 +45,10 @@ function seedDoc(name: string, content: string, extra: Partial<Relation> = {}): 
   doc.hot_relations.push(rel);
   writeGroupCache(scope, GROUP, doc);
 
-  const kbDir = getLocalKbDir(scope, GROUP);
-  fs.mkdirSync(kbDir, { recursive: true });
-  const kbPath = path.join(kbDir, 'index.json');
+  // ⚠ `getLocalKbDir()` 返回的是 `<group>/index.json` **文件路径**，不是目录
+  // （此前当目录用 → 写入 `index.json/index.json`，与生产读取路径对不上）
+  const kbPath = getLocalKbDir(scope, GROUP);
+  fs.mkdirSync(path.dirname(kbPath), { recursive: true });
   const kb = readJson<Record<string, string>>(kbPath) ?? {};
   kb[name] = content;
   writeJson(kbPath, kb);
@@ -108,6 +109,23 @@ describe('① 入站', () => {
     assert.match(second.item.dirName, /__\d{17}$/, '后缀精确到毫秒，避免同秒连续删除撞名');
     assert.equal(listTrash(scope).items.filter((i) => i.name === '重复删除').length, 2);
   });
+
+  it('正文读不到 → 拒绝进站（fail-closed），不产生空快照', () => {
+    // 只在分片里登记、不写 index.json 正文：模拟「正文已丢 / 路径口径错」的历史状态
+    const doc = loadGroupCache(scope, GROUP) ?? { version: 1, scope, hot_relations: [], keywords: [], updatedAt: null };
+    doc.hot_relations = doc.hot_relations.filter((r) => r.text !== '无正文文档');
+    doc.hot_relations.push(makeRel('无正文文档'));
+    writeGroupCache(scope, GROUP, doc);
+
+    const moved = moveToTrash({ scope, group: GROUP, relation: '无正文文档', reason: 'manual' });
+    assert.equal(moved.ok, false, '正文为空时必须中止，否则恢复出来是空文档');
+    assert.equal(moved.ok === false && moved.code, 'TRASH_CONTENT_MISSING');
+    assert.equal(
+      listTrash(scope).items.filter((i) => i.name === '无正文文档').length,
+      0,
+      '不得留下 sizeBytes=0 的垃圾条目',
+    );
+  });
 });
 
 describe('② 恢复', () => {
@@ -127,7 +145,7 @@ describe('② 恢复', () => {
     assert.equal(restored.rebuild, 'pending');
     assert.equal(restored.restoreCount, 1);
 
-    const kb = readJson<Record<string, string>>(path.join(getLocalKbDir(scope, GROUP), 'index.json'))!;
+    const kb = readJson<Record<string, string>>(getLocalKbDir(scope, GROUP))!;
     assert.equal(kb['待恢复文档'], '# 待恢复\n内容');
 
     const after = loadGroupCache(scope, GROUP)!;
@@ -149,7 +167,7 @@ describe('② 恢复', () => {
     assert.equal(restored.ok, false);
     assert.equal(restored.ok === false && restored.code, 'RESTORE_NAME_CONFLICT');
 
-    const kb = readJson<Record<string, string>>(path.join(getLocalKbDir(scope, GROUP), 'index.json'))!;
+    const kb = readJson<Record<string, string>>(getLocalKbDir(scope, GROUP))!;
     assert.equal(kb['冲突文档'], '后来新建的同名文档', '冲突时不得覆盖现有文档');
   });
 });
