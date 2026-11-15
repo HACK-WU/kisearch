@@ -34,6 +34,9 @@ export const READ_ONLY_TOOL_NAMES: readonly string[] = [
   'ki_scope_list',
   'ki_view_list',
   'ki_tag_list',
+  'ki_lifecycle_list',
+  'ki_event_list',
+  'ki_event_type_list',
 ];
 
 /**

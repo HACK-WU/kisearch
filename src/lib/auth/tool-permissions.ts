@@ -16,6 +16,9 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
   ki_scope_list: 'knowledge.read',
   ki_view_list: 'knowledge.read',
   ki_tag_list: 'knowledge.read',
+  ki_lifecycle_list: 'knowledge.read',
+  ki_event_list: 'knowledge.read',
+  ki_event_type_list: 'knowledge.read',
   // 模型消耗型（REQ-20261113-001）：与"读"分离，可单独撤销
   // ⚠️ 本表只服务 **chat 工具循环**；`/mcp` 通道的实际闸门是 scope + readOnly
   //    （`ki_ask` 不进 CHAT_MCP_TOOLS，所以这一行当前是"为将来预留 + 语义完整"）
@@ -28,6 +31,7 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
   ki_edit_relation: 'knowledge.write',
   ki_group_create: 'knowledge.write',
   ki_delete_relation: 'knowledge.write',
+  ki_event_set_stage: 'knowledge.write',
   ki_group_delete_empty: 'knowledge.write',
 };
 

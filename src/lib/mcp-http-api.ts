@@ -75,6 +75,7 @@ import {
   type Capability,
 } from './auth/capabilities.js';
 import { matchRoute } from './auth/route-permissions.js';
+import { handleGovernanceRoutes } from './governance-http.js';
 import { handleViewsApi } from './views-api.js';
 import { readJsonBody as readApiJsonBody } from './http-body.js';
 import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
@@ -1714,6 +1715,10 @@ export async function handleApiRequest(
     // ════════ chat 模块（REQ-20260924-001 · SR-01 独占挂载点）════════
     // 单行挂载：/api/chat/* 全部路由由 chat-routes.ts 内部处理（本文件已 1065 行，不再逐条加分支）
     // 越权白名单：API-02/04/14（带 scope 参数的 GET）仍须登记在上方只读接口列表
+    // ════════ 知识治理（REQ-20261113-004 · S-06 独占挂载点）════════
+    // 单行挂载：/api/governance/* 全部由 governance-http.ts 内部处理；
+    // 30 条路由必须同步登记在 auth/route-permissions.ts，否则 matchRoute 判 unknown → 404。
+    if (await handleGovernanceRoutes(req, res, url, { authScopes })) return;
     if (await handleChatRoutes(req, res, url, {
       authScopes,
       capabilities,

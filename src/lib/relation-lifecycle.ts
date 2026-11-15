@@ -16,6 +16,7 @@
  */
 
 import { resolveLifecycle, validateLifecycleInput, type LifecycleKind } from './lifecycle.js';
+import { withScopeWriteLock } from './scope-write-lock.js';
 import { readGovernance, getGroupDefault, type GovernanceConfig } from './governance-store.js';
 import { readAllEvents, findEventIn, isEventClosed } from './events/store.js';
 import type { EventRecord } from './events/types.js';
@@ -199,4 +200,54 @@ export function applyLifecyclePlan(rel: Relation, plan: LifecyclePlan): void {
       delete rel.ttlDays;
       return;
   }
+}
+
+/**
+ * 给**已存在**的文档改分类（页面行内「改」/ 批量条 / HTTP 路由用）。
+ *
+ * 与写入链路的区别：这里没有 `module_info`，不动内容与索引，只改分类字段。
+ * 但共用同一套 `precheckLifecycle` 语义 —— 否则「页面能改、AI 不能改」会出现两套规则。
+ *
+ * 返回 `visibilityHint`：改成 `event` 后文档受阶段控制，页面要提示「可能立刻搜不到」。
+ */
+export async function changeLifecycle(
+  args: {
+    scope: string;
+    group: string;
+    name: string;
+    lifecycle?: string;
+    ttlDays?: number;
+    eventId?: string;
+    now?: number;
+  },
+): Promise<{ ok: true; summary: LifecycleSummary } | { ok: false; code: string; message: string; details?: Record<string, unknown> }> {
+  const { loadGroupCache, writeGroupCache } = await import('./group-cache.js');
+  const now = args.now ?? Date.now();
+
+  return withScopeWriteLock(args.scope, 'event-update', async () => {
+    const doc = loadGroupCache(args.scope, args.group);
+    const rel = doc?.hot_relations.find((r) => r.text === args.name);
+    if (!doc || !rel) {
+      return { ok: false as const, code: 'EVENT_NOT_FOUND', message: `文档不存在：${args.group}/${args.name}` };
+    }
+
+    const check = precheckLifecycle({
+      scope: args.scope,
+      group: args.group,
+      relation: args.name,
+      existing: rel,
+      locked: rel.isImported === true,
+      lifecycle: args.lifecycle,
+      ttlDays: args.ttlDays,
+      eventId: args.eventId,
+      now,
+    });
+    if (!check.ok) {
+      return { ok: false as const, code: check.code, message: check.message, ...(check.details ? { details: check.details } : {}) };
+    }
+
+    applyLifecyclePlan(rel, check.plan);
+    writeGroupCache(args.scope, args.group, doc);
+    return { ok: true as const, summary: check.summary };
+  });
 }
