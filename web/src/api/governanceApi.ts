@@ -308,6 +308,10 @@ export interface GovernanceDocItem {
   imported: boolean;
   /** 仅 temp：剩余天数（服务端算）；其他档位为 null */
   remainDays: number | null;
+  /** 最后活跃（毫秒）；null = 从未被读取 */
+  lastUsedTime: number | null;
+  /** 事件文档才有：绑定的事件与当前阶段（列表要显示「#3 标题 · 阶段」） */
+  event: { id: string; shortId: number | null; title: string; stageName: string | null; closed?: boolean } | null;
 }
 
 export function listGovernanceDocs(

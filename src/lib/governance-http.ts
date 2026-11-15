@@ -425,6 +425,15 @@ export async function handleGovernanceRoutes(
       const offset = Math.max(num(q.get('offset')) ?? 0, 0);
       const now = Date.now();
 
+      // 事件与阶段名：列表要显示「#3 登录页白屏 · 排查中」，逐个查会变成 N+1
+      const eventIndex = new Map(
+        readAllEvents(scope).map((e) => [e.id, e] as const),
+      );
+      const typeStageNames = new Map<string, string>();
+      for (const type of listTypes(scope)) {
+        for (const stage of type.stages) typeStageNames.set(`${type.id}\u0000${stage.key}`, stage.name);
+      }
+
       const all: Array<Record<string, unknown>> = [];
       for (const [group, doc] of readAllGroupCaches(scope)) {
         if (groupFilter && group !== groupFilter) continue;
@@ -442,6 +451,19 @@ export async function handleGovernanceRoutes(
             ...(lifecycle.inconsistent ? { lifecycleWarning: lifecycle.reason } : {}),
             visibility,
             imported: rel.isImported === true,
+            lastUsedTime: rel.lastUsedTime ?? null,
+            event: (() => {
+              if (!rel.eventId) return null;
+              const event = eventIndex.get(rel.eventId);
+              if (!event) return { id: rel.eventId, shortId: null, title: '(事件已删除)', stageName: null };
+              return {
+                id: event.id,
+                shortId: event.shortId,
+                title: event.title,
+                stageName: typeStageNames.get(`${event.typeId}\u0000${event.stageKey}`) ?? null,
+                closed: event.closedAt !== null,
+              };
+            })(),
             remainDays: lifecycle.expiresAt !== undefined
               ? Math.max(0, Math.ceil((lifecycle.expiresAt - now) / 86_400_000))
               : null,
