@@ -82,3 +82,28 @@ export interface EventsMeta {
   version: 1;
   nextShortId: number;
 }
+
+/**
+ * 参考文档（S-05）。
+ *
+ * 与「关联文档」的区别：关联文档靠 `Relation.eventId` 指向事件，可见性随阶段变；
+ * 参考文档只是**一条引用记录**，可见性取被引文档自身，加入/移除**不修改被引文档任何字段**
+ * （A13 红线：操作前后该 Relation 的分片条目必须字节级不变）。
+ */
+export interface EventRefDoc {
+  scope: string;
+  group: string;
+  name: string;
+  addedBy: 'ai' | 'manual';
+  addedAt: number;
+  /** ai 加入时记录当时分数，便于复现"为什么它被选中" */
+  score?: number;
+}
+
+/** `{eventId}.refs.json` */
+export interface RefsDoc {
+  version: 1;
+  eventId: string;
+  refs: EventRefDoc[];
+  updatedAt: number;
+}

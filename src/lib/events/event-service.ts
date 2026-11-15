@@ -28,6 +28,7 @@ import {
   allocateShortId, newEventId,
 } from './store.js';
 import { appendStageLog, removeStageLog } from './stage-log.js';
+import { removeRefsFile } from './refs-store.js';
 import { getType, listTypes, resolveStageVisibility } from './type-service.js';
 import type { EventRecord, EventTypeRecord, Visibility } from './types.js';
 import type { Relation } from '../scoring.js';
@@ -483,13 +484,6 @@ export async function deleteEvent(scope: string, input: DeleteEventInput): Promi
 
     return { event, docAction: input.docAction, affected: { docs: done, failed }, shortIdReleased: false };
   });
-}
-
-function removeRefsFile(scope: string, eventId: string): void {
-  const p = path.join(getKbDir(scope), '.events', `${eventId}.refs.json`);
-  try {
-    fs.rmSync(p, { force: true });
-  } catch { /* refs 由 S-05 维护，缺失不影响删除 */ }
 }
 
 export interface ReopenOutcome {
