@@ -5,9 +5,11 @@
  * 事件头（编号 / 类型 / 当前阶段 / 关联与参考篇数 / 操作）、阶段线（可点）、
  * 可见性提示条、关联文档、参考文档（AI 查找 / 添加）、AI 同源操作代码块。
  *
- * 与 demo 的两处差异：
+ * 与 demo 的三处差异：
  *   · 「AI 分析」是独立的仓库代码定位入口（`AiAnalyzeModal`），与知识库检索无关；
- *   · 参考文档的「AI 查找」走**确定性检索**（不调 LLM），候选带分数与原因，由人勾选确认。
+ *   · 参考文档的「AI 查找」走**确定性检索**（不调 LLM），候选带分数与原因，由人勾选确认；
+ *   · 点文档名开的是全站阅读器 `ModuleDrawer`（70vw 抽屉，带大纲/文档内查找/全屏），
+ *     不是 demo 里 560px + 遮罩的只读弹窗 —— 这是 S-07 §3.3「直接复用 ModuleDrawer」的结果。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -17,6 +19,8 @@ import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
 import { aiSettingsHref } from '@/lib/aiSettingsUrl';
 import { FindRefModal } from '@/components/governance/FindRefModal';
+import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { getDocContent } from '@/api/httpApi';
 import {
   addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts, listEventTypes, listEvents, listRefs, removeRef,
   reopenEvent, searchRefDocs, setEventStage, updateEventType,
@@ -88,6 +92,19 @@ export function EventsPage(): JSX.Element {
   /** 「AI 查找」弹窗：打开即请求候选，不再一点就自动加入（R28/R29） */
   const [findRefOpen, setFindRefOpen] = useState(false);
   const [typeFilter, setTypeFilter] = useState('');
+  /**
+   * 点开正文的文档（关联文档 / 参考文档）。null = 未打开。
+   * 复用浏览页的 `ModuleDrawer`（抽屉态，S-07 §3.3「文档抽屉直接复用 ModuleDrawer」），
+   * 不新造一个只读弹窗 —— 用户在这里看到的阅读器与浏览页一致（大纲 / 文档内查找 / 全屏）。
+   */
+  const [docTarget, setDocTarget] = useState<{ group: string; name: string } | null>(null);
+
+  /**
+   * 切 scope / 换事件时收起正文抽屉：`ModuleDrawer` 一旦载入正文就不再重取
+   * （`if (content !== null) return`），留着会把上一个库 / 上一个事件的正文继续挂着，
+   * 而抽屉头部已换成新 scope —— 静默串库比直接收起更糟。
+   */
+  useEffect(() => { setDocTarget(null); }, [scope, activeId]);
 
   // 页面只判 capability，不判 role（authContext 的约定）
   const { can, status: authStatus } = useAuth();
@@ -552,10 +569,19 @@ export function EventsPage(): JSX.Element {
                   </div>
                   {(detail?.members ?? []).map((m) => (
                     <div className="gov-docline" key={`${m.group}/${m.name}`}>
-                      <div>
-                        <div className="gov-docline__name">{m.name}</div>
-                        <div className="gov-docline__meta">{m.group}</div>
-                      </div>
+                      {/*
+                        文档名是按钮（demo `.docline` 的语义）：点开右侧阅读抽屉看正文。
+                        此前这行是纯 <div>，点了没有任何反应 —— 事件页里最要紧的动作（看证据原文）缺失。
+                      */}
+                      <button
+                        type="button"
+                        className="gov-docline__main"
+                        title={`查看「${m.name}」正文`}
+                        onClick={() => setDocTarget({ group: m.group, name: m.name })}
+                      >
+                        <span className="gov-docline__name">{m.name}</span>
+                        <span className="gov-docline__meta">{m.group}</span>
+                      </button>
                       <div className="gov-docline__right">
                         <span className={`gov-vis gov-vis--${VIS_CLASS[stageVis as Visibility] ?? 'hidden'}`}>
                           <span className="gov-vis__dot" />
@@ -597,13 +623,20 @@ export function EventsPage(): JSX.Element {
                   </div>
                   {refs.map((ref) => (
                     <div className="gov-docline" key={`${ref.group}/${ref.name}`}>
-                      <div>
-                        <div className="gov-docline__name">{ref.name}</div>
-                        <div className="gov-docline__meta">
+                      {/* stale = 引用指向的文档已被删除/移走：仍允许点，由阅读器给出「未找到 + 路径」的失败态，
+                          比禁用按钮更容易让人查清到底哪一篇没了 */}
+                      <button
+                        type="button"
+                        className="gov-docline__main"
+                        title={ref.stale ? `查看「${ref.name}」（文档已不存在）` : `查看「${ref.name}」正文`}
+                        onClick={() => setDocTarget({ group: ref.group, name: ref.name })}
+                      >
+                        <span className="gov-docline__name">{ref.name}</span>
+                        <span className="gov-docline__meta">
                           {ref.group}
                           {ref.stale ? <span className="gov-error"> · 文档已不存在</span> : null}
-                        </div>
-                      </div>
+                        </span>
+                      </button>
                       <div className="gov-docline__right">
                         <span className={`gov-vis gov-vis--${VIS_CLASS[ref.visibility] ?? 'hidden'}`}>
                           <span className="gov-vis__dot" />
@@ -680,6 +713,22 @@ export function EventsPage(): JSX.Element {
         <AiAnalyzeModal
           onClose={() => setAiOpen(false)}
           onOpenSettings={() => { setAiOpen(false); openAiSettings('analysis'); }}
+        />
+      ) : null}
+
+      {/*
+        关联文档 / 参考文档 → 右侧阅读抽屉（S-07 §3.3：复用 `ModuleDrawer`，不改组件本身）。
+        key 含 group+name：切到另一篇会整块重挂载，正文、大纲、滚动位置不会串台。
+        正文走 `/api/doc/get`（read 通道），导入/向量化期间不会被 MCP 写队列排队。
+      */}
+      {docTarget ? (
+        <ModuleDrawer
+          key={`${docTarget.group}/${docTarget.name}`}
+          scope={scope}
+          module={docTarget.name}
+          group={docTarget.group}
+          fetcher={getDocContent}
+          onClose={() => setDocTarget(null)}
         />
       ) : null}
 

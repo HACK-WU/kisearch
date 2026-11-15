@@ -12,6 +12,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
+import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { getDocContent } from '@/api/httpApi';
 import {
   applyLifecycle, applyLifecycleBatch, listEventTypes, listGovernanceDocs,
   GovernanceApiError,
@@ -73,6 +75,18 @@ export function LifecyclePage(): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<EditTarget | null>(null);
   const [presetOpen, setPresetOpen] = useState(false);
+  /**
+   * 点开正文的文档（文档名列）。null = 未打开。
+   * 复用全站阅读器 `ModuleDrawer`（与浏览页 / 任务页 / 数据源页 / 事件页同一形态）：
+   * 分类页最常问的是「这篇为什么是临时/事件」，跳转过去看原文比反复跨页便宜。
+   */
+  const [docTarget, setDocTarget] = useState<{ group: string; name: string } | null>(null);
+
+  /**
+   * 切 scope 时收起正文抽屉：`ModuleDrawer` 载入正文后不再重取（`if (content !== null) return`），
+   * 留着会在新 scope 下继续显示上一个库的正文 —— 静默串库比直接收起更糟。
+   */
+  useEffect(() => { setDocTarget(null); }, [scope]);
 
   /**
    * 只读账号（R34 / S-07 §3.4）：**页面可进、数据可看，写入口一律禁用**。
@@ -269,7 +283,17 @@ export function LifecyclePage(): JSX.Element {
             {visible.map((doc) => (
               <tr key={keyOf(doc)}>
                 <td><input type="checkbox" aria-label={`选择 ${doc.name}`} checked={selected.has(keyOf(doc))} onChange={() => toggle(doc)} /></td>
-                <td><div className="gov-cell-name">{doc.name}</div></td>
+                <td>
+                  {/* 文档名是按钮：点开右侧阅读抽屉看正文（此前的纯文本行点了没有任何反应） */}
+                  <button
+                    type="button"
+                    className="gov-cell-name gov-cell-name--link"
+                    title={`查看「${doc.name}」正文`}
+                    onClick={() => setDocTarget({ group: doc.group, name: doc.name })}
+                  >
+                    {doc.name}
+                  </button>
+                </td>
                 <td><span className="gov-cell-muted">{doc.group}</span></td>
                 <td><span className={BADGE_CLASS[doc.lifecycle]}>{KIND_TEXT[doc.lifecycle]}</span></td>
                 <td>
@@ -389,6 +413,18 @@ export function LifecyclePage(): JSX.Element {
           setPresetOpen(false);
           setMessage({ tone: 'ok', text });
         }} />
+      ) : null}
+
+      {/* 文档名 → 右侧阅读抽屉；key 含 group+name，切到另一篇整块重挂载，正文/大纲不串台 */}
+      {docTarget ? (
+        <ModuleDrawer
+          key={`${docTarget.group}/${docTarget.name}`}
+          scope={scope}
+          module={docTarget.name}
+          group={docTarget.group}
+          fetcher={getDocContent}
+          onClose={() => setDocTarget(null)}
+        />
       ) : null}
     </div>
   );

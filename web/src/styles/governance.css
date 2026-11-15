@@ -241,6 +241,20 @@
 .gov-col-act { width: 76px; text-align: right; }
 
 .gov-cell-name { font-weight: 600; color: var(--ki-color-text); }
+
+/* 可点击的文档名（分类页文档列表）：按钮 reset 后仍保持原来的加粗、左对齐与行内位置 */
+.gov-cell-name--link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gov-cell-name--link:hover { color: var(--ki-color-primary); text-decoration: underline; }
+.gov-cell-name--link:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; border-radius: 3px; }
 .gov-cell-muted { color: var(--ki-color-text-subtle); font-size: var(--ki-font-size-sm); }
 
 /* ════════ 期限 / 剩余天数（demo .days）════════ */
@@ -894,8 +908,28 @@
   border-bottom: 1px dashed var(--ki-color-border);
 }
 .gov-docline:last-child { border-bottom: 0; }
-.gov-docline__name { font-size: 13px; color: var(--ki-color-text); }
-.gov-docline__meta { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.gov-docline__name { display: block; font-size: 13px; color: var(--ki-color-text); }
+.gov-docline__meta { display: block; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+/*
+  可点击的文档名（demo `.docline__main`）：左列整块是按钮，hover 才显出「能点」。
+  负外边距把内边距吃回去，行分隔线与右侧可见性列的位置不变。
+*/
+.gov-docline__main {
+  min-width: 0;
+  padding: 4px var(--ki-space-2);
+  margin-left: calc(-1 * var(--ki-space-2));
+  border: 0;
+  border-radius: var(--ki-radius-sm);
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gov-docline__main:hover { background: var(--ki-color-hover); }
+.gov-docline__main:hover .gov-docline__name { color: var(--ki-color-primary); }
+.gov-docline__main:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
 .gov-docline__right { display: flex; align-items: center; gap: var(--ki-space-2); font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
 
 /* 代码块（demo .code） */
