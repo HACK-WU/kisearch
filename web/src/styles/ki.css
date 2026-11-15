@@ -8001,7 +8001,7 @@ select.ki-chat-cfg__ta--select {
 .res-mcp-tools__group[data-tone="danger"] .res-mcp-tools__label { color: var(--ki-color-warning); }
 .res-mcp-tool {
   display: grid;
-  /* 工具名列固定 168px（够放最长的 ki_bulk_sync_relation），作用列吃剩余 —— 13 条对齐成两栏 */
+  /* 工具名列固定 168px（够放最长的 ki_bulk_sync_relation / ki_group_delete_empty），作用列吃剩余 —— 19 条对齐成两栏 */
   grid-template-columns: 168px minmax(0, 1fr);
   align-items: baseline;
   gap: 12px;

@@ -1894,7 +1894,7 @@ wiki-output/
 - [文档索引](./README.md) - 按使用意图查找文档
 - [架构与协作关系](./architecture.md) - kisearch 与向量数据库的分层关系
 - [MCP HTTP 共享单例模式](./mcp-http.md) - 多 IDE 共享同一持锁进程的部署与鉴权
-- [MCP 工具参考](./mcp-tools.md) - 14 个工具及参数
+- [MCP 工具参考](./mcp-tools.md) - 19 个工具及参数
 - [ki import 详解](./import.md) - 导入流程、参数与幂等追加语义（原文直导，无 AI）
 - [异常处理与恢复建议](./error-handling.md) - 常见错误和解决方案
 - [典型工作流](./workflows.md) - 完整的使用场景和最佳实践

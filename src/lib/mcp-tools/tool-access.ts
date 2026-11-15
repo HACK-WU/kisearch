@@ -26,7 +26,7 @@
  *   若改成"写工具黑名单"，漏登记就等于静默放开写入（安全属性 fail-open）。
  */
 
-/** 只读 Token 可见 / 可调的工具名单（6 个，均为纯读） */
+/** 只读 Token 可见 / 可调的工具名单（9 个，均为纯读；`ki_ask` 不在其中 —— 对库只读但消耗模型额度） */
 export const READ_ONLY_TOOL_NAMES: readonly string[] = [
   'ki_search',
   'ki_get_module_info',

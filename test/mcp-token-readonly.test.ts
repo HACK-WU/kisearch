@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   - TokenRecord.readOnly 的创建 / 兼容 / 严格布尔兜底 / 局部更新
- *   - READ_ONLY_TOOL_NAMES 名单内容与 14 个工具的关系（读 6 / 写 8）
+ *   - READ_ONLY_TOOL_NAMES 名单内容与全部工具的关系（读 9 / 写 9 + 1 个模型消耗型 ki_ask）
  *   - findReadOnlyViolation：单条、batch、未知工具名（fail-safe）、非 tools/call
  *   - 拒绝文案四要素且不含会误关库级只读的 `ki scope readonly`
  *
@@ -43,6 +43,7 @@ const WRITE_TOOLS = [
   'ki_sync_relation',
   'ki_bulk_sync_relation',
   'ki_edit_relation',
+  'ki_event_set_stage',
   'ki_group_create',
   'ki_group_delete_empty',
   'ki_delete_relation',
@@ -164,10 +165,13 @@ describe('updateToken：scope 与访问模式可独立修改', () => {
 // ─────────────────────────────────────────────
 
 describe('READ_ONLY_TOOL_NAMES：名单内容', () => {
-  it('恰好 6 个读工具，与 8 个写工具互不重叠', () => {
+  it('恰好 9 个读工具，与 9 个写工具互不重叠', () => {
     assert.deepEqual(
       [...READ_ONLY_TOOL_NAMES].sort(),
-      ['ki_get_module_info', 'ki_group_list', 'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list'],
+      [
+        'ki_event_list', 'ki_event_type_list', 'ki_get_module_info', 'ki_group_list', 'ki_lifecycle_list',
+        'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list',
+      ],
     );
     for (const writeTool of WRITE_TOOLS) {
       assert.equal(isReadOnlyTool(writeTool), false, `${writeTool} 不得出现在只读白名单`);
@@ -268,15 +272,21 @@ function serverInstructions(server: McpServer): string | undefined {
 }
 
 describe('buildKiMcpServer：按访问模式装配工具集', () => {
-  it('只读会话只注册 6 个读工具（写工具不出现在 tools/list）', () => {
+  it('只读会话只注册读工具（写工具与 ki_ask 不出现在 tools/list）', () => {
     const server = buildKiMcpServer({ scopes: ['all'], readOnly: true });
     assert.deepEqual(registeredToolNames(server), [...READ_ONLY_TOOL_NAMES].sort());
   });
 
-  it('读写会话注册全部 15 个工具（6 读 + 8 写 + 1 模型消耗型）', () => {
+  it('读写会话注册全部工具（读 + 写 + 1 个模型消耗型）', () => {
     const server = buildKiMcpServer({ scopes: ['all'], readOnly: false });
     const names = registeredToolNames(server);
-    assert.equal(names.length, 15);
+    // 数量由清单推导而非写死数字：写死会让「新增工具后忘更新本测试」变成假绿。
+    // 反向约束仍在 —— 注册数多于 清单+1 时说明有工具既不在只读白名单也不在写清单。
+    assert.equal(
+      names.length,
+      READ_ONLY_TOOL_NAMES.length + WRITE_TOOLS.length + 1,
+      '注册数与清单不符：新增工具后须同步 READ_ONLY_TOOL_NAMES / WRITE_TOOLS',
+    );
     for (const name of READ_ONLY_TOOL_NAMES) assert.ok(names.includes(name), `缺读工具 ${name}`);
     for (const name of WRITE_TOOLS) assert.ok(names.includes(name), `缺写工具 ${name}`);
     // 模型消耗型（REQ-20261113-001）：与写工具同块注册（准入相同），但语义不是写
@@ -285,7 +295,7 @@ describe('buildKiMcpServer：按访问模式装配工具集', () => {
 
   it('免鉴权（null，stdio / 回环）与读写会话等价，且不注入只读 instructions', () => {
     const server = buildKiMcpServer(null);
-    assert.equal(registeredToolNames(server).length, 15);
+    assert.equal(registeredToolNames(server).length, READ_ONLY_TOOL_NAMES.length + WRITE_TOOLS.length + 1);
     assert.equal(serverInstructions(server), undefined);
   });
 

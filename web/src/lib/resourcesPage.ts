@@ -101,10 +101,16 @@ export interface McpToolGroup {
 }
 
 /**
- * `ki mcp` 暴露的全部 14 个工具，按「读 / 写 / 组织与删除」分组。
+ * `ki mcp` 暴露的全部 19 个工具，按「读 / 写 / 组织与删除」分组。
  *
- * 权威源：`docs/mcp-tools.md`（工具定义以 `src/lib/mcp-tools/` 为准）。
+ * 权威源：`docs/mcp-tools.md`（工具定义以 `src/lib/mcp-server-factory.ts` 的注册块为准）。
  * 页面只给"叫什么、干什么"，参数细节走文档外链 —— 否则就是第二份会漂移的参数表。
+ *
+ * ⚠️ 新增工具时**两处一起改**（页面 + docs）：`web/test/resources-page.test.mjs`
+ *    会逐条比对两边的工具名集合，只改一边测试立刻红。
+ * ⚠️ `ki_ask` 放在「读」组（对库只读），但它是**模型消耗型**：会消耗上游 LLM 额度并把
+ *    检索到的内容发给模型，且只读 Token 看不见它 —— 这些代价必须写在 purpose 里，
+ *    否则用户会当成和 ki_search 一样的纯本地读。
  */
 export const MCP_TOOLS: McpToolGroup[] = [
   {
@@ -117,6 +123,14 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态、只读标记与 Wiki 回写可用性' },
       { name: 'ki_view_list', purpose: '列出知识视图（多个库的只读聚合，可当 scope 用）' },
       { name: 'ki_tag_list', purpose: '列出 scope 下用过的 tag 及文档数' },
+      { name: 'ki_lifecycle_list', purpose: '列出文档分类（wiki / temp / event）、期限选项与 Group 有效默认分类' },
+      { name: 'ki_event_list', purpose: '列出事件（编号 / 标题 / 类型 / 当前阶段 / 可见性），按未收口、已收口筛选' },
+      { name: 'ki_event_type_list', purpose: '列出事件类型、阶段链（每阶段可见性）与收口动作' },
+      {
+        name: 'ki_ask',
+        purpose: '让 ki 用配置的模型回答（内部多轮检索再合成，可用 context_id 追问）；'
+          + '消耗模型额度且内容外发上游模型，只读 Token 不可用',
+      },
     ],
   },
   {
@@ -128,6 +142,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_edit_relation', purpose: '对大 Relation 多轮按行编辑，finish 后一次性更新索引' },
       { name: 'ki_store', purpose: '只写向量层单条文本（不写 KB，易产生孤儿向量）' },
       { name: 'ki_bulk_store', purpose: '只写向量层批量文本（同上）' },
+      { name: 'ki_event_set_stage', purpose: '把事件流转到指定阶段（唯一的事件状态写工具；到终态按类型动作处理关联文档）' },
     ],
   },
   {
@@ -141,12 +156,16 @@ export const MCP_TOOLS: McpToolGroup[] = [
   },
 ];
 
-/** MCP 工具数量的口径（与 docs/mcp-tools.md 的「共 14 个」一致，单测锁） */
+/** MCP 工具数量的口径（与 docs/mcp-tools.md 的「共 19 个」一致，单测锁） */
 export const MCP_TOOL_COUNT = MCP_TOOLS.reduce((sum, group) => sum + group.items.length, 0);
 
-/** 工具清单的边界说明：MCP 刻意不暴露的能力 */
+/** 工具清单的边界说明：MCP 刻意不暴露的能力 + 只读 Token 的可见性差异 */
 export const MCP_TOOLS_NOTE =
-  'MCP 刻意不暴露 scope / doc 级联删除与 --force 类操作 —— 需要级联或强制操作时用 CLI（左侧「Scope 数据操作」）。';
+  'MCP 刻意不暴露 scope / doc 级联删除与 --force 类操作 —— 需要级联或强制操作时用 CLI（左侧「Scope 数据操作」）。'
+  // 上面列的是**读写会话**的全量工具；只读 Token 的 tools/list 只有「读」组的前 9 个
+  // （写工具与 ki_ask 都不注册 —— ki_ask 对库只读但消耗模型额度，按写工具准入）。
+  // 不说明会让拿只读 Token 接入的人以为"页面写了 19 个，我却只看到 9 个"是坏了。
+  + '只读 Token 的会话里，写工具与 ki_ask 不会出现在 tools/list。';
 
 // ─── 目录（左栏） ────────────────────────────────────────────────────────
 

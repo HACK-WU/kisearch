@@ -57,7 +57,7 @@ function failResult(
   };
 }
 
-/** 成功形状：与既有 14 个工具一致（`content[0].text` 是 JSON 字符串） */
+/** 成功形状：与其它工具一致（`content[0].text` 是 JSON 字符串） */
 function okResult(result: AskResult, scope: string): { content: Array<{ type: 'text'; text: string }> } {
   const payload = {
     ok: true,
