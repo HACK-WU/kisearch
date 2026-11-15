@@ -17,6 +17,7 @@ import {
 } from './lib/scope.js';
 import { recordUse, calculateScore } from './lib/scoring.js';
 import type { Relation } from './lib/scoring.js';
+import { resolveLifecycle, remainDays, type LifecycleKind } from './lib/lifecycle.js';
 import type { PartitionConfig } from './lib/constants.js';
 import { DEFAULT_PARTITION_CONFIG } from './lib/constants.js';
 import { resolveGroupPath } from './lib/group-resolve.js';
@@ -199,6 +200,14 @@ export type GetModuleInfoResult =
     /** true = 文末还有内容 */
     truncated?: boolean;
     nextStart?: { line: number; char: number };
+    /** 文档分类（REQ-20261113-004 R5）：AI 读到文档时要能判断「还能用多久 / 挂在哪个事件上」 */
+    lifecycle?: LifecycleKind;
+    expiresAt?: number;
+    /** 仅 temp：剩余天数（服务端算，最小 0） */
+    remainDays?: number;
+    eventId?: string;
+    /** 存储态与 kind 不一致时的可读原因（不静默修正） */
+    lifecycleWarning?: string;
   }
   | { ok: false; error: string; hint?: string };
 
@@ -433,9 +442,20 @@ export async function executeGetModuleInfoLocal(
       }
     });
 
+    // 分类回显（R5）：AI 读到文档时要能判断「这份还能用多久 / 它挂在哪个事件上」
+    const lifecycleInfo = resolveLifecycle(rel);
+    const nowMs = Date.now();
+
     return {
       ok: true,
       scope,
+      lifecycle: lifecycleInfo.kind,
+      ...(lifecycleInfo.expiresAt !== undefined
+        ? { expiresAt: lifecycleInfo.expiresAt, remainDays: remainDays(lifecycleInfo.expiresAt, nowMs) }
+        : {}),
+      ...(lifecycleInfo.eventId ? { eventId: lifecycleInfo.eventId } : {}),
+      // 存储态与 kind 不一致时透出原因，不静默修正
+      ...(lifecycleInfo.inconsistent ? { lifecycleWarning: lifecycleInfo.reason } : {}),
       content: slice ? slice.content : markdown,
       // ★ 始终是**整篇**的修订号：分页读取后仍要能用它做 ki_edit_relation 的 expected_revision
       revision: contentRevision(markdown),

@@ -2377,6 +2377,16 @@ function upsertRelation(
   } else {
     // 已存在：刷新为导入态，不做评分回退（与 import-kb 行为一致）
     rel.isImported = true;
+    /**
+     * REQ-20261113-004（R4）：数据源文档强制 wiki。
+     * 不清会让一次「导入覆盖」把手动建的生命周期带进数据源文档，
+     * 形成 `isImported=true` + `lifecycle=temp` 的矛盾态，随后被回收站扫描当临时文档删掉。
+     * 这是「数据源豁免」的最后一道防线：UI 与 MCP 层都拦不住导入链路。
+     */
+    delete rel.lifecycle;
+    delete rel.expiresAt;
+    delete rel.eventId;
+    delete rel.ttlDays;
   }
   // 方案 D：持久化全部 chunk docId（文件级 relation 多值）
   // 向量化失败/--no-vector 时 memoryIds 为空数组（文件级 relation 记录仍存在，sourcePath 必写）

@@ -14,6 +14,9 @@ export function registerSyncRelationTool(server: McpServer): void {
       module_info: z.string().describe('本地 KB Markdown 内容'),
       vector: z.boolean().optional().default(true).describe('是否写入 dense 向量层。false=FTS-only：不调用 embedding，写入独立全文 Collection'),
       tags: z.string().optional().describe('文档内容自定义标签（逗号分隔多个，叠加在默认 ki-search 之上，如 "api,auth"）'),
+      lifecycle: z.enum(['wiki', 'temp', 'event']).optional().describe('文档分类：wiki=永久保留（缺省）/ temp=到期进回收站 / event=跟随事件阶段。覆盖已有文档时不传=保持原值'),
+      ttl_days: z.number().int().min(1).max(365).optional().describe('仅 lifecycle=temp：期限天数（1~365）。不传会报 TTL_REQUIRED，不猜期限'),
+      event: z.string().optional().describe('仅 lifecycle=event：事件 id（evt_…）或 #3。事件只能由人在 Web「知识治理 → 事件」创建，本工具不能创建；已收口事件不可绑定'),
     },
     async (args) => {
       try {
@@ -25,6 +28,9 @@ export function registerSyncRelationTool(server: McpServer): void {
             moduleInfo: args.module_info,
             vector: args.vector,
             tags: args.tags,
+            lifecycle: args.lifecycle,
+            ttlDays: args.ttl_days,
+            eventId: args.event,
           }),
           TOOL_TIMEOUT.WRITE,
           'ki_sync_relation'

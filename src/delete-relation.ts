@@ -38,6 +38,9 @@ import { withScopeWriteLock } from './lib/scope-write-lock.js';
 import { resolveWikiRootDir } from './lib/wiki-sync.js';
 import { ftsDeleteByIds } from './lib/fts-client.js';
 import { activeDrafts } from './lib/relation-edit-draft.js';
+import { moveToTrash, purgeExpired } from './lib/trash-service.js';
+import type { TrashReason } from './lib/trash-store.js';
+import type { Relation } from './lib/scoring.js';
 
 // ─── 类型 ───
 
@@ -91,6 +94,13 @@ export interface DeleteResult {
   relationVectorDeleted?: number;
   /** 路径向量保留 / 失败的原因（成功命中时不下发） */
   relationVectorReason?: string;
+  /** 回收站回执（S-04）：进站成功才有；`_disabled` 时说明本次未进站 */
+  trash?: {
+    dirName: string;
+    reason: TrashReason;
+    expiresAt: number;
+    ttlDays: number;
+  };
   reason?: string;
 }
 
@@ -117,6 +127,16 @@ export interface DeleteRelationParams {
    * 同时要跳过 `deleteBySearch` 兜底：那条兜底按 relation 名前缀匹配内容，同样会误删。
    */
   skipDenseDelete?: boolean;
+  /**
+   * 回收站入站原因（S-04）。缺省 manual；事件收口传 event-closed、过期扫描传 temp-expired。
+   * `trashEnabled=false` 时忽略本字段。
+   */
+  trashReason?: TrashReason;
+  /**
+   * 是否进回收站（默认 true）。仅用于观测期应急回滚：
+   * 置 false 走旧行为（硬删，不可恢复）。**不要**长期关掉——那等于放弃「删除可逆」。
+   */
+  trashEnabled?: boolean;
 }
 
 export type DeleteRelationOutcome =
@@ -177,6 +197,43 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
       return { ok: false, error: `Relation 有 ${pendingDrafts.length} 条未结束的编辑草稿`
         + `（${pendingDrafts.map((draft) => `${draft.editId}:${draft.status}`).join(', ')}）`
         + '；请先用 ki_edit_relation 的 cancel 或 finish 收口后再删除' };
+    }
+
+    /**
+     * 0. 回收站快照（REQ-20261113-004 · S-04 §3.1）
+     *
+     * **必须在删除任何数据之前成功**：快照失败即中止删除 —— 「删了但没备份」的窗口
+     * 比「删不掉」严重得多（后者用户可重试，前者不可逆）。
+     * 应急开关：KI_TRASH_DISABLED=1 时走旧行为（硬删），仅用于观测期回滚。
+     */
+    /**
+     * 什么时候**不**进站（两个极易漏的调用方，漏了就是垃圾条目）：
+     *   ① 移动文档（`skipDenseDelete=true`）：文档没消失，只是换了位置。进站会留下
+     *      「移动即备份」的垃圾条目，且恢复时与移动后的文档同名冲突；
+     *   ② 数据源 prune（`wikiDelete=false`）：删的是「源文件已不存在的副本」，
+     *      进站只会堆垃圾，且恢复后下一轮同步又会删掉。
+     */
+    const trashEnabled = params.trashEnabled !== false
+      && process.env.KI_TRASH_DISABLED !== '1'
+      && params.skipDenseDelete !== true
+      && params.wikiDelete !== false;
+    if (trashEnabled) {
+      const trashed = moveToTrash({
+        scope,
+        group: resolvedGroup,
+        relation,
+        reason: params.trashReason ?? 'manual',
+        relationSnapshot: rel as unknown as Relation | undefined,
+      });
+      if (!trashed.ok) {
+        return { ok: false, error: `${trashed.code}: ${trashed.error}（未删除任何数据）` };
+      }
+      result.trash = {
+        dirName: trashed.item.dirName,
+        reason: trashed.item.reason,
+        expiresAt: trashed.item.expiresAt,
+        ttlDays: trashed.item.ttlDays,
+      };
     }
 
     // 1. 从 relations-cache.json 删除（内存）
@@ -309,6 +366,13 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
 
     // 注：cache 分片落盘已上移到第 2 步的「元数据提交窗口」内（S-04 I1/I2：分片先落 → KB 后删）。
     result.deleted = result.cacheRemoved;
+    // 惰性清理（S-04 §3.5）：删除是最自然的时机，不引入定时器
+    try {
+      purgeExpired({ scope });
+    } catch (err) {
+      console.warn(`[trash] 到期清理失败（不影响删除结果）：${(err as Error).message}`);
+    }
+
     return { ok: true, scope, result };
   } catch (err) {
     return { ok: false, error: (err as Error).message };

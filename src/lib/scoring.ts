@@ -52,6 +52,27 @@ export interface Relation {
    * 该字段只进元数据，**不得**参与向量文本 / docId 计算。
    */
   groupSource?: 'scope-fallback';
+  /**
+   * 文档分类（REQ-20261113-004 S-01）。缺省 = wiki，**存储层不做缺省填充**，
+   * 读取统一走 `lib/lifecycle.ts::resolveLifecycle()`（禁止各处写 `rel.lifecycle ?? 'wiki'`）。
+   * 显式改成 wiki 时会**删除**该字段（与"从未设置"等价，避免冗余）。
+   */
+  lifecycle?: 'wiki' | 'temp' | 'event';
+  /** 仅 temp：毫秒时间戳；由 `ttlDays` 换算，不直接暴露给 AI */
+  expiresAt?: number;
+  /** 仅 event：指向 `EventRecord.id` */
+  eventId?: string;
+  /**
+   * 仅 temp：写入时记录的**原始期限天数**（1~365）。
+   * 为什么必须存：仅凭 `expiresAt` 无法反推期限（文档是在过期后才进回收站的，
+   * 那一刻 `expiresAt - now <= 0`），恢复续期需要它。见 S-04 §3.4。
+   */
+  ttlDays?: number;
+  /**
+   * 恢复次数（S-04 §3.4）：仅诊断用，不进对外契约。
+   * 用途：同一文档反复过期时给「建议改为长期保留」的提示。
+   */
+  restoreCount?: number;
 }
 
 /**

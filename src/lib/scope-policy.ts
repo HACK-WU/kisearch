@@ -52,6 +52,13 @@ export const EXEMPT_OPS: ReadonlySet<string> = new Set([
   // 删除前的只读预检（2026-11-13）：只回答「源文件会不会一起没 / 有没有草稿」，不写任何东西。
   // 只读库在 UI 上已置灰删除按钮，这里放行是为了「同一份代码在只读库也能解释清楚为什么不能删」。
   'doc-delete-precheck',
+  // 知识治理（REQ-20261113-004）：回收站的**彻底删除**与**过期清理**属于垃圾回收——
+  // 文档早已不在知识库里，清站不改变"知识库只读"的语义。若一并拦死，只读库的回收站
+  // 只会无限增长（用户拍板 2026-11-15）。
+  'trash-purge',
+  'purge-expired',
+  // 索引重建跟随 rebuild-vector（已在放行集）：只读库允许重建索引以修复可见性缺口
+  'visibility-rebuild',
 ]);
 
 /**
@@ -76,6 +83,18 @@ export const BLOCKED_OPS: ReadonlySet<string> = new Set([
   'doc-move-write',
   // 文档删除（2026-11-13）：只读库同样不许删 —— 删除比移动更不可逆
   'doc-relation-delete',
+  // 知识治理（REQ-20261113-004）：只读库不许改治理状态与文档生命周期
+  'event-create',
+  'event-update',
+  'event-delete',
+  'event-transition',
+  'event-reopen',
+  'event-type-write',
+  'trash-move',
+  'trash-restore',
+  'trash-settings',
+  // 档位切换只由 event-transition / 删除链路触发（二者已拦），单独登记防止被直接调用绕过
+  'visibility-apply',
 ]);
 
 /** 判定某 op 的归属；`unknown` = 未登记（按拦截处理，并由单测报警） */

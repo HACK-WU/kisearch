@@ -32,6 +32,10 @@ import { loadCacheShape, persistCacheShape, migrateLegacyRelationsCache, hasShar
 // 根保留键（Group 留空 → 根）：用户不能手写，系统内部使用
 import { ROOT_GROUP_KEY, isRootGroup } from './lib/import-path.js';
 import { buildRelationContent } from './lib/path-vectorize.js';
+import { precheckLifecycle, applyLifecyclePlan, type LifecycleSummary } from './lib/relation-lifecycle.js';
+import { readAllEvents } from './lib/events/store.js';
+import { readGovernance } from './lib/governance-store.js';
+import { purgeExpired } from './lib/trash-service.js';
 import { assertNoPendingVectorMigration, assertVectorDimensionCompatible, vectorBulkStore, vectorDelete, generateDocId, ensureVectorAvailable, closeEngine } from './lib/vector-client.js';
 import type { VectorizationStopReason } from './zvec-engine/errors.js';
 import { callDaemon, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -420,6 +424,15 @@ export interface SyncRelationParams {
    * 兜底标记 —— 这是用户显式选择，不是缺省兜底。
    */
   allowRootGroup?: boolean;
+  /**
+   * 文档分类（REQ-20261113-004）：缺省时**新建**落 wiki / group 默认，**覆盖**保持原值。
+   * 显式 `temp` 必须同时给 `ttlDays`（不猜期限）。
+   */
+  lifecycle?: string;
+  /** 仅 temp：期限天数（1~365） */
+  ttlDays?: number;
+  /** 仅 event：事件 id（`evt_…`）或 `#3`；事件只能由人在页面创建 */
+  eventId?: string;
 }
 
 // ─── 批量同步（MCP / CLI 共享纯函数） ───
@@ -430,6 +443,13 @@ export interface BulkSyncItem {
   module_info: string;
   /** 文档内容的自定义标签（逗号分隔多个，叠加在默认 ki-search 之上） */
   tags?: string;
+  /**
+   * 分类（可选）：与单条 `lifecycle/ttlDays/eventId` 语义一致。
+   * 字段名沿用本结构体的 snake_case（与 `module_info` 同源，直接来自 MCP 参数）。
+   */
+  lifecycle?: string;
+  ttl_days?: number;
+  event?: string;
 }
 
 export interface BulkSyncResultItem {
@@ -454,6 +474,12 @@ export interface BulkSyncResultItem {
   contentTags?: string[];
   skipped?: boolean;
   skipReason?: string;
+  /** 分类结果回显（成功条目才有） */
+  lifecycle?: string;
+  expiresAt?: number;
+  ttlDays?: number;
+  eventId?: string;
+  lifecycleSource?: string;
 }
 
 export type BulkSyncRelationResult =
@@ -633,6 +659,10 @@ async function executeBulkSyncRelationLocal(params: {
     // （对齐单条模式 executeSyncRelation:809-819 的 resolveGroupPath 逻辑）
     const groupIndex = readGroupIndex(scope);
 
+    // 分类预读：事件列表与治理配置各读一次，避免 50 条 × 每次读盘
+    const eventsSnapshot = readAllEvents(scope);
+    const governanceSnapshot = readGovernance(scope);
+
     // syncSingleRelation 会逐条覆盖 local KB。先一次性持久化目标旧 FTS
     // relation 的失效状态，避免批量同步中途失败时旧索引仍显示为完整。
     let ftsStatusInvalidated = false;
@@ -762,8 +792,37 @@ async function executeBulkSyncRelationLocal(params: {
           groupFallbackHintPushed = true;
         }
 
-        itemPriorFtsIds[i] = [...(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation)?.ftsIds ?? [])];
-        itemPriorDenseIds[i] = relationDenseIds(cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation));
+        const relBefore = cache.groups[resolvedGroup]?.hot_relations.find((r) => r.text === relation);
+        itemPriorFtsIds[i] = [...(relBefore?.ftsIds ?? [])];
+        itemPriorDenseIds[i] = relationDenseIds(relBefore);
+
+        // 分类校验与单条同口径：失败只影响本条（S-01 §5.2）
+        const lifecycleCheck = precheckLifecycle({
+          scope,
+          group: resolvedGroup,
+          relation,
+          existing: relBefore,
+          locked: relBefore?.isImported === true,
+          lifecycle: item.lifecycle,
+          ttlDays: item.ttl_days,
+          eventId: item.event,
+          now: Date.now(),
+          events: eventsSnapshot,
+          governance: governanceSnapshot,
+        });
+        if (!lifecycleCheck.ok) {
+          results.push({
+            group: resolvedGroup,
+            relation,
+            evicted: null,
+            skipped: true,
+            skipReason: `${lifecycleCheck.code}: ${lifecycleCheck.message}`,
+          });
+          failed++;
+          itemCustomTags.push([]);
+          continue;
+        }
+
         const result = syncSingleRelation(cache, scope, resolvedGroup, relation, moduleInfo);
         bulkTouchedGroups.add(resolvedGroup);
 
@@ -773,6 +832,7 @@ async function executeBulkSyncRelationLocal(params: {
         const groupData = cache.groups[resolvedGroup];
         const relRec = groupData?.hot_relations.find((r) => r.text === relation);
         if (relRec) {
+          applyLifecyclePlan(relRec, lifecycleCheck.plan);
           if (customTags.length > 0) relRec.tags = customTags;
           else delete relRec.tags;
           // 落点来源留痕（REQ-20261021-001）：逐 item 判定，缺省即 explicit
@@ -800,6 +860,11 @@ async function executeBulkSyncRelationLocal(params: {
           relation,
           evicted: result.evicted,
           contentTags: ['ki-search', ...customTags],
+          lifecycle: lifecycleCheck.summary.lifecycle,
+          lifecycleSource: lifecycleCheck.summary.source,
+          ...(lifecycleCheck.summary.expiresAt !== undefined ? { expiresAt: lifecycleCheck.summary.expiresAt } : {}),
+          ...(lifecycleCheck.summary.ttlDays !== undefined ? { ttlDays: lifecycleCheck.summary.ttlDays } : {}),
+          ...(lifecycleCheck.summary.eventId ? { eventId: lifecycleCheck.summary.eventId } : {}),
         });
       } catch (err) {
         // 单条 syncSingleRelation 异常不中断整个批量（对齐 syncBatch 的容错策略）
@@ -1155,8 +1220,12 @@ export async function executeBulkSyncRelation(params: {
 }
 
 export type SyncRelationResult =
-  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; /** FTS-only → dense 切换时清掉的旧全文索引条数（无切换则不出现） */ ftsRemoved?: number; /** 旧全文索引清理失败条数（ID 已保留等待重试；不出现 = 全成功） */ ftsCleanupFailed?: number; /** 清理失败原因 / 未清理原因（如 dense 写入未成功） */ ftsCleanupReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string }
-  | { ok: false; error: string };
+  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; /** FTS-only → dense 切换时清掉的旧全文索引条数（无切换则不出现） */ ftsRemoved?: number; /** 旧全文索引清理失败条数（ID 已保留等待重试；不出现 = 全成功） */ ftsCleanupFailed?: number; /** 清理失败原因 / 未清理原因（如 dense 写入未成功） */ ftsCleanupReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string;
+  /** 分类回显：AI 必须能知道自己写进去的是什么分类（否则写完自己也解释不了） */
+  lifecycle?: string; expiresAt?: number; ttlDays?: number; eventId?: string; lifecycleSource?: string;
+  /** 绑定事件时回显（AI 引用时用得到） */
+  event?: { id: string; shortId: number; title: string } }
+  | { ok: false; error: string; code?: string; details?: Record<string, unknown> };
 
 // ─── 向量写入（一次批量 embed，await 完成后返回） ───
 
@@ -1330,6 +1399,32 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     }
 
     const existingRelation = cache.groups[group]?.hot_relations.find((r) => r.text === relation);
+
+    /**
+     * 分类校验必须在写任何数据之前（fail-fast）：否则校验失败会留下
+     * 「local KB 已写、分类没落」的半成品，与 `--no-vector` 半成品状态同类。
+     */
+    const lifecycleCheck = precheckLifecycle({
+      scope,
+      group,
+      relation,
+      existing: existingRelation,
+      locked: existingRelation?.isImported === true,
+      lifecycle: params.lifecycle,
+      ttlDays: params.ttlDays,
+      eventId: params.eventId,
+      now: Date.now(),
+    });
+    if (!lifecycleCheck.ok) {
+      return {
+        ok: false,
+        error: lifecycleCheck.message,
+        code: lifecycleCheck.code,
+        ...(lifecycleCheck.details ? { details: lifecycleCheck.details } : {}),
+      };
+    }
+    const lifecycleSummary: LifecycleSummary = lifecycleCheck.summary;
+
     const previousFtsIds = [...(existingRelation?.ftsIds ?? [])];
     const previousDenseIds = relationDenseIds(existingRelation);
     if (existingRelation && previousFtsIds.length > 0) {
@@ -1348,6 +1443,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     const groupData = cache.groups[group];
     const relRec = groupData?.hot_relations.find((r) => r.text === relation);
     if (relRec) {
+      applyLifecyclePlan(relRec, lifecycleCheck.plan);
       if (customTags.length > 0) relRec.tags = customTags;
       else delete relRec.tags; // 无 tag 时移除字段（避免残留）
       // 落点来源留痕（REQ-20261021-001）：缺省即 explicit，只有兜底才落字段。
@@ -1486,6 +1582,14 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     const contentTags = ['ki-search', ...customTags];
 
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
+
+    // 惰性清理（S-04 §3.5）：写入收尾顺带清到期条目；失败不影响写入结果
+    try {
+      purgeExpired({ scope });
+    } catch (err) {
+      console.warn(`[trash] 到期清理失败（不影响写入结果）：${(err as Error).message}`);
+    }
+
     return {
       ok: true,
       scope,
@@ -1504,6 +1608,13 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       ...(wikiSynced !== undefined ? { wikiSynced } : {}),
       ...(wikiFile ? { wikiFile } : {}),
       ...(wikiReason ? { wikiReason } : {}),
+      // 分类回显（S-01 §3.8）：AI 必须能解释「我没传分类，为什么它是临时」
+      lifecycle: lifecycleSummary.lifecycle,
+      lifecycleSource: lifecycleSummary.source,
+      ...(lifecycleSummary.expiresAt !== undefined ? { expiresAt: lifecycleSummary.expiresAt } : {}),
+      ...(lifecycleSummary.ttlDays !== undefined ? { ttlDays: lifecycleSummary.ttlDays } : {}),
+      ...(lifecycleSummary.eventId ? { eventId: lifecycleSummary.eventId } : {}),
+      ...(lifecycleSummary.event ? { event: lifecycleSummary.event } : {}),
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
