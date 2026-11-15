@@ -564,6 +564,27 @@ export function AppShell(): JSX.Element {
           })}
         </nav>
 
+        {/* 知识治理（REQ-20261113-004 · S-07）：独立分组，三项都是只读即可进入 */}
+        <nav className="ki-sidebar__section">
+          <div className="ki-sidebar__section-head">
+            <span className="ki-sidebar__section-label">知识治理</span>
+          </div>
+          {[
+            { to: '/governance/lifecycle', label: '分类', icon: 'layers' },
+            { to: '/governance/events', label: '事件', icon: 'clock' },
+            { to: '/governance/trash', label: '回收站', icon: 'database' },
+          ].map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              className={({ isActive }) => `ki-nav-item${isActive ? ' ki-nav-item--active' : ''}`}
+            >
+              <span className="ki-nav-item__icon"><Icon name={item.icon} /></span>
+              <span className="ki-nav-item__name">{item.label}</span>
+            </NavLink>
+          ))}
+        </nav>
+
         <div className="ki-sidebar__spacer" />
 
         <div className="ki-sidebar__footer">
