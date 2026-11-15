@@ -43,11 +43,18 @@
   gap: var(--ki-space-2);
   min-width: 0;
   margin: 0;
-  font-size: var(--ki-font-size-md);
+  /* 与全站页头副标题（`.ki-page-head p`）同口径：12px。
+     此前这里用 14px 正文口径，与紧邻的 11px 芯片差 3px，同一行看着「不是一套字号」，
+     且比「数据源 / 检索 / 总览」等页的说明明显大一档（2026-11-15 用户反馈）。 */
+  font-size: var(--ki-font-size-sm);
 }
 .gov-head__actions { margin-left: auto; display: flex; align-items: center; gap: var(--ki-space-2); }
-/* 页头里的说明是正文口径（14px），表格里才用 12px */
-.gov-head__path .gov-cell-muted { font-size: var(--ki-font-size-md); color: var(--ki-color-text-muted); }
+/* 页头说明跟全站页头副标题对齐：12px + 弱化色（表格里的 `.gov-cell-muted` 不受影响，仍是 12px subtle） */
+.gov-head__path .gov-cell-muted { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+/* 页头 scope 芯片与全站 `.ki-badge` 同尺寸（20px 高 / 0 7px 内距 / 650）。
+   只抄尺寸、不复用 `.ki-badge` 类：本文件约定治理页只用 `gov-*` 类名。
+   仅限页头：表格里的 `.gov-badge`（分类、删除原因）保持紧凑，不跟着长高。 */
+.gov-head__path .gov-badge { min-height: 20px; padding: 0 7px; font-weight: 650; }
 
 /* ════════ 徽标 ════════ */
 
