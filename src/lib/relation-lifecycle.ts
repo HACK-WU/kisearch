@@ -228,7 +228,7 @@ export async function changeLifecycle(
     const doc = loadGroupCache(args.scope, args.group);
     const rel = doc?.hot_relations.find((r) => r.text === args.name);
     if (!doc || !rel) {
-      return { ok: false as const, code: 'EVENT_NOT_FOUND', message: `文档不存在：${args.group}/${args.name}` };
+      return { ok: false as const, code: 'DOC_NOT_FOUND', message: `文档不存在：${args.group}/${args.name}` };
     }
 
     const check = precheckLifecycle({

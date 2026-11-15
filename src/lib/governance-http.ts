@@ -14,8 +14,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
-import { readJson, writeJson } from './store.js';
-import { getKbDir } from './scope.js';
+import { readJson } from './store.js';
 import { GovernanceError } from './governance-errors.js';
 import {
   readGovernance, writeGovernance, validateTrashSettings, BUILTIN_PRESETS, TRASH_KEEP_DAYS,
@@ -54,6 +53,8 @@ const STATUS_BY_CODE: Record<string, number> = {
   EVENT_CLOSED: 409,
   EVENT_NOT_CLOSED: 409,
   DATASOURCE_LIFECYCLE_LOCKED: 403,
+  FORBIDDEN_SCOPE: 403,
+  DOC_NOT_FOUND: 404,
 };
 
 /**
@@ -127,7 +128,7 @@ export async function handleGovernanceRoutes(
   /** scope 鉴权：查询串与 body 都可能是来源，先按查询串判，body 场景在下面补判 */
   const assertScope = (scope: string): void => {
     if (ctx.authScopes && !ctx.authScopes.includes(scope)) {
-      throw new GovernanceError('DATASOURCE_LIFECYCLE_LOCKED', `无权访问 scope「${scope}」`, { scope });
+      throw new GovernanceError('FORBIDDEN_SCOPE', `无权访问 scope「${scope}」`, { scope });
     }
   };
 
@@ -138,8 +139,14 @@ export async function handleGovernanceRoutes(
   };
 
   const body = (): Promise<Record<string, unknown>> => readJsonBody(req);
+  /**
+   * body 里的 scope 优先，其次 URL 的 `?scope=`，最后才 default。
+   *
+   * 只认 body 是危险的：前端把 scope 放 query、body 只放业务字段时，
+   * 写操作会**静默落到 default 库**（页面显示成功、数据却写错库）。
+   */
   const scopeFromBody = (b: Record<string, unknown>): string => {
-    const scope = str(b.scope) ?? 'default';
+    const scope = str(b.scope) ?? str(q.get('scope')) ?? 'default';
     assertScope(scope);
     return scope;
   };
@@ -175,7 +182,15 @@ export async function handleGovernanceRoutes(
           ttlDays: num(pick(b, 'ttlDays', 'ttl_days')),
           eventId: str(pick(b, 'eventId', 'event')),
         });
-        if (!result.ok) return sendJson(res, STATUS_BY_CODE[result.code] ?? 400, result);
+        if (!result.ok) {
+          return sendJson(res, STATUS_BY_CODE[result.code] ?? 400, {
+            ok: false,
+            code: result.code,
+            // 契约字段是 `error`：直接透出内部 `message` 会让前端拿到 undefined
+            error: result.message,
+            ...(result.details ? { details: result.details } : {}),
+          });
+        }
         return sendJson(res, 200, { ok: true, scope, ...result.summary });
       }
 
@@ -201,7 +216,7 @@ export async function handleGovernanceRoutes(
       }
 
       if (segs[1] === 'presets') {
-        const scope = segs[2] ? scopeFromQuery() : scopeFromQuery();
+        const scope = scopeFromQuery();
         const config = readGovernance(scope);
         if (method === 'GET') {
           return sendJson(res, 200, { ok: true, scope, presets: config.lifecyclePresets });
@@ -448,12 +463,16 @@ export async function handleGovernanceRoutes(
       }
 
       if (segs[1] === 'settings') {
-        const scope = method === 'GET' ? scopeFromQuery() : scopeFromBody(await body());
+        /**
+         * ⚠ body 只能读一次：`readJsonBody` 是流消费，第二次调用时请求已 end，
+         * 监听器永远不会触发 ⇒ Promise 悬住、连接挂死（PUT 之前就是这么写的）。
+         */
+        const b = await body();
+        const scope = method === 'GET' ? scopeFromQuery() : scopeFromBody(b);
         if (method === 'GET') {
           return sendJson(res, 200, { ok: true, scope, settings: readTrashSettings(scope), options: TRASH_KEEP_DAYS });
         }
         if (method === 'PUT') {
-          const b = await body();
           const validated = validateTrashSettings({
             ...(num(b.keepDays) !== undefined ? { keepDays: num(b.keepDays) as never } : {}),
             ...(str(b.expireAction) ? { expireAction: str(b.expireAction) as never } : {}),
@@ -507,17 +526,4 @@ export async function handleGovernanceRoutes(
 /** 诊断文件路径（供外部测试与页面复用） */
 export function governanceDiagnosticsPath(scope: string): string {
   return failureFilePath(scope);
-}
-
-/** 供测试断言：本模块承载的路由数 */
-export const GOVERNANCE_ROUTE_COUNT = 30;
-
-/** 供测试断言：KB 根（避免测试自行拼路径） */
-export function governanceKbDir(scope: string): string {
-  return getKbDir(scope);
-}
-
-/** 写 JSON 的薄封装（预留：诊断重置等写操作） */
-export function writeGovernanceJson(scope: string, file: string, payload: unknown): void {
-  writeJson(`${getKbDir(scope)}/${file}`, payload as Record<string, unknown>);
 }

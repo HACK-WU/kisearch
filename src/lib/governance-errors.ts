@@ -60,12 +60,21 @@ export const GOVERNANCE_CODE_NUMBERS = {
   REF_ALREADY_ADDED: 1402,
   REF_NOT_FOUND: 1403,
   SEARCH_UNAVAILABLE: 1404,
+
+  // ── 通用 / 传输层（1500-1599）──
+  /** Token 无权访问该 scope（HTTP 层 403；**不复用** DATASOURCE_LIFECYCLE_LOCKED，
+   *  否则前端会弹「数据源文档锁」的错误文案） */
+  FORBIDDEN_SCOPE: 1501,
+  /** 文档不存在（分类变更 / 恢复等按文档定位的操作） */
+  DOC_NOT_FOUND: 1502,
 } as const;
 
 export type GovernanceErrorCode = keyof typeof GOVERNANCE_CODE_NUMBERS;
 
 /** 该类错误默认的 HTTP 状态码（4xx 一律可对外暴露；5xx 需上层决定是否脱敏） */
 const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
+  FORBIDDEN_SCOPE: 403,
+  DOC_NOT_FOUND: 404,
   EVENT_NOT_FOUND: 404,
   TYPE_NOT_FOUND: 404,
   TRASH_NOT_FOUND: 404,

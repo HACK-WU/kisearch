@@ -79,10 +79,15 @@ describe('② 错误码登记', () => {
     assert.equal(new Set(nums).size, nums.length, '存在重复号');
   });
 
-  it('全部落在 1000-1499', () => {
+  it('全部落在 1000-1599（1000-1499 = 业务分段，1500-1599 = 通用/传输层）', () => {
     for (const [code, n] of entries) {
-      assert.ok(n >= 1000 && n <= 1499, `${code}=${n} 超出登记号段`);
+      assert.ok(n >= 1000 && n <= 1599, `${code}=${n} 超出登记号段`);
     }
+  });
+
+  it('通用段只放传输层错误（防止把业务错误塞进 15xx 绕过分段约定）', () => {
+    const generic = entries.filter(([, n]) => n >= 1500).map(([code]) => code).sort();
+    assert.deepEqual(generic, ['DOC_NOT_FOUND', 'FORBIDDEN_SCOPE']);
   });
 
   it('分段归属正确（抽查关键码）', () => {

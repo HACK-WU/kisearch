@@ -15,10 +15,16 @@
  * 所以这里用**源码 + 常量双读**把它们钉在一起，并断言"不含创建类工具"（A20）。
  */
 
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
+import type { AddressInfo } from 'node:net';
+
+import { registerTestScope, cleanupTestConfig } from './test-config.js';
+import { initScope } from '../src/lib/store.js';
+import { getKbDir } from '../src/lib/scope.js';
 
 import { matchRoute } from '../src/lib/auth/route-permissions.js';
 import { TOOL_CAPABILITIES } from '../src/lib/auth/tool-permissions.js';
@@ -166,6 +172,82 @@ describe('④ 工具名与路由路径一致（防"改了名没改表"）', () =
       + fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/event-set-stage.ts'), 'utf8');
     for (const tool of [...READ_TOOLS, ...WRITE_TOOLS]) {
       assert.ok(src.includes(`'${tool}'`), `工具文件里找不到 ${tool}`);
+    }
+  });
+});
+
+/**
+ * 真实 HTTP 冒烟：这一组存在的唯一理由是**首版有个挂死 bug** ——
+ * `PUT /trash/settings` 里 `readJsonBody` 被调了两次，第二次监听器永不触发，
+ * 请求会一直挂着（既不返回也不报错，测试里表现为超时而非失败）。
+ * 纯静态断言抓不到这类问题，必须真的发一次请求。
+ */
+describe('⑤ 真实 HTTP 冒烟（body 只读一次）', () => {
+  const scope = `gov-http-${Date.now()}`;
+  const created: string[] = [];
+
+  after(() => {
+    for (const s of created) {
+      const kbDir = getKbDir(s);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+    cleanupTestConfig();
+  });
+
+  async function startServer(authScopes: string[] | null): Promise<{ base: string; close: () => Promise<void> }> {
+    const server = http.createServer((req, res) => {
+      void handleGovernanceRoutes(req, res, new URL(req.url ?? '/', 'http://127.0.0.1'), { authScopes })
+        .then((handled) => {
+          if (!handled) { res.writeHead(404); res.end(); }
+        });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+    const { port } = server.address() as AddressInfo;
+    return {
+      base: `http://127.0.0.1:${port}`,
+      close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    };
+  }
+
+  it('PUT /trash/settings 会返回（不挂死）并持久化', { timeout: 10_000 }, async () => {
+    registerTestScope(scope);
+    created.push(scope);
+    initScope(scope);
+    const { base, close } = await startServer(null);
+    try {
+      const res = await fetch(`${base}/api/governance/trash/settings?scope=${scope}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keepDays: 14, expireAction: 'notify' }),
+      });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as { ok: boolean; settings: { keepDays: number; expireAction: string } };
+      assert.equal(payload.ok, true);
+      assert.equal(payload.settings.keepDays, 14);
+      assert.equal(payload.settings.expireAction, 'notify');
+
+      // 再 GET 一次确认落盘
+      const got = await fetch(`${base}/api/governance/trash/settings?scope=${scope}`);
+      const body = await got.json() as { settings: { keepDays: number } };
+      assert.equal(body.settings.keepDays, 14);
+    } finally {
+      await close();
+    }
+  });
+
+  it('越权 scope → 403 且码为 FORBIDDEN_SCOPE（不是数据源锁）', { timeout: 10_000 }, async () => {
+    const other = `gov-http-other-${Date.now()}`;
+    registerTestScope(other);
+    created.push(other);
+    initScope(other);
+    const { base, close } = await startServer(['some-other-scope']);
+    try {
+      const res = await fetch(`${base}/api/governance/counts?scope=${other}`);
+      assert.equal(res.status, 403);
+      const payload = await res.json() as { code?: string };
+      assert.equal(payload.code, 'FORBIDDEN_SCOPE');
+    } finally {
+      await close();
     }
   });
 });
