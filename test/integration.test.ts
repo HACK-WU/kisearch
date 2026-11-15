@@ -13,17 +13,13 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig, hasTestEmbeddingKey, JITI_CLI } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, hasTestEmbeddingKey, execCli } from './test-config.js';
 
 const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
 function runScript(script: string, args: string[]): { stdout: string; status: number } {
   try {
-    const stdout = execFileSync(process.execPath, [JITI_CLI, path.join(SCRIPTS_DIR, script), ...args], {
-      encoding: 'utf-8',
-      env: getTestEnv()
-    });
+    const stdout = execCli(path.join(SCRIPTS_DIR, script), { args });
     return { stdout, status: 0 };
   } catch (err: any) {
     return { stdout: err.stdout || '', status: err.status || 1 };

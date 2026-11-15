@@ -21,8 +21,7 @@ import fs from 'fs';
 import net from 'node:net';
 import path from 'path';
 import os from 'os';
-import { execFileSync } from 'child_process';
-import { JITI_CLI } from './test-config.js';
+import { execCli } from './test-config.js';
 
 import {
   loadConfig,
@@ -566,15 +565,9 @@ describe('D. doctor CLI —— 字段校验失败的退出行为', () => {
     let status = 0;
     try {
       // --config 由 bin/ki.mjs 转成 KI_CONFIG_PATH（直调 doctor.ts 时走 env）
-      execFileSync(
-        process.execPath,
-        [path.resolve(import.meta.dirname, '..', 'node_modules/jiti/lib/jiti-cli.mjs'), DOCTOR_SCRIPT],
-        {
-          encoding: 'utf-8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-          env: { ...process.env, NODE_NO_WARNINGS: '1', KI_CONFIG_PATH: file },
-        }
-      );
+      execCli(DOCTOR_SCRIPT, {
+        env: { ...process.env, NODE_NO_WARNINGS: '1', KI_CONFIG_PATH: file },
+      });
     } catch (e) {
       stderr = (e as { stderr?: string }).stderr ?? '';
       status = (e as { status?: number }).status ?? 0;
@@ -594,19 +587,15 @@ describe('B. config init —— 生成 YAML 模板', () => {
   let configFile: string;
 
   function runInit(extraArgs: string[] = []): { ok: boolean; [k: string]: unknown } {
-    const out = execFileSync(
-      process.execPath,
-      [JITI_CLI, CONFIG_SCRIPT, 'init', '--dir', projDir, ...extraArgs],
-      {
-        encoding: 'utf-8',
-        env: {
-          ...process.env,
-          NODE_NO_WARNINGS: '1',
-          HOME: projDir,              // 让 $HOME 展开落到临时目录，避免污染真实 HOME
-          KI_DATA_DIR: path.join(projDir, 'data'), // 固定 dataDir，避免探测 repo/kb
-        },
-      }
-    );
+    const out = execCli(CONFIG_SCRIPT, {
+      args: ['init', '--dir', projDir, ...extraArgs],
+      env: {
+        ...process.env,
+        NODE_NO_WARNINGS: '1',
+        HOME: projDir,              // 让 $HOME 展开落到临时目录，避免污染真实 HOME
+        KI_DATA_DIR: path.join(projDir, 'data'), // 固定 dataDir，避免探测 repo/kb
+      },
+    });
     return JSON.parse(out);
   }
 

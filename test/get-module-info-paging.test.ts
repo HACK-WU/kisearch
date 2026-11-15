@@ -19,8 +19,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, execCli } from './test-config.js';
 import {
   sliceDocWindow,
   executeGetModuleInfoLocal,
@@ -41,10 +40,7 @@ const longDoc = Array.from({ length: 200 }, (_, i) => `第 ${i + 1} 行 ` + 'x'.
 
 function runCli(args: string[]): string {
   try {
-    return execFileSync(process.execPath, [JITI_CLI, SCRIPT_PATH, ...args], {
-      encoding: 'utf-8',
-      env: getTestEnv(),
-    });
+    return execCli(SCRIPT_PATH, { args });
   } catch (err: any) {
     return err.stdout ? String(err.stdout) : '';
   }

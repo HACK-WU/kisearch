@@ -17,6 +17,7 @@ import path from 'node:path';
 
 import { loadConfig, resetConfigCache } from '../src/lib/config.js';
 import { addDataSource, readDataSource, updateDataSourceConfig } from '../src/lib/datasource.js';
+import { execCommand } from './test-config.js';
 
 let root: string;
 let dataDir: string;
@@ -26,9 +27,8 @@ let scope: string;
 let savedConfigPath: string | undefined;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execCommand('git', ['-C', cwd, ...args], {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
   });
 }
 

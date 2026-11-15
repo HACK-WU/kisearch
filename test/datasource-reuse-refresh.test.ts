@@ -15,6 +15,7 @@ import path from 'node:path';
 import type { KiConfig } from '../src/lib/config.js';
 import { checkManagedSubdir } from '../src/lib/datasource-clone.js';
 import { refreshManagedClone } from '../src/lib/datasource-git.js';
+import { execCommand } from './test-config.js';
 
 let root: string;
 let work: string;
@@ -23,9 +24,8 @@ let repoRoot: string;
 let config: KiConfig;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execCommand('git', ['-C', cwd, ...args], {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
   });
 }
 
@@ -48,12 +48,12 @@ before(() => {
   git(work, 'commit', '-q', '-m', 'init');
 
   bare = path.join(root, 'bare.git');
-  execFileSync('git', ['clone', '-q', '--bare', work, bare], { encoding: 'utf8' });
+  execCommand('git', ['clone', '-q', '--bare', work, bare]);
 
   // 模拟托管副本：clone 后停在旧 commit（尚未同步）
   repoRoot = path.join(root, 'datasources', 'owner', 'repo');
   fs.mkdirSync(path.dirname(repoRoot), { recursive: true });
-  execFileSync('git', ['clone', '-q', bare, repoRoot], { encoding: 'utf8' });
+  execCommand('git', ['clone', '-q', bare, repoRoot]);
 
   config = { dataDir: path.join(root, 'kb'), scopes: {}, scopeMode: 'default' } as unknown as KiConfig;
 });

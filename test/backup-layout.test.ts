@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { tarPathArgs, tarPath } from '../src/lib/tar-compat.js';
+import { execCommand } from './test-config.js';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-backup-layout-'));
 const configPath = path.join(tmpDir, 'config.json');
@@ -75,7 +76,7 @@ describe('executeBackup 门禁布局感知（P0-2）', () => {
     assert.equal(result.ok, true);
     assert.ok(result.snapshotPath && fs.existsSync(result.snapshotPath), '快照文件已生成');
 
-    const listing = execFileSync('tar', [...tarPathArgs(), '-tzf', tarPath(result.snapshotPath!)], { encoding: 'utf-8' });
+    const listing = execCommand('tar', [...tarPathArgs(), '-tzf', tarPath(result.snapshotPath!)]);
     assert.ok(listing.includes('.relations/manifest.json'), `快照应包含 manifest：\n${listing}`);
     assert.ok(listing.includes('.relations/g1/cache.json'), `快照应包含组 分片：\n${listing}`);
   });

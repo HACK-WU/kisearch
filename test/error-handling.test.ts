@@ -7,18 +7,22 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, execCli } from './test-config.js';
 
 const SCRIPTS_DIR = path.resolve(import.meta.dirname, '..', 'src');
 
 function runJson(script: string, args: string[]): any {
   try {
-    const out = execFileSync(process.execPath, [JITI_CLI, path.join(SCRIPTS_DIR, script), ...args], {
-      encoding: 'utf-8', env: getTestEnv(),
-    });
+    const out = execCli(path.join(SCRIPTS_DIR, script), { args });
     return JSON.parse(out.trim() || '{}');
-  } catch (err: any) { try { return JSON.parse((err.stdout || '{}').trim()); } catch { return { ok: false }; } }
+  } catch (err: any) {
+    // 子进程失败时 stdout 可能为空（参数校验在 commander 层就退出）——
+    // 空串不能 `JSON.parse('{}')` 成 `{}`，否则 `r.ok === undefined` 会冒充"成功但没数据"，
+    // 让「非法 scope 应被拒」这类断言永远失败。
+    const raw = typeof err.stdout === 'string' ? err.stdout.trim() : '';
+    if (!raw) return { ok: false };
+    try { return JSON.parse(raw); } catch { return { ok: false }; }
+  }
 }
 
 function createGroup(scope: string, groupPath: string): any {
@@ -27,9 +31,7 @@ function createGroup(scope: string, groupPath: string): any {
 
 function getOut(script: string, args: string[]): string {
   try {
-    return execFileSync(process.execPath, [JITI_CLI, path.join(SCRIPTS_DIR, script), ...args], {
-      encoding: 'utf-8', env: getTestEnv(),
-    });
+    return execCli(path.join(SCRIPTS_DIR, script), { args });
   } catch (err: any) { return err.stdout || ''; }
 }
 
@@ -167,13 +169,13 @@ describe('导入异常', () => {
     assert.strictEqual(r.ok, false);
     assert.ok(r.error.includes('sourceDir 不存在或不是目录'));
   });
-  it('ki import 不传 --group：顶层 .md 落 scope name（K2 决策）', async () => {
+  it('ki import 不传 --group：顶层 .md 落根 __root__（2026-10-21 口径，原 K2 scope-name 已废弃）', async () => {
     const s = await mkScope('err-imp');
     const src = mkTmp('ki-err-root');
     fs.writeFileSync(path.join(src, 'a.md'), '# a');
     const r = runJson('import.ts', ['--scope', s, '--source', src, '--no-vector']);
     assert.strictEqual(r.ok, true, JSON.stringify(r));
-    assert.ok(r.groups.includes(s), `缺省 --group 顶层 .md 应落 scope name；实际=${JSON.stringify(r.groups)}`);
+    assert.ok(r.groups.includes('__root__'), `缺省 --group 顶层 .md 应落根 __root__；实际=${JSON.stringify(r.groups)}`);
   });
   it('ki import 目录无 md 文件', async () => {
     const s = await mkScope('err-imp');

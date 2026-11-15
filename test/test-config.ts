@@ -9,6 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { spawnSync } from 'child_process';
 import { jitiCliPath } from '../src/lib/jiti-cli.mjs';
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, '..');
@@ -121,6 +122,181 @@ export function registerTestScope(scope: string): void {
  * 文件写入挂起在"等待用户确认"上，导致 import 子进程永久挂起（epoll_wait）+
  * WAL 锁残留。测试子进程不需要 IDE 拦截层。
  */
+/** 实际生效的子进程超时：环境变量优先（慢机器临时放宽），否则 CLI_TIMEOUT_MS */
+export function cliTimeoutMs(): number {
+  const raw = Number(process.env.KI_TEST_CLI_TIMEOUT);
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : CLI_TIMEOUT_MS;
+}
+
+/** 取文本尾部 N 行（超时/失败时给上下文，避免只报一句 "ETIMEDOUT"） */
+function tailLines(text: string, lines = 20): string {
+  if (!text) return '(空)';
+  const arr = text.split('\n').filter((line) => line.length > 0);
+  return arr.slice(-lines).join('\n') || '(空)';
+}
+
+export interface ExecCommandOptions {
+  /** 覆盖默认超时（ms） */
+  timeout?: number;
+  cwd?: string;
+  input?: string;
+  /** 视为正常的退出码（默认 [0]）；用于期望非零退出的用例 */
+  acceptStatus?: readonly number[];
+  /** 报错时的可读标签（默认命令名） */
+  label?: string;
+  /** 覆盖子进程环境（默认 getTestEnv()） */
+  env?: Record<string, string | undefined>;
+}
+
+export interface ExecCliOptions extends Omit<ExecCommandOptions, 'label'> {
+  /** 传给脚本的参数 */
+  args?: string[];
+  /** 报错标签（默认脚本文件名） */
+  label?: string;
+  /**
+   * 启动方式：`jiti`（默认，跑 TS 脚本）/ `node`（跑 .mjs，自测超时用）。
+   * 除 `test/cli-timeout.test.ts` 外不应传 `node`。
+   */
+  entry?: 'jiti' | 'node';
+}
+
+export interface ExecCliRawResult {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+/**
+ * 子进程失败/超时的统一错误。
+ *
+ * 必须保留 `stdout` / `stderr` / `status`：现有测试大量用
+ * `try { execFileSync(...) } catch (err) { JSON.parse(err.stdout) }` 的写法读负向用例输出，
+ * 换封装后这些 catch 仍要能拿到输出，否则负向用例会静默变成"空结果"。
+ */
+export class ExecProcessError extends Error {
+  readonly status: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
+
+  constructor(message: string, raw: ExecCliRawResult) {
+    super(message);
+    this.name = 'ExecProcessError';
+    this.status = raw.status;
+    this.signal = raw.signal;
+    this.stdout = raw.stdout;
+    this.stderr = raw.stderr;
+    this.timedOut = raw.timedOut;
+  }
+}
+
+/**
+ * 跑任意外部命令（不抛）。
+ *
+ * 与 `execCli` 的区别：这里直接执行 `command`（git / tar 等），不再拼 jiti。
+ * 两者共用同一套超时与输出采集口径，避免「CLI 有超时、git 没有」的半治理。
+ */
+export function execCommandRaw(
+  command: string,
+  args: readonly string[],
+  options: ExecCommandOptions = {},
+): ExecCliRawResult {
+  const timeout = options.timeout ?? cliTimeoutMs();
+  const r = spawnSync(command, [...args], {
+    encoding: 'utf-8',
+    env: options.env ?? getTestEnv(),
+    timeout,
+    killSignal: 'SIGKILL',
+    maxBuffer: 16 * 1024 * 1024,
+    ...(options.input !== undefined ? { input: options.input } : {}),
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+  });
+  const stdout = r.stdout ?? '';
+  const stderr = r.stderr ?? '';
+  const timedOut = (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+    || (r.signal === 'SIGKILL' && r.status === null);
+  return { status: r.status, signal: r.signal, stdout, stderr, timedOut };
+}
+
+/**
+ * 跑外部命令并返回 stdout（失败/超时抛 `ExecProcessError`）。
+ *
+ * 错误信息必须包含「命令 + 超时值 + 输出尾部」：只报一句 `ETIMEDOUT` 时，
+ * 排障的人无法判断是网络卡住、被 IDE 拦截、还是在等锁。见 REQ-20261115-002 R4。
+ */
+export function execCommand(
+  command: string,
+  args: readonly string[] = [],
+  options: ExecCommandOptions = {},
+): string {
+  const timeout = options.timeout ?? cliTimeoutMs();
+  const label = options.label ?? command;
+  const argsText = args.join(' ');
+  const res = execCommandRaw(command, args, options);
+
+  if (res.timedOut) {
+    throw new ExecProcessError([
+      `子进程超时（${timeout}ms）：${label} ${argsText}`.trim(),
+      '--- stdout 尾部 ---',
+      tailLines(res.stdout),
+      '--- stderr 尾部 ---',
+      tailLines(res.stderr),
+      `提示：慢机器可设 KI_TEST_CLI_TIMEOUT=${timeout * 2} 后重跑`,
+    ].join('\n'), res);
+  }
+
+  const accept = options.acceptStatus ?? [0];
+  if (res.status === null || !accept.includes(res.status)) {
+    throw new ExecProcessError([
+      `子进程失败（status=${String(res.status)} signal=${String(res.signal)}）：${label} ${argsText}`.trim(),
+      '--- stdout 尾部 ---',
+      tailLines(res.stdout),
+      '--- stderr 尾部 ---',
+      tailLines(res.stderr),
+    ].join('\n'), res);
+  }
+  return res.stdout;
+}
+
+/** 跑一个 ki CLI 脚本（`node jiti <script> ...args`），不抛 */
+export function execCliRaw(scriptPath: string, options: ExecCliOptions = {}): ExecCliRawResult {
+  const command = options.entry === 'node'
+    ? scriptPath
+    : JITI_CLI;
+  const commandArgs = options.entry === 'node'
+    ? (options.args ?? [])
+    : [scriptPath, ...(options.args ?? [])];
+  return execCommandRaw(process.execPath, [command, ...commandArgs], options);
+}
+
+/** 跑一个 ki CLI 脚本并返回 stdout（失败/超时抛 `ExecProcessError`） */
+export function execCli(scriptPath: string, options: ExecCliOptions = {}): string {
+  const command = options.entry === 'node' ? scriptPath : JITI_CLI;
+  const commandArgs = options.entry === 'node'
+    ? (options.args ?? [])
+    : [scriptPath, ...(options.args ?? [])];
+  return execCommand(process.execPath, [command, ...commandArgs], {
+    ...options,
+    label: options.label ?? path.basename(scriptPath),
+  });
+}
+
+/** 跑子进程并把 stdout 解析为 JSON（多数 CLI 的默认输出形态） */
+export function execCliJson<T = unknown>(scriptPath: string, options: ExecCliOptions = {}): T {
+  const out = execCli(scriptPath, options);
+  try {
+    return JSON.parse(out) as T;
+  } catch (err) {
+    throw new Error(
+      `stdout 不是合法 JSON（${path.basename(scriptPath)}）：${(err as Error).message}\n`
+      + `--- stdout 尾部 ---\n${tailLines(out)}`,
+    );
+  }
+}
+
 export function getTestEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env.NODE_OPTIONS;
@@ -132,6 +308,16 @@ export function getTestEnv(): Record<string, string | undefined> {
   env.KI_CONFIG_PATH = TEST_CONFIG_PATH;
   return env;
 }
+
+/**
+ * 测试子进程的默认超时（毫秒）。
+ *
+ * 为什么必须有：全仓测试大量使用 `execFileSync` 跑 CLI 子进程，而它**默认无超时** ——
+ * 任何一个子进程卡住（embedding 网络、被 safe-delete 拦截、引擎等锁），父进程就会永久等待，
+ * 表现为「测试执行了很久、没有任何输出、也不退出」。
+ * 新增子进程调用时请显式传 `timeout: CLI_TIMEOUT_MS`。
+ */
+export const CLI_TIMEOUT_MS = 120_000;
 
 /** 测试配置文件路径（供需要直接引用的场景使用） */
 export const testConfigPath = TEST_CONFIG_PATH;

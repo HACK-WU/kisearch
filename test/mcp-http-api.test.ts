@@ -32,6 +32,7 @@ import { loadConfig, getScopeDataDir, resetConfigCache } from '../src/lib/config
 import { createTaskReporter, getTaskRecord } from '../src/lib/task-registry.js';
 import { closeFtsEngine, deleteFtsCollection } from '../src/lib/fts-client.js';
 import type { TokenAuth } from '../src/lib/mcp-token.js';
+import { execCommand } from './test-config.js';
 
 // ─── 测试隔离：临时 HOME，避免污染真实 ~/.ki ───
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-api-test-'));
@@ -711,9 +712,8 @@ describe('/api/datasource/add-remote', () => {
   }
 
   function git(cwd: string, ...args: string[]): string {
-    return execFileSync('git', ['-C', cwd, ...args], {
+    return execCommand('git', ['-C', cwd, ...args], {
       env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-      encoding: 'utf8',
     });
   }
 
@@ -730,7 +730,7 @@ describe('/api/datasource/add-remote', () => {
     git(work, 'add', '.');
     git(work, 'commit', '-q', '-m', 'init');
     const bare = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ds-remote-bare-')), 'repo.git');
-    execFileSync('git', ['clone', '-q', '--bare', work, bare], { encoding: 'utf8' });
+    execCommand('git', ['clone', '-q', '--bare', work, bare]);
     return { bare, work };
   }
 

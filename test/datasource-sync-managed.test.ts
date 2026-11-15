@@ -17,6 +17,7 @@ import path from 'node:path';
 import { loadConfig, resetConfigCache } from '../src/lib/config.js';
 import { addRemoteDataSource, readDataSource, syncDataSource } from '../src/lib/datasource.js';
 import { closeFtsEngine } from '../src/lib/fts-client.js';
+import { execCommand } from './test-config.js';
 
 let root: string;
 let configPath: string;
@@ -29,17 +30,15 @@ let savedConfigPath: string | undefined;
 let savedCloneRoot: string | undefined;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execCommand('git', ['-C', cwd, ...args], {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
   });
 }
 
 function gitRaw(args: string[], cwd = root): string {
-  return execFileSync('git', args, {
+  return execCommand('git', args, {
     cwd,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
   });
 }
 

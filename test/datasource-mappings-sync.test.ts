@@ -22,6 +22,7 @@ import { planDatasourcePrune } from '../src/lib/datasource-prune.js';
 import { readAllGroupCaches } from '../src/lib/group-cache.js';
 import { closeFtsEngine } from '../src/lib/fts-client.js';
 import { closeEngine } from '../src/lib/vector-client.js';
+import { execCommand } from './test-config.js';
 
 let root: string;
 let dataDir: string;
@@ -31,9 +32,8 @@ let repo: string;
 let savedConfigPath: string | undefined;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execCommand('git', ['-C', cwd, ...args], {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
   });
 }
 

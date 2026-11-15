@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { daemonIdentityFingerprint } from '../src/lib/scope-collection.js';
+import { execCli } from './test-config.js';
 
 const CLI = path.resolve(import.meta.dirname, '..', 'bin', 'ki.mjs');
 
@@ -31,11 +32,7 @@ function runCli(args: string[], envExtra: Record<string, string | undefined> = {
     env.USERPROFILE = envExtra.HOME;
   }
   try {
-    const stdout = execFileSync('node', [CLI, ...args], {
-      encoding: 'utf-8',
-      timeout: 30000,
-      env,
-    });
+    const stdout = execCli(CLI, { entry: 'node', args, timeout: 30000, env });
     return { stdout, stderr: '', status: 0 };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string; status?: number };

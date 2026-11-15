@@ -14,21 +14,16 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI, execCli, execCliRaw } from './test-config.js';
 
 // ki import 为扁平命令（2026-09-07 由 `ki scan-kb import` 扁平化）：参数数组不再带 'import' 子命令名，
 // 带上去会被 commander 报 `too many arguments`（无守卫），故各调用点均不得遗留该元素。
 const SCRIPT = path.resolve('src/import.ts');
 
 function runImport(args: string[]): any {
-  const { execFileSync } = require('node:child_process');
   let out: string;
   try {
-    out = execFileSync(process.execPath, [JITI_CLI, SCRIPT, ...args], {
-      encoding: 'utf-8',
-      env: getTestEnv(),
-      cwd: path.resolve('.'),
-    });
+    out = execCli(SCRIPT, { args, cwd: path.resolve('.') });
   } catch (err: any) {
     // 负向用例：子进程非零退出但 stdout 仍输出结果 JSON
     out = err.stdout ?? '';
@@ -326,11 +321,11 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.ok(r.groups.includes('wiki/部署运维/sub'), `子目录应挂到落点下；实际=${JSON.stringify(r.groups)}`);
   });
 
-  it('--group 缺省时：顶层 .md 落 scope name（K2 决策）', () => {
+  it('--group 缺省时：顶层 .md 落根 __root__（2026-10-21 口径，原 K2 scope-name 已废弃）', () => {
     const src = mkSource({ 'a.md': '# A\n内容' });
     const r = runImport(['--scope', scope, '--source', src, '--no-vector']);
     assert.strictEqual(r.ok, true, JSON.stringify(r));
-    assert.ok(r.groups.includes(scope), `缺省 --group 顶层 .md 应落 scope name；实际=${JSON.stringify(r.groups)}`);
+    assert.ok(r.groups.includes('__root__'), `缺省 --group 顶层 .md 应落根 __root__；实际=${JSON.stringify(r.groups)}`);
   });
 
   it('--group 缺省时：上传目录名作为子 Group 根节点', () => {
@@ -349,10 +344,10 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.strictEqual(r1.ok, true, JSON.stringify(r1));
     assert.strictEqual(r1.stats.total, 1);
     assert.ok(r1.groups.includes('wiki'), `显式 --group 应生效；实际=${JSON.stringify(r1.groups)}`);
-    // 缺省 --group → scope name（回退用例：修复 ENOTDIR 单文件路径拼接 bug）
+    // 缺省 --group → 根 __root__（回退用例：修复 ENOTDIR 单文件路径拼接 bug）
     const r2 = runImport(['--scope', scope, '--source', file, '--no-vector']);
     assert.strictEqual(r2.ok, true, JSON.stringify(r2));
-    assert.ok(r2.groups.includes(scope), `单文件缺省 --group 应落 scope name；实际=${JSON.stringify(r2.groups)}`);
+    assert.ok(r2.groups.includes('__root__'), `单文件缺省 --group 应落根 __root__；实际=${JSON.stringify(r2.groups)}`);
     // 非 .md 单文件：fail-loud 拒绝（REQ-08 白名单不因单文件路径绕过）
     const txt = path.join(dir, 'plain.txt');
     fs.writeFileSync(txt, 'not markdown');
@@ -421,15 +416,10 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
 
   it('废弃参数负向验证：--mode/--root-name 报未知，多余位置参数（含旧 diff 子命令）被拒', () => {
     const src = mkSource({ 'a.md': '# A\n内容' });
-    const { execFileSync } = require('node:child_process');
     // 辅助：跑一次，返回 { code, stdout, stderr }（commander 对未知参数/命令输出 help 文本，非 JSON）
     const runRaw = (args: string[]) => {
-      try {
-        const out = execFileSync(process.execPath, [JITI_CLI, SCRIPT, ...args], { encoding: 'utf-8', env: getTestEnv(), cwd: path.resolve('.') });
-        return { code: 0, stdout: out, stderr: '' };
-      } catch (e: any) {
-        return { code: e.status ?? 1, stdout: (e.stdout || '').toString(), stderr: (e.stderr || '').toString() };
-      }
+      const raw = execCliRaw(SCRIPT, { args, cwd: path.resolve('.') });
+      return { code: raw.status ?? 1, stdout: raw.stdout, stderr: raw.stderr };
     };
     // --mode 已移除 → 未知参数（commander 输出 help 到 stderr/stdout，非 JSON）
     const rMode = runRaw(['--scope', scope, '--source', src, '--group', 'wiki', '--mode', 'incremental', '--no-vector']);

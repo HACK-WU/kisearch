@@ -23,19 +23,14 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, execCli } from './test-config.js';
 
 const SCRIPT = path.resolve('src/import.ts');
 
 function runImport(args: string[]): any {
-  const { execFileSync } = require('node:child_process');
   let out: string;
   try {
-    out = execFileSync(process.execPath, [JITI_CLI, SCRIPT, ...args], {
-      encoding: 'utf-8',
-      env: getTestEnv(),
-      cwd: path.resolve('.'),
-    });
+    out = execCli(SCRIPT, { args, cwd: path.resolve('.') });
   } catch (err: any) {
     out = err.stdout ?? '';
   }

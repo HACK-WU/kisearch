@@ -15,8 +15,8 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync, spawnSync } from 'child_process';
-import { JITI_CLI } from './test-config.js';
+import { spawnSync } from 'child_process';
+import { JITI_CLI, execCli, execCommand } from './test-config.js';
 import { tarPathArgs, tarFormatArgs, tarPath } from '../src/lib/tar-compat.js';
 
 const SCRIPT_PATH = path.resolve(import.meta.dirname, '..', 'src', 'restore.ts');
@@ -77,7 +77,7 @@ function setupScope(opts: { backupInCustom?: boolean } = {}): {
   const snapshotHostDir = opts.backupInCustom ? customBackupDir : defBackupDir;
   const snapDir = path.join(snapshotHostDir, scope, 'snapshots');
   fs.mkdirSync(snapDir, { recursive: true });
-  execFileSync('tar', [
+  execCommand('tar', [
     ...tarPathArgs(),
     ...tarFormatArgs(),
     '-czf',
@@ -103,8 +103,8 @@ function setupScope(opts: { backupInCustom?: boolean } = {}): {
 
 function runRestore(configPath: string, args: string[]): any {
   try {
-    const stdout = execFileSync(process.execPath, [JITI_CLI, SCRIPT_PATH, ...args], {
-      encoding: 'utf-8',
+    const stdout = execCli(SCRIPT_PATH, {
+      args,
       env: { ...process.env, KI_CONFIG_PATH: configPath, NODE_NO_WARNINGS: '1' },
     });
     return JSON.parse(stdout);

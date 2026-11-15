@@ -11,12 +11,12 @@
  * 运行：npx jiti test/cross-process-invalidation.test.ts
  */
 
+import { execCli } from './test-config.js';
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { resetConfigCache } from '../src/lib/config.js';
 import { writeGroupCacheBatch, readAllGroupCaches } from '../src/lib/group-cache.js';
 import { getRelationMap, clearRelationMapCache } from '../src/lib/relation-map.js';
@@ -86,15 +86,11 @@ describe('跨进程缓存失效（批次 2 工作项 6：CLI 写 → daemon 读�
     // 用临时脚本文件（jiti -e 下 process.argv 语义不同，脚本文件方式稳定）
     const childScriptPath = path.join(tmpRoot, 'child-writer.ts');
     fs.writeFileSync(childScriptPath, CHILD_SCRIPT, 'utf-8');
-    const out = execFileSync(
-      process.execPath,
-      [path.join(PROJECT_ROOT, 'node_modules/jiti/lib/jiti-cli.mjs'), childScriptPath, scope, 'g1x'],
-      {
-        env: { ...process.env, KI_CONFIG_PATH: process.env.KI_CONFIG_PATH },
-        encoding: 'utf-8',
-        timeout: 60_000,
-      },
-    );
+    const out = execCli(childScriptPath, {
+      args: [scope, 'g1x'],
+      env: { ...process.env, KI_CONFIG_PATH: process.env.KI_CONFIG_PATH },
+      timeout: 60_000,
+    });
     assert.match(out, /CHILD_OK/, '子进程写入完成');
 
     // 父进程读：身份三元组（revision 已由子进程 bump）必须触发重算

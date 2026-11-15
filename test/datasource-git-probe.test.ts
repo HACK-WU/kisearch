@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { probeGit, sanitizeRemoteUrl } from '../src/lib/datasource-git.js';
+import { execCommand } from './test-config.js';
 
 let root: string;
 let repo: string;
@@ -18,9 +19,8 @@ let link: string;
 let notRepo: string;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execCommand('git', ['-C', cwd, ...args], {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
   });
 }
 

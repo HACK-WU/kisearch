@@ -9,8 +9,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, execCli } from './test-config.js';
 
 // ─── 辅助 ───
 
@@ -23,10 +22,7 @@ const SCRIPT_PATH = path.resolve(
 
 function runGetModuleInfo(args: string[]): string {
   try {
-    return execFileSync(process.execPath, [JITI_CLI, SCRIPT_PATH, ...args], {
-      encoding: 'utf-8',
-      env: getTestEnv()
-    });
+    return execCli(SCRIPT_PATH, { args });
   } catch (err: any) {
     if (err.stdout) return err.stdout;
     return '';

@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { execFileSync } from 'child_process';
+import { execCli } from './test-config.js';
 
 const CLI = path.resolve(import.meta.dirname, '..', 'bin', 'ki.mjs');
 
@@ -54,10 +55,7 @@ const SUB_COMMANDS: string[] = (() => {
 
 function runCli(args: string[]): { stdout: string; status: number } {
   try {
-    const stdout = execFileSync('node', [CLI, ...args], {
-      encoding: 'utf-8',
-      env: { ...process.env, NODE_NO_WARNINGS: '1' },
-    });
+    const stdout = execCli(CLI, { entry: 'node', args, env: { ...process.env, NODE_NO_WARNINGS: '1' } });
     return { stdout, status: 0 };
   } catch (err: any) {
     return { stdout: err.stdout || '', status: err.status ?? 1 };
@@ -146,10 +144,7 @@ describe('已删除命令走未知命令分支', () => {
   for (const command of ['setup', 'migrate-vector']) {
     it(`ki ${command} → 退出码 1，stderr 提示未知命令`, () => {
       try {
-        execFileSync('node', [CLI, command], {
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
+        execCli(CLI, { entry: 'node', args: [command] });
         assert.fail(`ki ${command} 应失败退出`);
       } catch (err: any) {
         assert.strictEqual(err.status, 1, `stdout=${err.stdout} stderr=${err.stderr}`);

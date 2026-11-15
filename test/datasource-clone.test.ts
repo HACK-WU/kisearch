@@ -12,6 +12,7 @@ import path from 'node:path';
 import { useTempHomeAt, type TempHome } from './isolate-home.js';
 import type { KiConfig } from '../src/lib/config.js';
 import type { CloneManagedInput, CloneResult } from '../src/lib/datasource-clone.js';
+import { execCommand } from './test-config.js';
 
 type CloneModule = typeof import('../src/lib/datasource-clone.js');
 let clone: CloneModule;
@@ -25,9 +26,8 @@ let config: KiConfig;
 let tempHome: TempHome;
 
 function git(cwd: string, ...args: string[]): string {
-  return execFileSync('git', ['-C', cwd, ...args], {
+  return execCommand('git', ['-C', cwd, ...args], {
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
   });
 }
 
@@ -67,7 +67,7 @@ before(async () => {
   git(work, 'tag', 'v1.0');
 
   bare = path.join(root, 'bare.git');
-  execFileSync('git', ['clone', '-q', '--bare', work, bare], { encoding: 'utf8' });
+  execCommand('git', ['clone', '-q', '--bare', work, bare]);
 
   // 空仓库（没有任何可导入文件）
   const emptyWork = path.join(root, 'empty');
@@ -80,7 +80,7 @@ before(async () => {
   git(emptyWork, 'add', '.');
   git(emptyWork, 'commit', '-q', '-m', 'init');
   emptyBare = path.join(root, 'empty.git');
-  execFileSync('git', ['clone', '-q', '--bare', emptyWork, emptyBare], { encoding: 'utf8' });
+  execCommand('git', ['clone', '-q', '--bare', emptyWork, emptyBare]);
 
   // 子目录 symlink 指向仓库外（仓库内容可控）：不得把宿主机目录当导入源
   const outside = path.join(root, 'outside');
@@ -96,7 +96,7 @@ before(async () => {
   git(symWork, 'add', '.');
   git(symWork, 'commit', '-q', '-m', 'symlink docs');
   symBare = path.join(root, 'sym.git');
-  execFileSync('git', ['clone', '-q', '--bare', symWork, symBare], { encoding: 'utf8' });
+  execCommand('git', ['clone', '-q', '--bare', symWork, symBare]);
 
   config = {
     dataDir: path.join(root, 'kb'),

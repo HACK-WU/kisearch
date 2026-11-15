@@ -15,11 +15,10 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { JITI_CLI } from './test-config.js';
+import { execCli } from './test-config.js';
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-import-precheck-'));
 const home = path.join(tmpRoot, 'home');
@@ -65,15 +64,11 @@ function runImport(extraArgs: string[] = []): CliResult {
     USERPROFILE: home,
   };
   try {
-    const stdout = execFileSync(
-      process.execPath,
-      [JITI_CLI, path.resolve('src/import.ts'),
-        '--scope', 'default',
-        '--source', wikiDir,
-        '--group', 'demo',
-        ...extraArgs],
-      { encoding: 'utf-8', env, cwd: path.resolve('.'), stdio: ['ignore', 'pipe', 'pipe'] },
-    );
+    const stdout = execCli(path.resolve('src/import.ts'), {
+      args: ['--scope', 'default', '--source', wikiDir, '--group', 'demo', ...extraArgs],
+      env,
+      cwd: path.resolve('.'),
+    });
     return { status: 0, stdout, stderr: '' };
   } catch (err) {
     const e = err as { status?: number; stdout?: string; stderr?: string };

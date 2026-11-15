@@ -10,8 +10,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
-import { registerTestScope, getTestEnv, cleanupTestConfig, JITI_CLI } from './test-config.js';
+import { registerTestScope, getTestEnv, cleanupTestConfig, execCli } from './test-config.js';
 
 // ─── 辅助 ───
 
@@ -24,10 +23,8 @@ const SCRIPT_PATH = path.resolve(
 
 function runSync(args: string[]): any {
   try {
-    const output = execFileSync(process.execPath, [JITI_CLI, SCRIPT_PATH, ...args], {
-      encoding: 'utf-8',
-      env: getTestEnv()
-    });
+    // 统一走 execCli：默认 120s 超时 + SIGKILL（REQ-20261115-002），不再各自拼 execFileSync
+    const output = execCli(SCRIPT_PATH, { args });
     return JSON.parse(output);
   } catch (err: any) {
     if (err.stdout) {
@@ -49,6 +46,17 @@ before(async () => {
 });
 
 after(async () => {
+  // 先释放引擎句柄再删目录：before 里 import 了 store.js，其依赖链会拉起 zvec/FTS 引擎，
+  // 不显式关闭时 node:test 在用例全部通过后仍不退出（测试跑完却看不到汇总）。
+  try {
+    const { closeEngine } = await import('../src/lib/vector-client.js');
+    await closeEngine();
+  } catch { /* 未打开引擎时忽略 */ }
+  try {
+    const { closeFtsEngine } = await import('../src/lib/fts-client.js');
+    await closeFtsEngine();
+  } catch { /* 同上 */ }
+
   const { getKbDir } = await import('../src/lib/scope.js');
   const kbDir = getKbDir(scope);
   if (fs.existsSync(kbDir)) {
