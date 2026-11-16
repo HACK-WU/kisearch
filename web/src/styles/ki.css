@@ -226,7 +226,8 @@ a:hover { text-decoration: underline; }
      本值给出约 110px 可用 —— 留 7px 余量抗字体渲染差异；再往左移只会让 logo
      与下方导航图标（左边缘 24px）错位更多，得不偿失。 */
   padding: 0 4px;
-  margin-bottom: 32px;
+  /* 32 → 24（2026-11-16）：与「组间 20 / 组标题→首项 8」构成递减阶梯（原为 32 / 0 / 12，倒挂） */
+  margin-bottom: 24px;
   flex-shrink: 0;
 }
 .ki-logo {
@@ -261,17 +262,29 @@ a:hover { text-decoration: underline; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-.ki-sidebar__section { display: grid; gap: 3px; }
-.ki-sidebar__section-head { padding: 0 12px; margin-bottom: 12px; }
+/* 分组：项间距 2px；**组与组之间必须靠留白分开**（2026-11-16 用户反馈"分组是否合适"）。
+   原实现两段 `<nav>` 直接相邻、组间 0px，而组标题离下一项有 12px ⇒「知识治理」读起来是
+   上一组末项（资源）的兄弟项，而不是一个新组的开头 —— 空白阶梯必须是 组间 > 组标题→首项。 */
+.ki-sidebar__section { display: grid; gap: 2px; }
+.ki-sidebar__section + .ki-sidebar__section { margin-top: 20px; }
+.ki-sidebar__section-head { padding: 0 12px; margin-bottom: 8px; }
+/* 组标题的层级必须**弱于**可点项，靠"更小字号 + 更浅颜色 + 上方留白"拉开，不靠字重压制：
+   原 700 比普通项的 500、激活项的 650 都重，看着比可点项还重要；字距原为 0.12em（那是给
+   英文全大写小标签的口径），中文四个字被摊到约 60px，观感接近一个按钮。 */
 .ki-sidebar__section-label {
-  font-size: var(--ki-font-size-xs); font-weight: 700;
+  font-size: var(--ki-font-size-xs); font-weight: 600;
   color: var(--ki-color-text-subtle);
-  letter-spacing: 0.12em;
+  letter-spacing: 0.04em;
 }
 
+/* 行高 42 → 34（2026-11-16 用户："每个 tab 上下距离有点太远"）：
+   42 + 3 的节距是 45px，对 14px 字偏高（3.2 倍），12 项累计 534px 把侧栏拉成一条长楼梯。
+   改后 34 + 2 = 36px 节距，累计省 88px —— 顺带解掉一个隐患：侧栏总高原约 779px，
+   768 高的笔记本窗口会溢出，而 `.ki-sidebar` 的滚动条是隐藏的（`::-webkit-scrollbar{width:0}`），
+   页脚（版本号 / 主题切换）会静默沉底且无任何可滚动提示。 */
 .ki-nav-item {
   display: flex; align-items: center; gap: 12px;
-  height: 42px; padding: 0 12px; border-radius: var(--ki-radius-md);
+  height: 34px; padding: 0 12px; border-radius: var(--ki-radius-md);
   cursor: pointer;
   transition: background var(--ki-motion-fast), color var(--ki-motion-fast);
   font-size: var(--ki-font-size-md); color: var(--ki-color-text-muted);
@@ -287,7 +300,8 @@ a:hover { text-decoration: underline; }
 }
 .ki-nav-item--active .ki-icon { color: var(--ki-color-primary); }
 .ki-nav-item--active::before {
-  content: ""; position: absolute; left: 0; top: 9px; bottom: 9px;
+  /* 9 → 7px：随行高 42→34 等比收，保持竖条占行高约 60% */
+  content: ""; position: absolute; left: 0; top: 7px; bottom: 7px;
   width: 3px; background: var(--ki-color-primary); border-radius: 0 3px 3px 0;
 }
 .ki-nav-item__icon { position: relative; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
@@ -345,6 +359,12 @@ a:hover { text-decoration: underline; }
   .ki-sidebar__brand, .ki-sidebar__subtitle, .ki-sidebar__section-head,
   .ki-sidebar__footer-title, .ki-sidebar__footer-meta, .ki-nav-item__name { display: none; }
   .ki-nav-item { justify-content: center; gap: 0; padding: 0; }
+  /* 窄轨里组标题被 `display:none`，分组感只能靠留白 + 细分隔线撑住 ——
+     否则三组塌成一条 12 项图标长列（原实现即如此，组间关系完全丢失） */
+  .ki-sidebar__section + .ki-sidebar__section {
+    margin: 16px 4px 0; padding-top: 12px;
+    border-top: 1px solid var(--ki-color-border);
+  }
   .ki-sidebar__footer { padding: 12px 0 0; }
   .ki-sidebar__footer-row { justify-content: center; }
 }

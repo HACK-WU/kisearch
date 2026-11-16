@@ -76,7 +76,13 @@ interface NavItem {
   also?: readonly string[];
 }
 
-const NAV_MAIN: NavItem[] = [
+/**
+ * 侧栏第一组「工作台」：日常使用知识的五个入口（看 → 读 → 搜 → 问 → 写）。
+ * 组名原为「工作空间」，2026-11-16 用户反馈后改掉：本产品里"工作空间/知识库"已被顶栏的
+ * scope 选择器占用，同名不同义；且这一组当时还混装了数据源/后台任务/知识视图/资源四项配置类入口，
+ * 分组没能降低查找成本。
+ */
+const NAV_WORKSPACE: NavItem[] = [
   { to: '/', label: '总览', icon: 'grid', end: true },
   { to: '/browse', label: '知识库浏览', icon: 'book' },
   { to: '/search', label: '语义搜索', icon: 'search' },
@@ -88,6 +94,10 @@ const NAV_MAIN: NavItem[] = [
    * 侧栏与页内同义重复会让"哪个是导入"更难认）。`also` 让 `/write` 上侧栏仍然高亮。
    */
   { to: '/import', label: MERGED_WRITE_LABEL, icon: 'edit', also: ['/write'] },
+];
+
+/** 侧栏第二组「接入与运维」：知识从哪来、在跑什么、怎么共享与接入 */
+const NAV_OPS: NavItem[] = [
   { to: '/datasource', label: '数据源', icon: 'database' },
   { to: '/tasks', label: '后台任务', icon: 'clock' },
   // 知识视图（REQ-20261104-004）：多库聚合视图的团队共享管理页
@@ -95,6 +105,12 @@ const NAV_MAIN: NavItem[] = [
   // 资源（MCP 接入 / Agent Skill 安装）
   { to: '/resources', label: '资源', icon: 'compass' },
 ];
+
+/**
+ * 扁平全量表：顶栏 H1 查表（`currentLabel`）与权限过滤都按它走。
+ * 侧栏**渲染不走这里**，而是按上面两组分别渲染（分组标题需要独立节点）。
+ */
+const NAV_MAIN: NavItem[] = [...NAV_WORKSPACE, ...NAV_OPS];
 
 /**
  * 知识治理三页的顶栏标题（与侧栏「知识治理」分组的 label 保持一致）。
@@ -258,12 +274,51 @@ export function AppShell(): JSX.Element {
     navigate('/login', { replace: true });
   };
 
-  const navItems = NAV_MAIN.filter((item) => {
-    // 合并项（REQ-20261116-002）：一个入口同时承载导入与手动写入，能力要求不变
+  /**
+   * 侧栏可见性过滤：合并项（REQ-20261116-002）一个入口同时承载导入与手动写入，能力要求不变。
+   * 抽成函数是因为既要算出扁平表（H1 查表用），也要按分组各算一次。
+   */
+  const canSeeNavItem = (item: NavItem): boolean => {
     if (!can('knowledge.write') && item.to === '/import') return false;
     if (!can('datasource.read') && item.to === '/datasource') return false;
     return true;
-  });
+  };
+  const navItems = NAV_MAIN.filter(canSeeNavItem);
+  /**
+   * 侧栏渲染分组（2026-11-16 用户确认方案 A）：工作台 / 接入与运维 + 下方硬编码的「知识治理」。
+   * 顺序刻意让「知识治理」留在最底部 —— 分类/事件/回收站三项位置不变，只有四个配置类项下落三行。
+   * 空组不渲染（某角色无任何可见项时不该留一个孤零零的组标题）。
+   */
+  const navGroups: ReadonlyArray<{ label: string; items: NavItem[] }> = [
+    { label: '工作台', items: NAV_WORKSPACE.filter(canSeeNavItem) },
+    { label: '接入与运维', items: NAV_OPS.filter(canSeeNavItem) },
+  ];
+  /** 单个侧栏项：两个分组共用同一渲染（图标 + 名称 + AI 对话进行中标记） */
+  const renderNavItem = (item: NavItem): JSX.Element => {
+    /** 「AI 对话」进行中标记（用户需求 2026-10-14）：挂在图标上，侧栏收起态同样可见 */
+    const busy = item.to === '/chat' && chatStreaming;
+    /**
+     * 高亮改用 `navItemActive`（含 `also`）而不是 NavLink 自带的 isActive：
+     * 合并项只声明 `to: '/import'`，NavLink 在 `/write` 上会判为未激活 —— 侧栏不亮、
+     * 而顶栏 H1 却显示「知识写入」，两处打架。改用 Link 保留同一视觉与 aria-current。
+     */
+    const active = navItemActive(item, location.pathname);
+    return (
+      <Link
+        key={item.to}
+        to={item.to}
+        className={`ki-nav-item${active ? ' ki-nav-item--active' : ''}`}
+        aria-current={active ? 'page' : undefined}
+        title={busy ? 'AI 正在生成回答' : undefined}
+      >
+        <span className="ki-nav-item__icon">
+          <Icon name={item.icon} />
+          {busy ? <span className="ki-nav-item__busy" aria-hidden="true" /> : null}
+        </span>
+        <span className="ki-nav-item__name">{item.label}</span>
+      </Link>
+    );
+  };
 
   const [searchParams, setSearchParams] = useSearchParams();
   // ★ D15 硬约束：对话状态与流式累积态必须驻留【AppShell 级】（面板关闭 = 隐藏不卸载），
@@ -622,39 +677,21 @@ export function AppShell(): JSX.Element {
           </span>
         </div>
 
-        <nav className="ki-sidebar__section">
-          <div className="ki-sidebar__section-head">
-            <span className="ki-sidebar__section-label">工作空间</span>
-          </div>
-          {navItems.map((item) => {
-            /** 「AI 对话」进行中标记（用户需求 2026-10-14）：挂在图标上，侧栏收起态同样可见 */
-            const busy = item.to === '/chat' && chatStreaming;
-            /**
-             * 高亮改用 `navItemActive`（含 `also`）而不是 NavLink 自带的 isActive：
-             * 合并项只声明 `to: '/import'`，NavLink 在 `/write` 上会判为未激活 —— 侧栏不亮、
-             * 而顶栏 H1 却显示「知识写入」，两处打架。改用 Link 保留同一视觉与 aria-current。
-             */
-            const active = navItemActive(item, location.pathname);
-            return (
-              <Link
-                key={item.to}
-                to={item.to}
-                className={`ki-nav-item${active ? ' ki-nav-item--active' : ''}`}
-                aria-current={active ? 'page' : undefined}
-                title={busy ? 'AI 正在生成回答' : undefined}
-              >
-                <span className="ki-nav-item__icon">
-                  <Icon name={item.icon} />
-                  {busy ? <span className="ki-nav-item__busy" aria-hidden="true" /> : null}
-                </span>
-                <span className="ki-nav-item__name">{item.label}</span>
-              </Link>
-            );
-          })}
-        </nav>
+        {/* aria-label：侧栏现在有三个 `<nav>` 地标，无名地标在屏幕阅读器里只会读成
+            "导航、导航、导航"，用户分不清哪组是哪组 */}
+        {navGroups.map((group) => (
+          group.items.length > 0 ? (
+            <nav className="ki-sidebar__section" key={group.label} aria-label={group.label}>
+              <div className="ki-sidebar__section-head">
+                <span className="ki-sidebar__section-label">{group.label}</span>
+              </div>
+              {group.items.map(renderNavItem)}
+            </nav>
+          ) : null
+        ))}
 
         {/* 知识治理（REQ-20261113-004 · S-07）：独立分组，三项都是只读即可进入 */}
-        <nav className="ki-sidebar__section">
+        <nav className="ki-sidebar__section" aria-label="知识治理">
           <div className="ki-sidebar__section-head">
             <span className="ki-sidebar__section-label">知识治理</span>
           </div>
