@@ -286,7 +286,10 @@ export function LifecyclePage(): JSX.Element {
           className="gov-input"
           type="search"
           placeholder="搜索文档名 / 路径…"
-          style={{ width: 220 }}
+          /* 220 → 320：分类页文档名/路径经常较长，220 只能看半截（2026-11-16 用户反馈）。
+             ≤900px 由 governance.css 的 media 规则（`.gov-toolbar .gov-input{width:100%!important}`）
+             改成整行宽；这里 maxWidth 只是 900px 以上的兜底，防止容器比 320 还窄时撑破。 */
+          style={{ width: 320, maxWidth: '100%' }}
           value={keyword}
           onChange={(e) => { setKeyword(e.target.value); setPage(1); }}
         />

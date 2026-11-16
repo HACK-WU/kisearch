@@ -34,7 +34,9 @@
   align-items: center;
   gap: var(--ki-space-3);
   flex-wrap: wrap;
-  padding: var(--ki-space-2) 0 var(--ki-space-3);
+  /* 下内距 12 → 8（分隔线上方那一档同步收紧）；与下方 `.gov-toolbar` 的负 margin 配合，
+     「分隔线 → 筛选行」由 16px 收成 8px（2026-11-16 用户反馈按钮上方空一大截）。 */
+  padding: var(--ki-space-2) 0 var(--ki-space-2);
   border-bottom: 1px solid var(--ki-color-border);
 }
 .gov-head__path {
@@ -86,6 +88,18 @@
   flex-wrap: wrap;
 }
 .gov-toolbar__spacer { flex: 1; }
+
+/* 页头 / 筛选行 / 正文卡片属同一屏操作区，纵向间距比 `.gov-page` 的 16px 栅格更紧：
+   分隔线 → 筛选行 8px，筛选行 → 卡片 4px（其余块如提示、说明仍按 16px；
+   ≤900px 工具条变多行时卡片间距回 12px，见文件末尾响应式段）。
+   用负 margin 抵消父级 gap，避免为三块单独拆掉整页栅格（2026-11-16 用户反馈：
+   按钮顶部空隙太多、按钮与下面的卡片没必要分开）。 */
+.gov-head + .gov-toolbar { margin-top: calc(var(--ki-space-2) * -1); }
+.gov-toolbar + .gov-card,
+.gov-toolbar + .gov-split { margin-top: calc(var(--ki-space-3) * -1); }
+/* 分类页选中态上方的批量操作条同属工具条一族，跟卡片贴紧 */
+.gov-toolbar + .gov-selbar { margin-top: calc(var(--ki-space-3) * -1); }
+.gov-selbar + .gov-card { margin-top: calc(var(--ki-space-3) * -1); }
 
 /* 分段控件（demo .seg）：浅灰轨道 + 选中白卡，无边框只靠阴影抬起 */
 .gov-seg {
@@ -1003,6 +1017,12 @@
   .gov-head { gap: var(--ki-space-2); }
   .gov-head__actions { margin-left: 0; width: 100%; justify-content: flex-end; }
   .gov-toolbar .gov-input { width: 100% !important; }
+  /* 窄屏工具条塌成多行（输入框整行 + 按钮换行），最底一行按钮与卡片只隔 4px 会挤在一起，
+     这里回一档到 12px；页头到工具条的 8px 仍保留 */
+  .gov-toolbar + .gov-card,
+  .gov-toolbar + .gov-split,
+  .gov-toolbar + .gov-selbar,
+  .gov-selbar + .gov-card { margin-top: calc(var(--ki-space-1) * -1); }
   .gov-pane__list { max-height: 320px; }
 
   .gov-tbl { table-layout: auto; }
@@ -1066,3 +1086,67 @@
 .gov-badge--bug { background: var(--gov-badge-bug-bg); color: var(--gov-badge-bug-fg); }
 .gov-badge--perf { background: var(--gov-badge-perf-bg); color: var(--gov-badge-perf-fg); }
 .gov-badge--req { background: var(--gov-badge-req-bg); color: var(--gov-badge-req-fg); }
+
+/* ════════ 事件描述与代码位置（REQ-20261113-003 · S-05）════════ */
+.gov-textarea {
+  width: 100%;
+  min-height: 76px;
+  padding: 8px 10px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  font: inherit;
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.55;
+  color: var(--ki-color-text);
+  resize: vertical;
+}
+.gov-textarea:focus { outline: none; border-color: var(--ki-color-primary); }
+
+.gov-desc-text {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-secondary);
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.6;
+  color: var(--ki-color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.gov-desc-edit { display: flex; flex-direction: column; gap: var(--ki-space-2); }
+.gov-desc-edit__foot { display: flex; align-items: center; gap: var(--ki-space-2); }
+
+.gov-codeloc {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--ki-space-3);
+  padding: 8px 0;
+  border-bottom: 1px dashed var(--ki-color-border);
+}
+.gov-codeloc:last-child { border-bottom: 0; }
+.gov-codeloc__main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.gov-codeloc__head { display: flex; align-items: center; gap: var(--ki-space-2); flex-wrap: wrap; }
+.gov-codeloc__path {
+  font-family: var(--ki-font-mono);
+  font-size: var(--ki-font-size-sm);
+  font-weight: 600;
+  color: var(--ki-color-text);
+  word-break: break-all;
+}
+.gov-codeloc__why { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted); line-height: 1.5; }
+.gov-codeloc__snip {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-muted);
+  font-family: var(--ki-font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--ki-color-text-muted);
+  overflow-x: auto;
+  white-space: pre;
+}
+.gov-codeloc__unconfirmed { align-items: flex-start; }
+.gov-modal--wide { width: min(680px, 100%); }
