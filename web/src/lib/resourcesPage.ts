@@ -101,7 +101,7 @@ export interface McpToolGroup {
 }
 
 /**
- * `ki mcp` 暴露的全部 19 个工具，按「读 / 写 / 组织与删除」分组。
+ * `ki mcp` 暴露的全部 23 个工具，按「读 / 写 / 组织与删除」分组。
  *
  * 权威源：`docs/mcp-tools.md`（工具定义以 `src/lib/mcp-server-factory.ts` 的注册块为准）。
  * 页面只给"叫什么、干什么"，参数细节走文档外链 —— 否则就是第二份会漂移的参数表。
@@ -142,7 +142,11 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_edit_relation', purpose: '对大 Relation 多轮按行编辑，finish 后一次性更新索引' },
       { name: 'ki_store', purpose: '只写向量层单条文本（不写 KB，易产生孤儿向量）' },
       { name: 'ki_bulk_store', purpose: '只写向量层批量文本（同上）' },
-      { name: 'ki_event_set_stage', purpose: '把事件流转到指定阶段（唯一的事件状态写工具；到终态按类型动作处理关联文档）' },
+      { name: 'ki_event_set_stage', purpose: '把事件流转到指定阶段（到终态按类型动作处理关联文档）' },
+      { name: 'ki_event_create', purpose: '创建事件，可同时挂关联文档与参考文档（type / stage 可传名称）' },
+      { name: 'ki_event_delete', purpose: '删除已收口事件；必须指定关联文档去向（保留 / 进回收站）' },
+      { name: 'ki_event_docs', purpose: '事件关联文档增删：add 挂上（可见性随阶段）/ remove 解绑（不删文档）' },
+      { name: 'ki_event_refs', purpose: '事件参考文档增删：只建引用，不改被引文档的分类与可见性' },
     ],
   },
   {
@@ -156,7 +160,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
   },
 ];
 
-/** MCP 工具数量的口径（与 docs/mcp-tools.md 的「共 19 个」一致，单测锁） */
+/** MCP 工具数量的口径（与 docs/mcp-tools.md 的「共 23 个」一致，单测锁） */
 export const MCP_TOOL_COUNT = MCP_TOOLS.reduce((sum, group) => sum + group.items.length, 0);
 
 /** 工具清单的边界说明：MCP 刻意不暴露的能力 + 只读 Token 的可见性差异 */

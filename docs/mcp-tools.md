@@ -1,6 +1,6 @@
 # MCP 工具参考
 
-`ki mcp` 共暴露 **19 个**工具。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
+`ki mcp` 共暴露 **23 个**工具。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
 
 > 两个例外：`ki_ask` 的 `scope` **必填**且只接受单个具体知识库（不吃视图名、不吃逗号分隔多库）；`ki_ask` 与全部写工具只在**非只读** Token 会话里注册 —— 只读 Token 的 `tools/list` 里看不到它们（`ki_ask` 对库只读，但会消耗模型额度并外发内容，故按写工具的准入处理）。
 
@@ -17,7 +17,7 @@
 | `ki_view_list` | 列出知识视图（多个知识库的只读聚合）。默认每条含 `view` / `id` / `members` / `availableCount` / `missing` / **`usableCount`**（真能参与语义检索的成员数）；有成员不可用时给 **`degradedReason`**（如「3 个向量维度不一致（语义检索会跳过）」），维度不一致的库名另列 `dimensionMismatch`。`verbose` 展开 `memberMeta` 与审计字段（健康摘要同样保留）。没有视图、被授权过滤光、视图文件损坏三种"空"分别给 `hint` / `warning` | `verbose` |
 | `ki_tag_list` | 列出 scope 下的 tag 及文档数（只读） | `scope` |
 | `ki_lifecycle_list` | 列出文档分类（wiki / temp / event）与期限选项、分类预设，以及指定 group 的有效默认分类（只读） | `scope`、`group`（传了才回显该组默认分类，避免无界返回） |
-| `ki_event_list` | 列出事件：id / `#shortId` / 标题 / 类型 / 当前阶段 / 可见性 / 关联文档预览（只读，不能创建事件） | `scope`、`status`（`open` 默认 / `closed` / `all`）、`type`（先调 `ki_event_type_list` 取 id）、`q`、`limit`、`offset` |
+| `ki_event_list` | 列出事件：id / `#shortId` / 标题 / 类型 / 当前阶段 / 可见性 / 关联文档预览（只读；创建用 ki_event_create） | `scope`、`status`（`open` 默认 / `closed` / `all`）、`type`（先调 `ki_event_type_list` 取 id）、`q`、`limit`、`offset` |
 | `ki_event_type_list` | 列出事件类型及其阶段链（每阶段可见性）与收口动作（只读，不能创建或修改类型） | `scope` |
 | `ki_ask` | **模型消耗型**：让 ki 用它自己的模型 + 指定知识库回答一个问题，内部自动多轮检索再合成，返回答案与来源；默认每次全新问答，追问时把上次的 `contextId` 作为 `context_id` 传回（10 分钟内有效，每次交互顺延）。单次通常 5~30 秒，超 45 秒返回已生成的部分答案（`truncated=true`）。只读 Token 不可见 | `scope`（**必填**，单个具体库）、`question`、`background`（≤2000 字符，只对本轮生效）、`context_id` |
 
@@ -30,7 +30,11 @@
 | `ki_store` | 只写向量层单条文本 | `text`、`tags` |
 | `ki_bulk_store` | 只写向量层批量文本 | `input`（批量 JSON 文件路径） |
 | `ki_edit_relation` | 对大 Relation 多轮按行编辑；`finish` 后一次性更新索引 | `action`（edit/view/finish/cancel）、`scope`、`group`、`relation` |
-| `ki_event_set_stage` | 把事件流转到指定阶段（唯一的事件状态写工具）；到终态阶段会按类型设定的收口动作处理关联文档 | `scope`、`event`（`evt_…` 或 `#shortId`）、`stage`、`note`（可选） |
+| `ki_event_set_stage` | 把事件流转到指定阶段；到终态阶段会按类型设定的收口动作处理关联文档 | `scope`、`event`（`evt_…` 或 `#shortId`）、`stage`（key 或名称）、`note`（可选） |
+| `ki_event_create` | 创建事件，可同时挂关联文档与参考文档；`type` / `stage` 都接受 id/key 或名称 | `title`、`type`（id 或名称）、`stage`（可选）、`docs[]`（≤50）、`refs[]`（≤50） |
+| `ki_event_delete` | 删除**已收口**事件；必须指定关联文档去向 | `event`、`doc_action`（`wiki` 保留 / `trash` 进回收站，必填无默认） |
+| `ki_event_docs` | 事件关联文档增删：`add` 挂上（可见性随阶段）/ `remove` 解绑（文档回长期保留，不删除） | `event`、`action`、`docs[]`（≤50） |
+| `ki_event_refs` | 事件参考文档增删：只建引用，不改被引文档的分类与可见性 | `event`、`action`、`docs[]`（≤50） |
 
 ## 组织与删除
 
@@ -43,6 +47,8 @@
 ## MCP 未提供的能力
 
 MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需要级联或强制操作时使用 CLI（见 [cli.md](./cli.md)）。
+
+事件相关**不提供**：事件类型的增删改（阶段链、每阶段可见性、收口动作）、事件 AI 源码分析、参考文档的 AI 候选查找（`refs/search` 只有 Web 页面在用）。这些都在 Web「知识治理 → 事件」操作 —— 事件类型是全局元配置，改错会连带所有事件；参考文档候选要人逐个确认，不适合代理自动采纳。
 
 ## 与「长期记忆」的对应关系
 

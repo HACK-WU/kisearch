@@ -432,7 +432,7 @@ export interface SyncRelationParams {
   lifecycle?: string;
   /** 仅 temp：期限天数（1~365） */
   ttlDays?: number;
-  /** 仅 event：事件 id（`evt_…`）或 `#3`；事件只能由人在页面创建 */
+  /** 仅 event：事件 id（`evt_…`）或 `#3`；可用 ki_event_list 查、ki_event_create 新建 */
   eventId?: string;
 }
 

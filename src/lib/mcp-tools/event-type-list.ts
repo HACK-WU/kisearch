@@ -54,7 +54,7 @@ export function registerEventTypeListTool(server: McpServer): void {
             'fts-only': '仅全文可命中（语义检索不召回）',
             hidden: '都不可检索，只能按名读取',
           },
-          hint: '流转用 ki_event_set_stage（stage 可传阶段 key 或名称）；新建事件只能在页面操作',
+          hint: '流转用 ki_event_set_stage（stage 可传阶段 key 或名称）；创建事件用 ki_event_create（type 可传 id 或名称）；类型本身只能在页面增删改',
         };
 
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };

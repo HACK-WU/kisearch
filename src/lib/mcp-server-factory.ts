@@ -25,6 +25,10 @@ import { registerLifecycleListTool } from './mcp-tools/lifecycle-list.js';
 import { registerEventListTool } from './mcp-tools/event-list.js';
 import { registerEventTypeListTool } from './mcp-tools/event-type-list.js';
 import { registerEventSetStageTool } from './mcp-tools/event-set-stage.js';
+import { registerEventCreateTool } from './mcp-tools/event-create.js';
+import { registerEventDeleteTool } from './mcp-tools/event-delete.js';
+import { registerEventDocsTool } from './mcp-tools/event-docs.js';
+import { registerEventRefsTool } from './mcp-tools/event-refs.js';
 import { registerAskTool } from './mcp-tools/ask.js';
 import { READ_ONLY_INSTRUCTIONS } from './mcp-tools/tool-access.js';
 import { readKiVersion } from './version-guard.js';
@@ -61,11 +65,16 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
   registerLifecycleListTool(server);
   registerEventListTool(server);
   registerEventTypeListTool(server);
-  // ── 写工具（8 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
+  // ── 写工具（13 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
   // ⚠️ 新增写工具必须放在本块内，否则会暴露给只读 Token；
   //    tools/call 侧另有一道白名单拦截（mcp-http.ts::findReadOnlyViolation）兜住缓存/构造调用。
   if (!readOnly) {
     registerEventSetStageTool(server);
+    // 事件 CRUD 与两类文档增删（REQ-20261116-004）
+    registerEventCreateTool(server);
+    registerEventDeleteTool(server);
+    registerEventDocsTool(server);
+    registerEventRefsTool(server);
     registerSyncRelationTool(server);
     registerEditRelationTool(server);
     registerBulkSyncRelationTool(server);

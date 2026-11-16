@@ -19,9 +19,10 @@ import { resolveLifecycle, validateLifecycleInput, type LifecycleKind } from './
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { readGovernance, getGroupDefault, type GovernanceConfig } from './governance-store.js';
 import { readAllEvents, findEventIn, isEventClosed } from './events/store.js';
-import type { EventRecord } from './events/types.js';
+import type { EventRecord, Visibility } from './events/types.js';
 import type { GovernanceErrorCode } from './governance-errors.js';
 import type { Relation } from './scoring.js';
+import { applyVisibility, resolveVisibilityOfRelation, type IndexKind } from './visibility-index.js';
 
 export type LifecycleSource = 'explicit' | 'group-default' | 'preserved' | 'fallback-wiki';
 
@@ -45,6 +46,10 @@ export interface LifecycleSummary {
   eventId?: string;
   event?: AppliedEventRef;
   source: LifecycleSource;
+  /** 改分类后实际生效的检索档位（event 文档按阶段算；wiki / temp 恒 full） */
+  visibility?: Visibility;
+  /** 需异步补写的索引类别；非空时页面提示"索引补齐中" */
+  pending?: IndexKind[];
 }
 
 export interface PrecheckArgs {
@@ -142,7 +147,7 @@ export function precheckLifecycle(args: PrecheckArgs): PrecheckOutput {
     };
   }
 
-  // event：必须指向存在且未收口的事件（创建只能走页面）
+  // event：必须指向存在且未收口的事件
   const eventRef = validation.eventId!;
   const allEvents = args.events ?? readAllEvents(scope);
   const event = findEventIn(allEvents, eventRef);
@@ -154,7 +159,7 @@ export function precheckLifecycle(args: PrecheckArgs): PrecheckOutput {
     return {
       ok: false,
       code: 'EVENT_NOT_FOUND',
-      message: `事件「${eventRef}」不存在。事件只能在 Web「知识治理 → 事件」创建，AI 不能创建；`
+      message: `事件「${eventRef}」不存在。可用 ki_event_list 查未收口事件，或用 ki_event_create 新建；`
         + (available.length > 0 ? '可绑定以下未收口事件' : '当前 scope 还没有未收口事件'),
       details: { available },
     };
@@ -163,9 +168,28 @@ export function precheckLifecycle(args: PrecheckArgs): PrecheckOutput {
     return {
       ok: false,
       code: 'EVENT_CLOSED',
-      message: `事件「#${event.shortId} ${event.title}」已收口，不能绑定新文档；请改绑未收口事件或让用户新建事件`,
+      message: `事件「#${event.shortId} ${event.title}」已收口，不能绑定新文档；请改绑未收口事件或新建事件`,
       details: { event: { id: event.id, shortId: event.shortId, title: event.title, closedAt: event.closedAt } },
     };
+  }
+
+  /**
+   * 归属冲突：文档已绑在**另一个未收口**事件上时必须拒绝。
+   *
+   * 否则一次绑定就把它从原事件静默摘走，而原事件页面上少一篇证据、没有任何提示。
+   * 已收口事件的残留 `eventId` 不拦（收口时本应清掉，历史数据按 wiki 兜底）。
+   */
+  const currentEventId = existing?.eventId;
+  if (currentEventId && currentEventId !== event.id) {
+    const owner = allEvents.find((e) => e.id === currentEventId) ?? null;
+    if (owner && !isEventClosed(owner)) {
+      return {
+        ok: false,
+        code: 'DOC_BOUND_TO_OTHER_EVENT',
+        message: `「${relation}」已属于事件 #${owner.shortId}「${owner.title}」（未收口），请先解绑或改选其他文档`,
+        details: { event: { id: owner.id, shortId: owner.shortId, title: owner.title } },
+      };
+    }
   }
 
   const applied: AppliedEventRef = { id: event.id, shortId: event.shortId, title: event.title };
@@ -246,8 +270,37 @@ export async function changeLifecycle(
       return { ok: false as const, code: check.code, message: check.message, ...(check.details ? { details: check.details } : {}) };
     }
 
+    /**
+     * 档位切换：`from` 必须在**改字段前**算（改完再算会把自己算成新档位）。
+     *
+     * 不接这一步的话，页面/HTTP 把文档改成 event 并落到 hidden 阶段后，旧 dense/FTS
+     * 索引仍留在库里 —— `ki_search` 照样召回，"声明不可检索"变成一句空话。
+     */
+    const from = resolveVisibilityOfRelation(args.scope, rel).mode;
     applyLifecyclePlan(rel, check.plan);
+    const to = resolveVisibilityOfRelation(args.scope, rel).mode;
     writeGroupCache(args.scope, args.group, doc);
-    return { ok: true as const, summary: check.summary };
+
+    let pending: IndexKind[] = [];
+    if (from !== to) {
+      const applied = await applyVisibility({
+        scope: args.scope,
+        group: args.group,
+        relation: args.name,
+        from,
+        to,
+        now,
+      });
+      pending = applied.pending;
+    }
+
+    return {
+      ok: true as const,
+      summary: {
+        ...check.summary,
+        visibility: to,
+        ...(pending.length > 0 ? { pending } : {}),
+      },
+    };
   });
 }

@@ -239,6 +239,62 @@ export async function resumePendingOnStartup(scope: string): Promise<ConsumeResu
   return consumePending(scope);
 }
 
+/**
+ * 写操作后按需触发消费（fire-and-forget），**同 scope 串行**。
+ *
+ * 为什么必须有：`resumePendingOnStartup` 只在 daemon 启动时跑（`mcp-http.ts` 的
+ * `resumeGovernanceTasks`），运行期入队的补索引任务原本永远不会执行 ——
+ * 界面写着"索引补齐中，数秒后生效"，实际要等下次重启。
+ *
+ * 为什么要串行：`consumePending` 读-改-写 `.visibility-pending.json` 无锁，两次并发
+ * 会互相覆盖条目、写乱 `attempts`。这里用模块级 in-flight Map 复用同一个 Promise。
+ */
+const inFlight = new Map<string, Promise<ConsumeResult>>();
+
+/**
+ * 诊断/测试开关：`KI_DISABLE_AUTO_CONSUME=1` 时 `scheduleConsume` 直接返回空结果。
+ *
+ * 为什么需要：补齐任务会打开 FTS/向量引擎，而单测进程在引擎句柄未释放时不会退出
+ * （`closeEngine` 还可能因为 open 中的 promise 永久挂住）。测试里关掉自动补齐，
+ * 由用例自己决定要不要验证补齐行为。
+ */
+function autoConsumeDisabled(): boolean {
+  const raw = process.env.KI_DISABLE_AUTO_CONSUME;
+  return raw === '1' || raw === 'true';
+}
+
+export function scheduleConsume(scope: string): Promise<ConsumeResult> {
+  if (autoConsumeDisabled()) {
+    return Promise.resolve({ consumed: [], failed: [], blocked: [], remaining: 0 } as ConsumeResult);
+  }
+  const running = inFlight.get(scope);
+  if (running) return running;
+
+  const task: Promise<ConsumeResult> = consumePending(scope)
+    .catch((err: unknown) => {
+      console.warn(`[visibility-queue] ${scope} 索引补齐失败（保留 pending 待重试）：${(err as Error).message}`);
+      return { consumed: [], failed: [], blocked: [], remaining: -1 } as ConsumeResult;
+    })
+    .finally(() => {
+      if (inFlight.get(scope) === task) inFlight.delete(scope);
+    });
+
+  inFlight.set(scope, task);
+  return task;
+}
+
+/**
+ * 等待该 scope 正在进行的补齐任务结束（没有在飞任务时返回 null）。
+ *
+ * 用途：诊断/测试收尾 —— 后台任务会打开 FTS/向量引擎，进程退出前必须先等它结束再关引擎，
+ * 否则原生句柄会让进程"用例都过了却不退出"。
+ */
+export async function waitForConsume(scope: string): Promise<ConsumeResult | null> {
+  const running = inFlight.get(scope);
+  if (!running) return null;
+  return running;
+}
+
 /** 当前 pending 数量（UI 顶部提示"N 篇索引切换中"用） */
 export function pendingCount(scope: string): number {
   return loadPending(scope).items.length;

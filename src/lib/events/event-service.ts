@@ -28,9 +28,17 @@ import {
   allocateShortId, newEventId,
 } from './store.js';
 import { appendStageLog, removeStageLog } from './stage-log.js';
-import { removeRefsFile } from './refs-store.js';
+import { addRefDocs, readRefs, removeRefsFile } from './refs-store.js';
+import { REF_LIMIT } from './refs-service.js';
+import { bindMembersLocked, collectMembers, MEMBER_LIMIT, type BindMembersOutcome, type MemberDoc } from './members.js';
+import { removeAnalysisFile } from './analysis-store.js';
 import { getType, listTypes, resolveStageVisibility } from './type-service.js';
-import type { EventRecord, EventTypeRecord, Visibility } from './types.js';
+import {
+  EVENT_DESCRIPTION_MAX_CHARS,
+  type EventRecord,
+  type EventTypeRecord,
+  type Visibility,
+} from './types.js';
 import type { Relation } from '../scoring.js';
 
 const DAY_MS = 86_400_000;
@@ -39,22 +47,12 @@ const DAY_MS = 86_400_000;
 // 成员聚合（Relation.eventId 反向索引）
 // ─────────────────────────────────────────────────────────────
 
-export interface MemberDoc {
-  group: string;
-  name: string;
-  relation: Relation;
-}
-
-/** 只读聚合：扫全部分片收集某事件的成员（单机低频，全量扫可接受） */
-export function collectMembers(scope: string, eventId: string): MemberDoc[] {
-  const out: MemberDoc[] = [];
-  for (const [group, doc] of readAllGroupCaches(scope)) {
-    for (const rel of doc.hot_relations) {
-      if (rel.eventId === eventId) out.push({ group, name: rel.text, relation: rel });
-    }
-  }
-  return out;
-}
+/**
+ * 成员聚合搬到 `events/members.ts`（与绑定/解绑同文件，避免职责分散）。
+ * 这里保留 re-export：`governance-http`、`analysis-runner` 与既有测试都从这里取。
+ */
+export { collectMembers } from './members.js';
+export type { MemberDoc } from './members.js';
 
 /** 写回用：按组拿完整 doc（readAllGroupCaches 不含 version/scope，不能直接写回） */
 function loadFullDocs(scope: string, groups: Iterable<string>): Map<string, GroupCacheDoc> {
@@ -159,6 +157,8 @@ function summarizeVisibility(memberTotal: number, visibility: Visibility): { ful
 
 export interface CreateEventInput {
   title: string;
+  /** 可选事件描述（REQ-20261113-003 · S-03） */
+  description?: string;
   typeId: string;
   /**
    * 起始阶段 key（可选，缺省 = 首阶段）。
@@ -168,13 +168,64 @@ export interface CreateEventInput {
   stageKey?: string;
   /** 初始成员（可选） */
   docs?: Array<{ group: string; name: string }>;
+  /** 初始参考文档（可选）：只建立引用，不改被引文档的分类与可见性 */
+  refs?: Array<{ group: string; name: string }>;
   by?: 'user' | 'ai';
 }
 
+/** 创建事件的完整结果（HTTP / MCP 需要一次性拿到绑定报告） */
+export interface CreateEventOutcome {
+  event: EventRecord;
+  binding: {
+    docs: {
+      bound: BindMembersOutcome['bound'];
+      skipped: BindMembersOutcome['skipped'];
+      failed: BindMembersOutcome['failed'];
+      visibilityFailed: BindMembersOutcome['visibilityFailed'];
+    };
+    refs: {
+      added: number;
+      addedList: Array<{ group: string; name: string }>;
+      skipped: Array<{ group: string; name: string; reason: 'duplicate' | 'already-associated' }>;
+      failed: Array<{ group: string; name: string; code: string; error: string }>;
+    };
+  };
+  visibility: { mode: Visibility; dense: boolean; fts: boolean };
+  pending: BindMembersOutcome['pending'];
+}
+
+function normalizeEventDescription(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length > EVENT_DESCRIPTION_MAX_CHARS) {
+    throw new GovernanceError(
+      'EVENT_DESCRIPTION_TOO_LONG',
+      `事件描述不得超过 ${EVENT_DESCRIPTION_MAX_CHARS} 字，实际 ${trimmed.length} 字`,
+    );
+  }
+  return trimmed || undefined;
+}
+
+/** 兼容入口：只要事件记录（既有测试与内部调用大量依赖这个形状） */
 export async function createEvent(scope: string, input: CreateEventInput): Promise<EventRecord> {
+  return (await createEventWithBinding(scope, input)).event;
+}
+
+/**
+ * 创建事件并一次性完成文档绑定（HTTP / MCP 用）。
+ *
+ * 事务顺序固定为「事件落盘 → 绑关联文档（同一把锁，调用 locked 版）→ 参考文档」：
+ * 文档侧失败不回滚事件，用 `binding.*.failed` 暴露待补偿项 —— 与 `transitionEvent` /
+ * `deleteEvent` 的事务边界保持一致（反序会出现"文档已改、事件没建"的死局）。
+ */
+export async function createEventWithBinding(
+  scope: string,
+  input: CreateEventInput,
+): Promise<CreateEventOutcome> {
   return withScopeWriteLock(scope, 'event-create', async () => {
     const title = input.title?.trim();
     if (!title) throw new GovernanceError('EVENT_NOT_FOUND', '事件标题不能为空');
+    const description = normalizeEventDescription(input.description);
     const type = getType(scope, input.typeId);
     if (!type) {
       throw new GovernanceError('TYPE_NOT_FOUND', `事件类型「${input.typeId}」不存在`, {
@@ -182,9 +233,14 @@ export async function createEvent(scope: string, input: CreateEventInput): Promi
       });
     }
 
-    // 起始阶段：缺省首阶段；指定时必须存在且未停用（停用阶段不允许新事件进入）
-    const startIndex = input.stageKey
-      ? type.stages.findIndex((s) => s.key === input.stageKey)
+    /**
+     * 起始阶段：缺省首阶段；指定时必须存在且未停用。
+     * `stage` 既接受 key（st_3）也接受阶段名（已定位）—— MCP 工具让 AI 直接传名称，
+     * 少一次 `ki_event_type_list` 往返，也避免它抄错 key。
+     */
+    const stageRef = input.stageKey?.trim();
+    const startIndex = stageRef
+      ? type.stages.findIndex((s) => s.key === stageRef || s.name === stageRef)
       : 0;
     if (startIndex < 0) {
       throw new GovernanceError('STAGE_NOT_FOUND', `阶段「${input.stageKey}」不在类型「${type.name}」中`, {
@@ -198,12 +254,32 @@ export async function createEvent(scope: string, input: CreateEventInput): Promi
       });
     }
 
+    const refs = input.refs ?? [];
+    const docsInput = input.docs ?? [];
+    // 两类上限都在事件落盘前判：否则会留下"事件建成、文档全没加"的半成品
+    // （bindMembersLocked 的超限是整批抛错，落盘后抛等于事件已建但接口报错）
+    if (docsInput.length > MEMBER_LIMIT) {
+      throw new GovernanceError(
+        'EVENT_MEMBER_LIMIT_EXCEEDED',
+        `单个事件最多 ${MEMBER_LIMIT} 篇关联文档（本次 ${docsInput.length} 篇），事件未创建`,
+        { limit: MEMBER_LIMIT, requested: docsInput.length },
+      );
+    }
+    if (refs.length > REF_LIMIT) {
+      throw new GovernanceError(
+        'REF_LIMIT_EXCEEDED',
+        `单个事件最多 ${REF_LIMIT} 条参考文档（本次 ${refs.length} 条），事件未创建`,
+        { limit: REF_LIMIT, requested: refs.length },
+      );
+    }
+
     const now = Date.now();
     const event: EventRecord = {
       id: newEventId(now),
       shortId: allocateShortId(scope),
       scope,
       title,
+      ...(description !== undefined ? { description } : {}),
       typeId: type.id,
       stageKey: startStage.key,
       stageIndex: startIndex,
@@ -216,60 +292,108 @@ export async function createEvent(scope: string, input: CreateEventInput): Promi
     writeEvent(scope, event);
     appendStageLog(scope, { eventId: event.id, fromKey: null, toKey: event.stageKey, at: now, by: input.by ?? 'user' });
 
-    if (input.docs?.length) bindDocs(scope, event, type, input.docs, now);
+    // 关联文档：同一把锁内调 locked 版（抢锁版会重入）
+    const docsResult = await bindMembersLocked(scope, event, { docs: input.docs ?? [], by: input.by });
 
-    return event;
+    // 参考文档：交集记为 skipped（不改 addRefs 的抛错语义）
+    const memberKeys = new Set(collectMembers(scope, event.id).map((m) => `${m.group}\u0000${m.name}`));
+    const refSkip: Array<{ group: string; name: string; reason: 'duplicate' | 'already-associated' }> = [];
+    const refFailed: Array<{ group: string; name: string; code: string; error: string }> = [];
+    const refWanted: Array<{ group: string; name: string }> = [];
+    const refSeen = new Set<string>();
+    for (const ref of refs) {
+      const key = `${ref.group}\u0000${ref.name}`;
+      if (memberKeys.has(key)) {
+        refSkip.push({ ...ref, reason: 'already-associated' });
+        continue;
+      }
+      if (refSeen.has(key)) {
+        refSkip.push({ ...ref, reason: 'duplicate' });
+        continue;
+      }
+      refSeen.add(key);
+      refWanted.push(ref);
+    }
+
+    let refsAdded = 0;
+    const refsAddedList: Array<{ group: string; name: string }> = [];
+    if (refWanted.length > 0) {
+      const existing = readRefs(scope, event.id).length;
+      if (existing + refWanted.length > REF_LIMIT) {
+        for (const ref of refWanted) {
+          refFailed.push({
+            ...ref,
+            code: 'REF_LIMIT_EXCEEDED',
+            error: `单个事件最多 ${REF_LIMIT} 条参考文档（已有 ${existing} 条）`,
+          });
+        }
+      } else {
+        const written = addRefDocs(
+          scope,
+          event.id,
+          refWanted.map((ref) => ({
+            scope,
+            group: ref.group,
+            name: ref.name,
+            addedBy: input.by === 'ai' ? ('ai' as const) : ('manual' as const),
+            addedAt: now,
+          })),
+          now,
+        );
+        refsAdded = written.added.length;
+        for (const doc of written.added) refsAddedList.push({ group: doc.group, name: doc.name });
+        for (const dup of written.skipped) {
+          refSkip.push({ group: dup.group, name: dup.name, reason: 'duplicate' });
+        }
+      }
+    }
+
+    return {
+      event: docsResult.event.updatedAt === now ? docsResult.event : { ...event, updatedAt: now },
+      binding: {
+        docs: {
+          bound: docsResult.bound,
+          skipped: docsResult.skipped,
+          failed: docsResult.failed,
+          visibilityFailed: docsResult.visibilityFailed,
+        },
+        refs: { added: refsAdded, addedList: refsAddedList, skipped: refSkip, failed: refFailed },
+      },
+      visibility: docsResult.visibility,
+      pending: docsResult.pending,
+    };
   });
 }
 
-/** 把文档绑到事件：写 lifecycle=event + eventId，并清掉可能残留的期限字段 */
-function bindDocs(
+export async function updateEvent(
   scope: string,
-  event: EventRecord,
-  type: EventTypeRecord,
-  docs: Array<{ group: string; name: string }>,
-  now: number,
-): void {
-  const wanted = new Map<string, Set<string>>();
-  for (const d of docs) {
-    const set = wanted.get(d.group) ?? new Set<string>();
-    set.add(d.name);
-    wanted.set(d.group, set);
-  }
-
-  const touched = loadFullDocs(scope, [...wanted.keys()]);
-  for (const [group, doc] of touched) {
-    const names = wanted.get(group);
-    if (!names) continue;
-    for (const rel of doc.hot_relations) {
-      if (!names.has(rel.text)) continue;
-      rel.lifecycle = 'event';
-      rel.eventId = event.id;
-      delete rel.expiresAt;
-      delete rel.ttlDays;
-    }
-  }
-  if (touched.size > 0) writeGroupCacheBatch(scope, touched);
-
-  const { visibility } = resolveStageVisibility(type, event.stageKey);
-  enqueueVisibility(
-    scope,
-    [...wanted].flatMap(([group, names]) => [...names].map((relation) => ({ group, relation }))),
-    visibility,
-    now,
-  );
-}
-
-export async function updateEventTitle(scope: string, eventRef: string, title: string, revision: number): Promise<EventRecord> {
+  eventRef: string,
+  patch: { title?: string; description?: string; revision: number },
+): Promise<EventRecord> {
   return withScopeWriteLock(scope, 'event-update', async () => {
     const event = mustFindEvent(scope, eventRef);
-    if (event.revision !== revision) {
+    if (event.revision !== patch.revision) {
       throw new GovernanceError('REVISION_CONFLICT', `事件已被他人修改（当前版本 ${event.revision}）`, { currentRevision: event.revision });
     }
-    const next: EventRecord = { ...event, title: title.trim() || event.title, revision: event.revision + 1, updatedAt: Date.now() };
+    const nextTitle = patch.title !== undefined ? (patch.title.trim() || event.title) : event.title;
+    const nextDesc = patch.description !== undefined
+      ? normalizeEventDescription(patch.description)
+      : event.description;
+    const next: EventRecord = {
+      ...event,
+      title: nextTitle,
+      revision: event.revision + 1,
+      updatedAt: Date.now(),
+    };
+    if (nextDesc !== undefined) next.description = nextDesc;
+    else delete next.description;
     writeEvent(scope, next);
     return next;
   });
+}
+
+export async function updateEventTitle(scope: string, eventRef: string, title: string, revision: number): Promise<EventRecord> {
+  return updateEvent(scope, eventRef, { title, revision });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -503,6 +627,7 @@ export async function deleteEvent(scope: string, input: DeleteEventInput): Promi
     removeEventFile(scope, event.id);
     removeStageLog(scope, event.id);
     removeRefsFile(scope, event.id);
+    removeAnalysisFile(scope, event.id);
 
     return { event, docAction: input.docAction, affected: { docs: done, failed }, shortIdReleased: false };
   });

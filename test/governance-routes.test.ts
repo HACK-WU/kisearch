@@ -33,7 +33,7 @@ import { handleGovernanceRoutes } from '../src/lib/governance-http.js';
 
 const ROOT = process.cwd();
 
-/** 31 条治理路由：`[method, path, 期望能力]`。改路由必须同步改这张表（表就是契约） */
+/** 39 条治理路由：`[method, path, 期望能力]`。改路由必须同步改这张表（表就是契约） */
 const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['GET', '/governance/lifecycle/list', 'knowledge.read'],
   ['POST', '/governance/lifecycle/apply', 'knowledge.write'],
@@ -56,6 +56,9 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['POST', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['DELETE', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['POST', '/governance/events/evt_1/refs/search', 'knowledge.read'],
+  // REQ-20261116-004：关联文档增删（漏登记会 404，不是 403）
+  ['POST', '/governance/events/evt_1/members', 'knowledge.write'],
+  ['DELETE', '/governance/events/evt_1/members', 'knowledge.write'],
   ['POST', '/governance/events/evt_1/analyze', 'knowledge.write'],
   ['GET', '/governance/events/evt_1/analysis', 'knowledge.read'],
   ['POST', '/governance/events/evt_1/analysis/confirm', 'knowledge.write'],
@@ -79,7 +82,7 @@ const WRITE_TOOLS = ['ki_event_set_stage'];
 const FORBIDDEN_CREATE_TOOLS = ['ki_event_create', 'ki_lifecycle_create', 'ki_event_type_create', 'ki_event_delete', 'ki_event_type_write'];
 
 describe('① 路由权限登记（漏一条就是 404）', () => {
-  it('30 条全部命中 permission 且能力正确', () => {
+  it('39 条全部命中 permission 且能力正确', () => {
     const problems: string[] = [];
     for (const [method, p, capability] of ROUTES) {
       const match = matchRoute(method, p);
@@ -94,8 +97,8 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
     assert.deepEqual(problems, [], `以下路由登记有误：\n${problems.join('\n')}`);
   });
 
-  it('表里正好 37 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 37);
+  it('表里正好 39 条（新增/删除路由必须同步这张表）', () => {
+    assert.equal(ROUTES.length, 39);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {
@@ -163,10 +166,21 @@ describe('③ MCP 工具四处登记', () => {
     assert.ok(writeBlock.includes('registerEventSetStageTool(server)'), '写工具注册必须在 readOnly 分支内');
   });
 
-  it('A20：不存在任何创建 / 删除类治理工具', () => {
+  /**
+   * A20 在 REQ-20261116-004 之后调整：**事件**的创建/删除与文档增删已开放（4 个工具），
+   * 其余创建/删除类治理工具仍不得存在（`ki_lifecycle_create` / `ki_event_type_create` 等）。
+   * 断言仍双向：白名单外的必须不存在，白名单内的必须真的存在（防止只删断言不落实现）。
+   */
+  const ALLOWED_EVENT_TOOLS = ['ki_event_create', 'ki_event_delete', 'ki_event_docs', 'ki_event_refs'];
+
+  it('A20：只开放 4 个事件工具，其余创建 / 删除类治理工具不存在', () => {
     const toolFiles = fs.readdirSync(path.join(ROOT, 'src/lib/mcp-tools')).map((f) => fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools', f), 'utf8')).join('\n');
     for (const forbidden of FORBIDDEN_CREATE_TOOLS) {
+      if (ALLOWED_EVENT_TOOLS.includes(forbidden)) continue;
       assert.equal(toolFiles.includes(`'${forbidden}'`), false, `不应存在工具 ${forbidden}`);
+    }
+    for (const allowed of ALLOWED_EVENT_TOOLS) {
+      assert.ok(toolFiles.includes(`'${allowed}'`), `应存在工具 ${allowed}`);
     }
   });
 });

@@ -203,7 +203,7 @@ export function validateLifecycleInput(input: LifecycleInput, now: number): Life
     return {
       ok: false,
       code: 'EVENT_REQUIRED',
-      message: 'lifecycle=event 必须给 event（事件 id 或 #编号），事件只能由人在页面创建',
+      message: 'lifecycle=event 必须给 event（事件 id 或 #编号）；可用 ki_event_list 查未收口事件，或用 ki_event_create 新建',
     };
   }
   return { ok: true, specified: true, kind: 'event', eventId };

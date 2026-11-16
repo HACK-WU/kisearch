@@ -21,9 +21,10 @@ import { getKbDir } from './scope.js';
 import { readJson, writeJson } from './store.js';
 import { readAllGroupCaches } from './group-cache.js';
 import { ftsDeleteByIds } from './fts-client.js';
-import { vectorDelete } from './vector-client.js';
+import { vectorDelete, ensureVectorAvailable } from './vector-client.js';
 import { deletePathVector, buildRelationContent, buildGroupPathContent } from './path-vectorize.js';
-import { readAllEvents, readEventTypes } from './events/store.js';
+import { readAllEvents } from './events/store.js';
+import { listTypes } from './events/type-service.js';
 import type { Relation } from './scoring.js';
 import type { Visibility } from './events/types.js';
 
@@ -82,6 +83,8 @@ export interface ApplyResult {
   pending: IndexKind[];
   skipped: ApplySkipped[];
   failed: IndexKind[];
+  /** 与 `failed` 一一对应的错误原因（批量调用方需要向用户/AI 透出具体失败） */
+  failedDetails?: Array<{ kind: IndexKind; error: string }>;
 }
 
 export interface RebuildArgs {
@@ -178,21 +181,27 @@ export function planTransition(from: Visibility, to: Visibility): { remove: Inde
     };
   }
   // to === 'full'
-  if (from === 'hidden') return { remove: [], write: ['dense', 'fts', 'relation'] };
+  /**
+   * `hidden → full` 必须补 `path`：`to==='hidden'` 时组级 `ki-path` 会被摘除（见下方
+   * `groupHasVisibleDocs` 判定），而此前 `write` 不含 path ⇒ 组里唯一的事件文档解绑 /
+   * 恢复 / 重建后，该组路径向量永久缺失，按组路径的语义检索再也搜不到（且页面无感）。
+   * `fts-only → full` 不需要：path 只在 hidden 时被摘，fts-only 期间仍在。
+   */
+  if (from === 'hidden') return { remove: [], write: ['dense', 'fts', 'relation', 'path'] };
   return { remove: [], write: ['dense'] };
 }
 
-function findRelation(scope: string, group: string, relation: string): Relation | null {
-  for (const [g, doc] of readAllGroupCaches(scope)) {
-    if (g !== group) continue;
-    return doc.hot_relations.find((r) => r.text === relation) ?? null;
-  }
-  return null;
+/** 一次性读到的全部分片（批量档位切换复用，避免逐条全量扫盘） */
+type GroupCaches = ReturnType<typeof readAllGroupCaches>;
+
+function findRelationIn(caches: GroupCaches, group: string, relation: string): Relation | null {
+  const doc = caches.get(group);
+  return doc?.hot_relations.find((r) => r.text === relation) ?? null;
 }
 
 /** 同 scope 内是否还有别的组持有同名文档（`ki-relation` docId 跨组共享） */
-function hasOtherHolders(scope: string, group: string, relation: string): boolean {
-  for (const [g, doc] of readAllGroupCaches(scope)) {
+function hasOtherHoldersIn(caches: GroupCaches, group: string, relation: string): boolean {
+  for (const [g, doc] of caches) {
     if (g === group) continue;
     if (doc.hot_relations.some((r) => r.text === relation)) return true;
   }
@@ -204,26 +213,31 @@ interface Lookups {
   types: Map<string, { stages: Array<{ key: string; visibility: Visibility }> }>;
 }
 
-/** 一次性读事件与类型，供档位解析复用（避免每篇文档各读一遍盘） */
+/**
+ * 一次性读事件与类型，供档位解析复用（避免每篇文档各读一遍盘）。
+ *
+ * ⚠️ 类型必须走 `listTypes` 而不是 `readEventTypes`：后者只读 `_types.json`，
+ * 文件尚未落盘时返回空数组 —— 用内置类型（et_1/et_2/et_3）的新 scope 会因此把
+ * 事件文档一律当 `full`，`hidden` 阶段形同虚设（解绑还因 `from===to` 短路而不补索引）。
+ */
 function buildLookups(scope: string): Lookups {
   return {
     events: new Map(readAllEvents(scope).map((e) => [e.id, { stageKey: e.stageKey, typeId: e.typeId }])),
-    types: new Map(readEventTypes(scope).map((t) => [t.id, { stages: t.stages.map((s) => ({ key: s.key, visibility: s.visibility })) }])),
+    types: new Map(listTypes(scope).map((t) => [t.id, { stages: t.stages.map((s) => ({ key: s.key, visibility: s.visibility })) }])),
   };
 }
 
 /** 组内是否还有非 hidden 文档（决定 `ki-path` 能否摘） */
-function groupHasVisibleDocs(scope: string, group: string, lookups: Lookups): boolean {
-  for (const [g, doc] of readAllGroupCaches(scope)) {
-    if (g !== group) continue;
-    for (const rel of doc.hot_relations) {
-      const resolved = resolveVisibility({
-        relation: rel,
-        lookupEvent: (id) => lookups.events.get(id) ?? null,
-        lookupType: (id) => lookups.types.get(id) ?? null,
-      });
-      if (resolved.mode !== 'hidden') return true;
-    }
+function groupHasVisibleDocsIn(caches: GroupCaches, group: string, lookups: Lookups): boolean {
+  const doc = caches.get(group);
+  if (!doc) return false;
+  for (const rel of doc.hot_relations) {
+    const resolved = resolveVisibility({
+      relation: rel,
+      lookupEvent: (id) => lookups.events.get(id) ?? null,
+      lookupType: (id) => lookups.types.get(id) ?? null,
+    });
+    if (resolved.mode !== 'hidden') return true;
   }
   return false;
 }
@@ -268,10 +282,25 @@ function recordFailure(scope: string, failure: VisibilityFailure): void {
  * 失败语义：**摘除失败也把档位标记为 `to`** —— 宁可"声明已隐藏但索引残留"被诊断发现，
  * 也不要"声明未隐藏但索引已摘"导致语义检索直接搜不到。残留会进诊断文件，可重试。
  */
+export interface ApplyContext {
+  /** 一次读到的全部分片（批量时复用，避免逐条全量扫盘） */
+  caches: GroupCaches;
+  lookups: Lookups;
+  /** 批量调用方探测一次后注入，避免逐条 probe 向量引擎 */
+  vectorAvailable?: boolean;
+}
+
 export async function applyVisibility(args: ApplyArgs): Promise<ApplyResult> {
+  return applyVisibilityCore(args, {
+    caches: readAllGroupCaches(args.scope),
+    lookups: buildLookups(args.scope),
+  });
+}
+
+async function applyVisibilityCore(args: ApplyArgs, ctx: ApplyContext): Promise<ApplyResult> {
   const now = args.now ?? Date.now();
-  const rel = findRelation(args.scope, args.group, args.relation);
-  const lookups = buildLookups(args.scope);
+  const rel = findRelationIn(ctx.caches, args.group, args.relation);
+  const lookups = ctx.lookups;
   // 旧档位：调用方（流转）通常知道；不知道时按当前阶段现算，而不是默认 full
   const from = args.from ?? resolveVisibility({
     relation: rel ?? {},
@@ -282,7 +311,21 @@ export async function applyVisibility(args: ApplyArgs): Promise<ApplyResult> {
 
   const removed: IndexKind[] = [];
   const failed: IndexKind[] = [];
+  const failedDetails: Array<{ kind: IndexKind; error: string }> = [];
   const skipped: ApplySkipped[] = [];
+
+  /**
+   * `ki-relation` / `ki-path` 的摘除要先 `vectorSearch`（**需要 embedding**）。
+   * 向量不可用时那次调用会长时间等超时，绑定/解绑接口会跟着卡住 ——
+   * 这里先 fastFail 探一次：不可用就记 skipped，交给 pending/诊断，不阻塞主流程。
+   */
+  let vectorUsable = ctx.vectorAvailable;
+  const ensureVector = async (): Promise<boolean> => {
+    if (vectorUsable !== undefined) return vectorUsable;
+    const res = await ensureVectorAvailable(args.scope, { fastFail: true }).catch(() => ({ available: false }));
+    vectorUsable = res.available;
+    return vectorUsable;
+  };
 
   for (const kind of plan.remove) {
     if (kind === 'dense') {
@@ -297,6 +340,7 @@ export async function applyVisibility(args: ApplyArgs): Promise<ApplyResult> {
         removed.push(kind);
       } catch (err) {
         failed.push(kind);
+        failedDetails.push({ kind, error: (err as Error).message });
         recordFailure(args.scope, {
           relation: args.relation, group: args.group, kind, code: 'DENSE_DELETE_FAILED',
           message: (err as Error).message, attempts: 1, at: now,
@@ -317,6 +361,7 @@ export async function applyVisibility(args: ApplyArgs): Promise<ApplyResult> {
         removed.push(kind);
       } catch (err) {
         failed.push(kind);
+        failedDetails.push({ kind, error: (err as Error).message });
         recordFailure(args.scope, {
           relation: args.relation, group: args.group, kind, code: 'FTS_DELETE_FAILED',
           message: (err as Error).message, attempts: 1, at: now,
@@ -326,17 +371,23 @@ export async function applyVisibility(args: ApplyArgs): Promise<ApplyResult> {
     }
 
     if (kind === 'relation') {
-      if (hasOtherHolders(args.scope, args.group, args.relation)) {
+      if (hasOtherHoldersIn(ctx.caches, args.group, args.relation)) {
         skipped.push({ kind, reason: 'other-holders' });
+        continue;
+      }
+      if (!(await ensureVector())) {
+        skipped.push({ kind, reason: 'vector-unavailable' });
         continue;
       }
       const res = await deletePathVector(buildRelationContent(args.relation, args.group), 'ki-relation', args.scope);
       if (res.ok) removed.push(kind);
       else {
+        const error = res.error ?? 'unknown';
         failed.push(kind);
+        failedDetails.push({ kind, error });
         recordFailure(args.scope, {
           relation: args.relation, group: args.group, kind, code: 'RELATION_VECTOR_DELETE_FAILED',
-          message: res.error ?? 'unknown', attempts: 1, at: now,
+          message: error, attempts: 1, at: now,
         });
       }
       continue;
@@ -349,12 +400,17 @@ export async function applyVisibility(args: ApplyArgs): Promise<ApplyResult> {
    * 单独在循环外判定。放在循环里会永远不执行 —— 这行曾经是一段死代码。
    */
   if (args.to === 'hidden') {
-    if (groupHasVisibleDocs(args.scope, args.group, lookups)) {
+    if (groupHasVisibleDocsIn(ctx.caches, args.group, lookups)) {
       skipped.push({ kind: 'path', reason: 'group-has-visible-docs' });
+    } else if (!(await ensureVector())) {
+      skipped.push({ kind: 'path', reason: 'vector-unavailable' });
     } else {
       const res = await deletePathVector(buildGroupPathContent(args.group), 'ki-path', args.scope);
       if (res.ok) removed.push('path');
-      else failed.push('path');
+      else {
+        failed.push('path');
+        failedDetails.push({ kind: 'path', error: res.error ?? 'unknown' });
+      }
     }
   }
 
@@ -372,7 +428,96 @@ export async function applyVisibility(args: ApplyArgs): Promise<ApplyResult> {
     pending: plan.write,
     skipped,
     failed,
+    failedDetails,
   };
+}
+
+// ─────────────────────────────────────────────────────────────
+// 批量档位切换（绑定/解绑一次多篇时用：一次 lookups、一次分片快照）
+// ─────────────────────────────────────────────────────────────
+
+export interface ApplyBatchItem {
+  group: string;
+  relation: string;
+  /** 必须是**改字段前**的快照（改完再算会把自己算成新档位） */
+  from: Visibility;
+}
+
+export interface ApplyBatchFailure {
+  group: string;
+  relation: string;
+  kind: IndexKind;
+  error: string;
+}
+
+export interface ApplyBatchResult {
+  applied: number;
+  pending: IndexKind[];
+  failed: ApplyBatchFailure[];
+}
+
+/**
+ * 批量按当前分片状态算各文档档位（一次 `buildLookups` + 一次分片读）。
+ *
+ * 供绑定路径在**改字段前**取 `from`；不提供这个入口，实现方只能逐条调
+ * `resolveVisibilityOfRelation`，50 篇就是 50 次全量读。
+ */
+export function resolveVisibilityBatch(
+  scope: string,
+  items: Array<{ group: string; relation: string }>,
+): Map<string, Visibility> {
+  const out = new Map<string, Visibility>();
+  if (items.length === 0) return out;
+  const caches = readAllGroupCaches(scope);
+  const lookups = buildLookups(scope);
+  for (const item of items) {
+    const rel = findRelationIn(caches, item.group, item.relation);
+    const resolved = resolveVisibility({
+      relation: rel ?? {},
+      lookupEvent: (id) => lookups.events.get(id) ?? null,
+      lookupType: (id) => lookups.types.get(id) ?? null,
+    });
+    out.set(`${item.group}\u0000${item.relation}`, resolved.mode);
+  }
+  return out;
+}
+
+/** 批量档位切换：共享一次分片快照与 lookups，逐条执行「摘除 + 入队」 */
+export async function applyVisibilityBatch(
+  scope: string,
+  items: ApplyBatchItem[],
+  to: Visibility,
+): Promise<ApplyBatchResult> {
+  if (items.length === 0) return { applied: 0, pending: [], failed: [] };
+  const probe = await ensureVectorAvailable(scope, { fastFail: true }).catch(() => ({ available: false }));
+  const ctx: ApplyContext = {
+    caches: readAllGroupCaches(scope),
+    lookups: buildLookups(scope),
+    vectorAvailable: probe.available,
+  };
+  const pending = new Set<IndexKind>();
+  const failed: ApplyBatchFailure[] = [];
+  let applied = 0;
+
+  for (const item of items) {
+    const res = await applyVisibilityCore(
+      { scope, group: item.group, relation: item.relation, from: item.from, to },
+      ctx,
+    );
+    applied += 1;
+    for (const kind of res.pending) pending.add(kind);
+    for (const detail of res.failedDetails ?? []) {
+      failed.push({ group: item.group, relation: item.relation, kind: detail.kind, error: detail.error });
+    }
+    // 兜底：理论上 failedDetails 已覆盖全部 failed
+    for (const kind of res.failed) {
+      if (!(res.failedDetails ?? []).some((d) => d.kind === kind)) {
+        failed.push({ group: item.group, relation: item.relation, kind, error: 'unknown' });
+      }
+    }
+  }
+
+  return { applied, pending: [...pending], failed };
 }
 
 /**

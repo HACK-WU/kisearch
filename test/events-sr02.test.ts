@@ -58,7 +58,16 @@ before(() => {
   initScope(scope);
 });
 
-after(() => {
+after(async () => {
+  /**
+   * 绑定会触发一次索引补齐（`scheduleConsume`）。收尾顺序不能颠倒：
+   * 先等后台任务结束，再关引擎 —— 否则 FTS/向量引擎的原生句柄会让进程
+   * "用例都过了却不退出"（表现为测试超时）。
+   */
+  const { waitForConsume } = await import('../src/lib/visibility-queue.js');
+  await waitForConsume(scope).catch(() => null);
+  const { closeEngine } = await import('../src/lib/vector-client.js');
+  await closeEngine().catch(() => undefined);
   const kbDir = getKbDir(scope);
   if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
   cleanupTestConfig();

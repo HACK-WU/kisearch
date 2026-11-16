@@ -27,7 +27,8 @@ const TOP_K_DEFAULT = 12;
 const CANDIDATE_LIMIT_DEFAULT = 5;
 /** 归一化后 >= 0.6 默认勾选；这是**批次内相对分位**，不是绝对相似度 */
 const THRESHOLD = 0.6;
-const REF_LIMIT = 50;
+/** 单事件参考文档上限（`createEvent` 预检也要用，故导出） */
+export const REF_LIMIT = 50;
 
 /**
  * 一步里**真实发生**的一次调用（用于过程面板的调用行）。

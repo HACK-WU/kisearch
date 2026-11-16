@@ -293,6 +293,9 @@ export async function handleGovernanceRoutes(
         const items = Array.isArray(b.items) ? (b.items as Record<string, unknown>[]) : [];
         const succeeded: unknown[] = [];
         const failed: unknown[] = [];
+        // 批量里只要有一条产生了待补索引，循环结束后统一触发一次补齐
+        // （单条 apply 是逐次触发；批量若漏了这句，改完分类的 pending 要等 daemon 重启才执行）
+        let pendingAny = false;
         for (const item of items) {
           const result = await changeLifecycle({
             scope,
@@ -302,9 +305,14 @@ export async function handleGovernanceRoutes(
             ttlDays: num(pick(item, 'ttlDays', 'ttl_days')),
             eventId: str(pick(item, 'eventId', 'event')),
           }).catch((err: unknown) => ({ ok: false as const, code: (err as GovernanceError).code ?? 'UNKNOWN', message: (err as Error).message }));
-          if (result.ok) succeeded.push({ group: item.group, name: item.name, ...result.summary });
-          else failed.push({ group: item.group, name: item.name, code: result.code, error: result.message });
+          if (result.ok) {
+            succeeded.push({ group: item.group, name: item.name, ...result.summary });
+            if (result.summary.pending?.length) pendingAny = true;
+          } else {
+            failed.push({ group: item.group, name: item.name, code: result.code, error: result.message });
+          }
         }
+        if (pendingAny) void scheduleConsume(scope);
         return sendJson(res, 200, { ok: true, scope, succeeded: succeeded.length, failed, results: succeeded });
       }
 

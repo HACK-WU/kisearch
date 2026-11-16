@@ -79,8 +79,9 @@ describe('① 3×3 转换矩阵', () => {
     assert.deepEqual(planTransition('fts-only', 'hidden'), { remove: ['fts', 'relation'], write: [] });
   });
 
-  it('hidden → full：必须**补回 ki-relation**（漏它则往返后关系向量永久缺失）', () => {
-    assert.deepEqual(planTransition('hidden', 'full'), { remove: [], write: ['dense', 'fts', 'relation'] });
+  it('hidden → full：必须**补回 ki-relation 与 ki-path**（漏 path 则组路径向量永久缺失）', () => {
+    // path 是 REQ-20261116-004 补的：hidden 时组级 path 会被摘，回到 full 必须重建
+    assert.deepEqual(planTransition('hidden', 'full'), { remove: [], write: ['dense', 'fts', 'relation', 'path'] });
   });
 
   it('hidden → fts-only：写 FTS + ki-relation', () => {
@@ -165,13 +166,14 @@ describe('③ applyVisibility', () => {
   it('写入方向只入队，不在本函数里 embed', async () => {
     seed(GROUP_A, '待重建文档');
     const result = await applyVisibility({ scope, group: GROUP_A, relation: '待重建文档', to: 'full', from: 'hidden' });
-    assert.deepEqual(result.pending, ['dense', 'fts', 'relation']);
+    // path 同属写入方向（组级 upsert，幂等）
+    assert.deepEqual(result.pending, ['dense', 'fts', 'relation', 'path']);
     assert.deepEqual(result.written, [], '写入必须异步，函数内不落索引');
 
     const file = readJson<PendingFile>(pendingFilePath(scope))!;
     const entry = file.items.find((i) => i.relation === '待重建文档')!;
     assert.equal(entry.target, 'full');
-    assert.deepEqual(entry.kinds, ['dense', 'fts', 'relation']);
+    assert.deepEqual(entry.kinds, ['dense', 'fts', 'relation', 'path']);
     assert.equal(entry.attempts, 0);
   });
 
