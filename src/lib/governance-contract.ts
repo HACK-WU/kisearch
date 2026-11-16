@@ -297,3 +297,167 @@ export interface CountsResponse {
   eventsOpen: number;
   trash: number;
 }
+
+// ─── 事件源码分析（REQ-20261113-003 · S-03）─────────────────
+
+export type AnalysisRunStatusDto = 'running' | 'ready' | 'partial' | 'failed' | 'cancelled';
+
+export interface AnalysisCandidateDto {
+  id: string;
+  file: string;
+  line: number;
+  endLine?: number;
+  snippet: string;
+  why: string;
+  confidence: number;
+}
+
+export interface AnalysisStepCallDto {
+  kind: 'tool' | 'skill';
+  name: string;
+  label: string;
+  ms: number;
+  note?: string;
+}
+
+export interface AnalysisStepDto {
+  name: string;
+  title: string;
+  ms: number;
+  metrics: Record<string, number | string>;
+  detail?: Record<string, unknown>;
+  calls?: AnalysisStepCallDto[];
+}
+
+export interface AnalysisStatsDto {
+  turns: number;
+  filesRead: number;
+  tokens: number;
+  ms: number;
+}
+
+export interface AnalysisDraftDto {
+  runId: string;
+  bootId?: string;
+  status: AnalysisRunStatusDto;
+  targetDir: string;
+  commit: string | null;
+  errorCode?: string;
+  errorMessage?: string;
+  candidates: AnalysisCandidateDto[];
+  unconfirmed: string[];
+  steps: AnalysisStepDto[];
+  stats: AnalysisStatsDto;
+  startedAt: number;
+  updatedAt: number;
+}
+
+export interface ConfirmedCodeLocationDto {
+  id: string;
+  file: string;
+  line: number;
+  endLine?: number;
+  snippet: string;
+  why: string;
+  confidence: number;
+  targetDir: string;
+  commit: string | null;
+  confirmedAt: number;
+}
+
+export interface EventAnalysisDto {
+  draft: AnalysisDraftDto | null;
+  confirmed: ConfirmedCodeLocationDto[];
+}
+
+export interface CodeLocationPreviewDto {
+  file: string;
+  line: number;
+  endLine?: number;
+  why: string;
+  commit: string | null;
+}
+
+// ─── 事件关联文档（REQ-20261116-004 · S-01）───
+
+export interface MemberRefDto {
+  group: string;
+  name: string;
+}
+
+export interface MemberSkipDto extends MemberRefDto {
+  reason: 'already-bound' | 'duplicate-in-request';
+}
+
+export interface MemberFailureDto extends MemberRefDto {
+  code: string;
+  error: string;
+}
+
+export interface MemberVisibilityFailureDto extends MemberRefDto {
+  kind: 'dense' | 'fts' | 'relation' | 'path';
+  error: string;
+}
+
+/** `POST /governance/events/:id/members` 响应（部分失败也是 200，看 failed[]） */
+export interface EventMemberChangeResult {
+  ok: true;
+  scope: string;
+  eventId: string;
+  shortId: number;
+  visibility: { mode: VisibilityDto; dense: boolean; fts: boolean };
+  bound: MemberRefDto[];
+  skipped: MemberSkipDto[];
+  failed: MemberFailureDto[];
+  /** 已绑定成功但索引摘除失败（文档仍可能被检索到） */
+  visibilityFailed?: MemberVisibilityFailureDto[];
+  pending: string[];
+  hint: string;
+}
+
+/** `DELETE /governance/events/:id/members` 响应 */
+export interface EventMemberRemovalResult {
+  ok: true;
+  scope: string;
+  eventId: string;
+  removed: MemberRefDto;
+  lifecycle: 'wiki';
+  visibility: { mode: VisibilityDto; dense: boolean; fts: boolean };
+  pending: string[];
+  hint: string;
+}
+
+/** 手动添加文档的搜索命中（`GET /governance/docs/search`） */
+export interface DocSearchHit {
+  group: string;
+  name: string;
+  visibility: VisibilityDto;
+  /** 该文档已绑在**另一个未收口事件**上：前端禁用并标注，后端仍兜底拒绝 */
+  event?: { id: string; shortId: number; title: string };
+}
+
+/** `POST /governance/events` 的绑定报告（创建时一并挂文档） */
+export interface CreateEventBinding {
+  docs: {
+    bound: MemberRefDto[];
+    skipped: MemberSkipDto[];
+    failed: MemberFailureDto[];
+    visibilityFailed: MemberVisibilityFailureDto[];
+  };
+  refs: {
+    added: number;
+    addedList: MemberRefDto[];
+    skipped: Array<MemberRefDto & { reason: 'duplicate' | 'already-associated' }>;
+    failed: MemberFailureDto[];
+  };
+}
+
+export interface CreateEventResult {
+  ok: true;
+  scope: string;
+  event: unknown;
+  binding: CreateEventBinding;
+  visibility: { mode: VisibilityDto; dense: boolean; fts: boolean };
+  pending: string[];
+  hint?: string;
+}

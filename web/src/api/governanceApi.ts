@@ -10,6 +10,9 @@
  */
 
 import type {
+  AnalysisDraftDto,
+  ConfirmedCodeLocationDto,
+  EventAnalysisDto,
   RefCandidateDto,
   RefSearchCallDto,
   RefSearchResultDto,
@@ -82,6 +85,10 @@ export interface ApplyLifecycleResult {
   expiresAt?: number;
   ttlDays?: number;
   eventId?: string;
+  /** 改分类后实际生效的检索档位（event 文档按阶段算） */
+  visibility?: Visibility;
+  /** 需异步补写的索引类别；非空时提示"索引补齐中" */
+  pending?: string[];
 }
 
 export function applyLifecycle(
@@ -150,6 +157,7 @@ export interface EventView {
   id: string;
   shortId: number;
   title: string;
+  description?: string;
   typeId: string;
   typeName?: string | null;
   stageKey: string;
@@ -183,13 +191,103 @@ export function listEvents(
   return req<EventListResponse>(`/api/governance/events?${params.toString()}`);
 }
 
+export interface CreateEventBindingView {
+  docs: {
+    bound: Array<{ group: string; name: string }>;
+    skipped: Array<{ group: string; name: string; reason: 'already-bound' | 'duplicate-in-request' }>;
+    failed: Array<{ group: string; name: string; code: string; error: string }>;
+    visibilityFailed: Array<{ group: string; name: string; kind: 'dense' | 'fts' | 'relation' | 'path'; error: string }>;
+  };
+  refs: {
+    added: number;
+    addedList: Array<{ group: string; name: string }>;
+    skipped: Array<{ group: string; name: string; reason: 'duplicate' | 'already-associated' }>;
+    failed: Array<{ group: string; name: string; code: string; error: string }>;
+  };
+}
+
+/** 创建事件（可一次带上关联文档与参考文档） */
 export function createEvent(
   scope: string,
-  args: { title: string; typeId: string; stageKey?: string },
-): Promise<{ ok: true; event: EventView }> {
+  args: {
+    title: string;
+    description?: string;
+    typeId: string;
+    stageKey?: string;
+    docs?: Array<{ group: string; name: string }>;
+    refs?: Array<{ group: string; name: string }>;
+  },
+): Promise<{
+  ok: true;
+  scope: string;
+  event: EventView;
+  binding: CreateEventBindingView;
+  visibility: { mode: Visibility; dense: boolean; fts: boolean };
+  pending: string[];
+  hint?: string;
+}> {
   return req('/api/governance/events', {
     method: 'POST',
     body: JSON.stringify({ scope, ...args }),
+  });
+}
+
+// ─── 关联文档（成员）──────────────────────────────────
+
+export interface MemberChangeResult {
+  ok: true;
+  scope: string;
+  eventId: string;
+  shortId: number;
+  visibility: { mode: Visibility; dense: boolean; fts: boolean };
+  bound: Array<{ group: string; name: string }>;
+  skipped: Array<{ group: string; name: string; reason: 'already-bound' | 'duplicate-in-request' }>;
+  failed: Array<{ group: string; name: string; code: string; error: string }>;
+  visibilityFailed?: Array<{ group: string; name: string; kind: 'dense' | 'fts' | 'relation' | 'path'; error: string }>;
+  pending: string[];
+  hint: string;
+}
+
+export function addMembers(
+  scope: string,
+  eventId: string,
+  docs: Array<{ group: string; name: string }>,
+): Promise<MemberChangeResult> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/members`, {
+    method: 'POST',
+    body: JSON.stringify({ scope, docs }),
+  });
+}
+
+export function removeMember(
+  scope: string,
+  eventId: string,
+  group: string,
+  name: string,
+): Promise<{
+  ok: true;
+  scope: string;
+  eventId: string;
+  removed: { group: string; name: string };
+  lifecycle: 'wiki';
+  visibility: { mode: Visibility; dense: boolean; fts: boolean };
+  pending: string[];
+  hint: string;
+}> {
+  const params = new URLSearchParams({ scope, group, name });
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/members?${params.toString()}`, {
+    method: 'DELETE',
+  });
+}
+
+export function updateEvent(
+  scope: string,
+  eventId: string,
+  patch: { title?: string; description?: string; revision: number },
+): Promise<{ ok: true; event: EventView }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ scope, ...patch }),
   });
 }
 
@@ -376,10 +474,80 @@ export interface EventDetail {
   event: EventView & { typeName?: string };
   members: Array<{ group: string; name: string }>;
   logs: Array<{ fromKey: string | null; toKey: string; at: number; by: string; note?: string }>;
+  analysis?: EventAnalysisDto;
 }
+
+export type AnalysisDraft = AnalysisDraftDto;
+export type ConfirmedCodeLocation = ConfirmedCodeLocationDto;
+export type EventAnalysis = EventAnalysisDto;
 
 export function getEventDetail(scope: string, eventId: string): Promise<EventDetail> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}?${new URLSearchParams({ scope }).toString()}`);
+}
+
+// ─── 事件源码分析（REQ-20261113-003 · S-03/S-04/S-05）─────
+
+export function startEventAnalysis(
+  scope: string,
+  eventId: string,
+  opts: { forceOverwrite?: boolean } = {},
+): Promise<{ ok: true; scope: string; eventId: string; reused: boolean; analysis: EventAnalysis }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analyze`, {
+    method: 'POST',
+    body: JSON.stringify({ scope, ...(opts.forceOverwrite ? { forceOverwrite: true } : {}) }),
+  });
+}
+
+/**
+ * 手动停止分析（幂等）。返回的 `draft` 可能仍是 `running` —— 后台收到 abort 才落终态，
+ * 调用方继续轮询即可看到 `cancelled` / `partial`。
+ */
+export function cancelEventAnalysis(
+  scope: string,
+  eventId: string,
+): Promise<{ ok: true; scope: string; eventId: string; canceled: boolean; analysis: EventAnalysis }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ scope }),
+  });
+}
+
+export function getEventAnalysis(
+  scope: string,
+  eventId: string,
+): Promise<{ ok: true; scope: string; eventId: string; draft: AnalysisDraft | null; confirmed: ConfirmedCodeLocation[] }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis?${new URLSearchParams({ scope }).toString()}`);
+}
+
+export function confirmEventAnalysis(
+  scope: string,
+  eventId: string,
+  args: { candidateIds: string[]; expectedRunId?: string; discardDraft?: boolean },
+): Promise<{ ok: true; scope: string; eventId: string; added: number; draft: AnalysisDraft | null; confirmed: ConfirmedCodeLocation[] }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/confirm`, {
+    method: 'POST',
+    body: JSON.stringify({ scope, ...args }),
+  });
+}
+
+export function discardEventAnalysisDraft(
+  scope: string,
+  eventId: string,
+): Promise<{ ok: true; scope: string; eventId: string; draft: AnalysisDraft | null; confirmed: ConfirmedCodeLocation[] }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/draft?${new URLSearchParams({ scope }).toString()}`, {
+    method: 'DELETE',
+  });
+}
+
+export function removeConfirmedCodeLocation(
+  scope: string,
+  eventId: string,
+  locId: string,
+): Promise<{ ok: true; scope: string; eventId: string; draft: AnalysisDraft | null; confirmed: ConfirmedCodeLocation[] }> {
+  return req(
+    `/api/governance/events/${encodeURIComponent(eventId)}/analysis/confirmed/${encodeURIComponent(locId)}?${new URLSearchParams({ scope }).toString()}`,
+    { method: 'DELETE' },
+  );
 }
 
 // ─── 参考文档 ─────────────────────────────────────────
@@ -436,7 +604,16 @@ export function searchRefDocs(
   q: string,
   eventId?: string,
   limit = 20,
-): Promise<{ ok: true; hits: Array<{ group: string; name: string; visibility: Visibility }> }> {
+): Promise<{
+  ok: true;
+  hits: Array<{
+    group: string;
+    name: string;
+    visibility: Visibility;
+    /** 已绑在另一个未收口事件上：选择器禁用并标注 */
+    event?: { id: string; shortId: number; title: string };
+  }>;
+}> {
   const params = new URLSearchParams({ scope, q, limit: String(limit) });
   if (eventId) params.set('eventId', eventId);
   return req(`/api/governance/docs/search?${params.toString()}`);

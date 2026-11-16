@@ -41,12 +41,16 @@ export interface EventTypeRecord {
   updatedAt: number;
 }
 
+export const EVENT_DESCRIPTION_MAX_CHARS = 4000;
+
 export interface EventRecord {
   id: string;
   /** 展示编号 `#3`；per-scope 单调递增，**删除后不复用** */
   shortId: number;
   scope: string;
   title: string;
+  /** 可选事件描述（REQ-20261113-003 · S-03）：纯文本/Markdown，≤ 4000 字 */
+  description?: string;
   typeId: string;
   stageKey: string;
   /** 展示冗余：读时按 stageKey 反查重算，不在写入侧当作依据 */
@@ -105,5 +109,86 @@ export interface RefsDoc {
   version: 1;
   eventId: string;
   refs: EventRefDoc[];
+  updatedAt: number;
+}
+
+// ─── 事件源码分析（REQ-20261113-003 · S-03）─────────────────
+
+/**
+ * `cancelled` = 用户主动点了「停止」且一条候选都没来得及产出。
+ * 与 `failed` 区分开：失败是系统/上游的错，取消是人的决定，前端文案与引导都不同
+ * （失败可能指向「去配置」，取消只该给「重新分析」）。
+ */
+export type AnalysisRunStatus = 'running' | 'ready' | 'partial' | 'failed' | 'cancelled';
+
+export interface AnalysisCandidate {
+  id: string;
+  file: string;
+  line: number;
+  endLine?: number;
+  snippet: string;
+  why: string;
+  confidence: number;
+}
+
+export interface AnalysisStepCall {
+  kind: 'tool' | 'skill';
+  name: string;
+  label: string;
+  ms: number;
+  note?: string;
+}
+
+export interface AnalysisStepRecord {
+  name: string;
+  title: string;
+  ms: number;
+  metrics: Record<string, number | string>;
+  detail?: Record<string, unknown>;
+  calls?: AnalysisStepCall[];
+}
+
+export interface AnalysisStats {
+  turns: number;
+  filesRead: number;
+  tokens: number;
+  ms: number;
+}
+
+export interface AnalysisDraft {
+  runId: string;
+  bootId?: string;
+  status: AnalysisRunStatus;
+  targetDir: string;
+  commit: string | null;
+  errorCode?: string;
+  errorMessage?: string;
+  candidates: AnalysisCandidate[];
+  unconfirmed: string[];
+  steps: AnalysisStepRecord[];
+  stats: AnalysisStats;
+  startedAt: number;
+  updatedAt: number;
+}
+
+export interface ConfirmedCodeLocation {
+  id: string;
+  file: string;
+  line: number;
+  endLine?: number;
+  snippet: string;
+  why: string;
+  confidence: number;
+  targetDir: string;
+  commit: string | null;
+  confirmedAt: number;
+}
+
+/** `{eventId}.analysis.json` */
+export interface EventAnalysisDoc {
+  version: 1;
+  eventId: string;
+  draft: AnalysisDraft | null;
+  confirmed: ConfirmedCodeLocation[];
   updatedAt: number;
 }

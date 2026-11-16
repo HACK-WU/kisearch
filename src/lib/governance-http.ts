@@ -26,16 +26,67 @@ import { resolveVisibilityOfRelation } from './visibility-index.js';
 import { readAllGroupCaches } from './group-cache.js';
 import { listTypes, createType, updateType, deleteType } from './events/type-service.js';
 import {
-  listEvents, createEvent, updateEventTitle, transitionEvent, deleteEvent, reopenEvent, collectMembers,
+  listEvents, createEventWithBinding, updateEvent, transitionEvent, deleteEvent, reopenEvent, collectMembers,
+  type CreateEventOutcome,
 } from './events/event-service.js';
+import { bindMembers, unbindMember, type BindMembersOutcome } from './events/members.js';
 import { listRefs, addRefs, removeRef, searchRefCandidates, searchDocsForAdd } from './events/refs-service.js';
 import { createSearchAdapter, type RefSearchFn } from './events/refs-search.js';
 import { readAllEvents, findEventIn } from './events/store.js';
 import { readStageLogs } from './events/stage-log.js';
+import {
+  confirmDraftLocations,
+  discardAnalysisDraft,
+  removeConfirmedLocation,
+} from './events/analysis-store.js';
+import { cancelEventAnalysis, isAnalysisActive, readNormalizedAnalysisDoc, startEventAnalysis } from './events/analysis-runner.js';
 import { listTrash, readTrashSettings, writeTrashSettings, removeTrashItem } from './trash-store.js';
 import { restoreFromTrash, purgeExpired } from './trash-service.js';
-import { pendingCount, listPending } from './visibility-queue.js';
+import { pendingCount, listPending, scheduleConsume } from './visibility-queue.js';
 import { failureFilePath, type FailureFile } from './visibility-index.js';
+
+/**
+ * 绑定结果的给人看的一句话：AI 与页面都用它解释"为什么搜不到 / 为什么被拒"。
+ * `hidden` / `fts-only` 必须显式说明是**预期行为**，否则调用方会把正常行为当失败重试。
+ */
+function buildMemberHint(result: BindMembersOutcome): string {
+  const parts: string[] = [];
+  if (result.bound.length > 0) parts.push(`已挂上 ${result.bound.length} 篇`);
+  if (result.skipped.length > 0) parts.push(`跳过 ${result.skipped.length} 篇（已在本事件或重复提交）`);
+  if (result.failed.length > 0) parts.push(`${result.failed.length} 篇被拒（见 failed[]）`);
+  if (result.visibilityFailed.length > 0) {
+    parts.push(`⚠ ${result.visibilityFailed.length} 篇索引未能摘除，仍可能被检索到（已记录诊断）`);
+  }
+  if (result.visibility.mode === 'hidden') {
+    parts.push('当前阶段不可检索：语义与全文都搜不到，这是阶段设计的预期行为');
+  } else if (result.visibility.mode === 'fts-only') {
+    parts.push('当前阶段仅全文可命中：语义检索不会召回，这是预期行为');
+  } else {
+    parts.push('当前阶段语义与全文都可检索');
+  }
+  if (result.pending.length > 0) parts.push(`索引补齐中（${result.pending.join(' / ')}），数秒后生效`);
+  return parts.join('；');
+}
+
+/** 创建事件的绑定摘要 */
+function buildBindingHint(outcome: CreateEventOutcome): string {
+  const { docs, refs } = outcome.binding;
+  const parts = [`事件已创建：关联 ${docs.bound.length} 篇、参考 ${refs.added} 篇`];
+  if (docs.failed.length > 0) parts.push(`${docs.failed.length} 篇关联文档被拒（见 binding.docs.failed）`);
+  if (refs.failed.length > 0) parts.push(`${refs.failed.length} 条参考文档失败（见 binding.refs.failed）`);
+  if (docs.visibilityFailed.length > 0) {
+    parts.push(`⚠ ${docs.visibilityFailed.length} 篇索引未能摘除，仍可能被检索到`);
+  }
+  if (outcome.visibility.mode === 'hidden') parts.push('当前阶段不可检索（预期行为）');
+  else if (outcome.visibility.mode === 'fts-only') parts.push('当前阶段仅全文可命中（预期行为）');
+  return parts.join('；');
+}
+
+/** 该事件此刻是否真有一个后台分析在跑（与 `readNormalizedAnalysisDoc` 的僵尸判定同一口径） */
+function isAnalysisRunning(scope: string, eventId: string): boolean {
+  return isAnalysisActive(scope, eventId)
+    && readNormalizedAnalysisDoc(scope, eventId).draft?.status === 'running';
+}
 
 export interface GovernanceRouteContext {
   /** Token 授权范围；null = 免鉴权（本机 stdio / 回环） */
@@ -61,6 +112,14 @@ const STATUS_BY_CODE: Record<string, number> = {
   DOC_NOT_FOUND: 404,
   // 向量服务不可用是"暂时性外部故障"，不能伪装成 400 契约错误（前端据此给"改用手动添加"）
   SEARCH_UNAVAILABLE: 503,
+  // ── 事件源码分析（REQ-20261113-003）──
+  ANALYSIS_ALREADY_RUNNING: 409,
+  ANALYSIS_TARGET_SYNCING: 409,
+  ANALYSIS_DISCLOSURE_REQUIRED: 403,
+  ANALYSIS_DRAFT_NOT_FOUND: 404,
+  ANALYSIS_LOCATION_NOT_FOUND: 404,
+  ANALYSIS_RATE_LIMITED: 429,
+  ANALYSIS_LLM_UNAVAILABLE: 503,
 };
 
 /**
@@ -224,6 +283,7 @@ export async function handleGovernanceRoutes(
             ...(result.details ? { details: result.details } : {}),
           });
         }
+        if (result.summary.pending?.length) void scheduleConsume(scope);
         return sendJson(res, 200, { ok: true, scope, ...result.summary });
       }
 
@@ -364,14 +424,26 @@ export async function handleGovernanceRoutes(
       if (method === 'POST' && !segs[1]) {
         const b = await body();
         const scope = scopeFromBody(b);
-        const event = await createEvent(scope, {
+        const outcome = await createEventWithBinding(scope, {
           title: String(b.title ?? ''),
+          ...(typeof b.description === 'string' ? { description: b.description } : {}),
           typeId: String(b.typeId ?? b.type_id ?? ''),
           ...(str(pick(b, 'stageKey', 'stage_key')) ? { stageKey: str(pick(b, 'stageKey', 'stage_key'))! } : {}),
           ...(Array.isArray(b.docs) ? { docs: b.docs as Array<{ group: string; name: string }> } : {}),
+          ...(Array.isArray(b.refs) ? { refs: b.refs as Array<{ group: string; name: string }> } : {}),
           by: 'user',
         });
-        return sendJson(res, 201, { ok: true, scope, event });
+        // 索引补写是异步的：入队后立刻触发一次消费（失败由 attempts 保留重试）
+        if (outcome.pending.length > 0) void scheduleConsume(scope);
+        return sendJson(res, 201, {
+          ok: true,
+          scope,
+          event: outcome.event,
+          binding: outcome.binding,
+          visibility: outcome.visibility,
+          pending: outcome.pending,
+          hint: buildBindingHint(outcome),
+        });
       }
 
       const id = segs[1];
@@ -379,20 +451,140 @@ export async function handleGovernanceRoutes(
         const scope = scopeFromQuery();
         const event = findEventIn(readAllEvents(scope), id);
         if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+        const analysisDoc = readNormalizedAnalysisDoc(scope, event.id);
         return sendJson(res, 200, {
           ok: true,
           scope,
           event,
           members: collectMembers(scope, event.id).map((m) => ({ group: m.group, name: m.name })),
           logs: readStageLogs(scope, event.id),
+          analysis: { draft: analysisDoc.draft, confirmed: analysisDoc.confirmed },
         });
       }
 
       if (id && method === 'PATCH' && !segs[2]) {
         const b = await body();
         const scope = scopeFromBody(b);
-        const event = await updateEventTitle(scope, id, String(b.title ?? ''), num(b.revision) ?? -1);
+        const event = await updateEvent(scope, id, {
+          ...(typeof b.title === 'string' ? { title: b.title } : {}),
+          ...(typeof b.description === 'string' ? { description: b.description } : {}),
+          revision: num(b.revision) ?? -1,
+        });
         return sendJson(res, 200, { ok: true, scope, event });
+      }
+
+      // ─── 事件源码分析（REQ-20261113-003 · S-03/S-04）───
+      if (id && segs[2] === 'analyze' && method === 'POST' && !segs[3]) {
+        const b = await body();
+        const scope = scopeFromBody(b);
+        const started = await startEventAnalysis(scope, id, { forceOverwrite: b.forceOverwrite === true });
+        return sendJson(res, started.reused ? 200 : 202, {
+          ok: true,
+          scope,
+          eventId: started.doc.eventId,
+          reused: started.reused,
+          analysis: { draft: started.doc.draft, confirmed: started.doc.confirmed },
+        });
+      }
+
+      // ─── 手动停止分析（2026-11-16 用户要求弹窗里有「停止」）───
+      // 幂等：没在跑也返回 200 + canceled:false（按钮可能被点两次，不该报错）。
+      // 返回的 draft 可能仍是 running —— 后台任务收到 abort 后才落终态，前端继续轮询即可。
+      if (id && segs[2] === 'analysis' && segs[3] === 'cancel' && method === 'POST' && !segs[4]) {
+        const b = await body();
+        const scope = scopeFromBody(b);
+        const event = findEventIn(readAllEvents(scope), id);
+        if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+        const canceled = cancelEventAnalysis(scope, event.id);
+        const analysisDoc = readNormalizedAnalysisDoc(scope, event.id);
+        return sendJson(res, 200, {
+          ok: true,
+          scope,
+          eventId: event.id,
+          canceled,
+          analysis: { draft: analysisDoc.draft, confirmed: analysisDoc.confirmed },
+        });
+      }
+
+      if (id && segs[2] === 'analysis') {
+        if (method === 'GET' && !segs[3]) {
+          const scope = scopeFromQuery();
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          const analysisDoc = readNormalizedAnalysisDoc(scope, event.id);
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: event.id,
+            draft: analysisDoc.draft,
+            confirmed: analysisDoc.confirmed,
+          });
+        }
+        if (method === 'POST' && segs[3] === 'confirm' && !segs[4]) {
+          const b = await body();
+          const scope = scopeFromBody(b);
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          /*
+           * 运行中禁止确认/丢弃：进度写盘里的 `candidates` 还是空的（候选只在终态汇总），
+           * 此时确认 = 0 条写入 + 草稿被丢，而后台收尾的 `updateDraftIfMatch` 又因 runId
+           * 不匹配直接 no-op —— 用户会看到「已停止/已完成」却什么都没留下。
+           */
+          if (isAnalysisRunning(scope, event.id)) {
+            return sendJson(res, 409, {
+              ok: false,
+              code: 'ANALYSIS_ALREADY_RUNNING',
+              error: '分析仍在进行中：请先「停止」或等待完成，再确认/丢弃草稿',
+            });
+          }
+          const candidateIds = Array.isArray(b.candidateIds) ? b.candidateIds.map((x) => String(x)) : [];
+          const outcome = await confirmDraftLocations(scope, event.id, {
+            candidateIds,
+            ...(str(b.expectedRunId) ? { expectedRunId: str(b.expectedRunId)! } : {}),
+            discardDraft: b.discardDraft === true,
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: event.id,
+            added: outcome.added,
+            draft: outcome.doc.draft,
+            confirmed: outcome.doc.confirmed,
+          });
+        }
+        if (method === 'DELETE' && segs[3] === 'draft' && !segs[4]) {
+          const scope = scopeFromQuery();
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          if (isAnalysisRunning(scope, event.id)) {
+            return sendJson(res, 409, {
+              ok: false,
+              code: 'ANALYSIS_ALREADY_RUNNING',
+              error: '分析仍在进行中：请先「停止」或等待完成，再丢弃草稿',
+            });
+          }
+          const doc = await discardAnalysisDraft(scope, event.id);
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: event.id,
+            draft: doc.draft,
+            confirmed: doc.confirmed,
+          });
+        }
+        if (method === 'DELETE' && segs[3] === 'confirmed' && segs[4] && !segs[5]) {
+          const scope = scopeFromQuery();
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          const doc = await removeConfirmedLocation(scope, event.id, segs[4]);
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: event.id,
+            draft: doc.draft,
+            confirmed: doc.confirmed,
+          });
+        }
       }
 
       if (id && method === 'DELETE' && !segs[2]) {
@@ -419,6 +611,49 @@ export async function handleGovernanceRoutes(
         const scope = scopeFromBody(b);
         const outcome = await reopenEvent(scope, id);
         return sendJson(res, 200, { ok: true, scope, ...outcome });
+      }
+
+      // ─── 关联文档（事件成员）───
+      if (id && segs[2] === 'members') {
+        if (method === 'POST' && !segs[3]) {
+          const b = await body();
+          const scope = scopeFromBody(b);
+          const result = await bindMembers(scope, id, {
+            docs: Array.isArray(b.docs) ? (b.docs as Array<{ group: string; name: string }>) : [],
+            by: 'user',
+          });
+          if (result.pending.length > 0) void scheduleConsume(scope);
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: result.event.id,
+            shortId: result.event.shortId,
+            visibility: result.visibility,
+            bound: result.bound,
+            skipped: result.skipped,
+            failed: result.failed,
+            ...(result.visibilityFailed.length > 0 ? { visibilityFailed: result.visibilityFailed } : {}),
+            pending: result.pending,
+            hint: buildMemberHint(result),
+          });
+        }
+        if (method === 'DELETE' && !segs[3]) {
+          const scope = scopeFromQuery();
+          const result = await unbindMember(scope, id, str(q.get('group')) ?? '', str(q.get('name')) ?? '');
+          if (result.pending.length > 0) void scheduleConsume(scope);
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: result.event.id,
+            removed: result.removed,
+            lifecycle: result.lifecycle,
+            visibility: result.visibility,
+            pending: result.pending,
+            hint: result.pending.length > 0
+              ? '已解绑，文档恢复长期保留；索引补齐中（含组路径索引），数秒后可被语义检索'
+              : '已解绑，文档恢复长期保留',
+          });
+        }
       }
 
       // ─── 参考文档 ───

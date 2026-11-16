@@ -5207,9 +5207,17 @@ select.ki-chat-cfg__ta--select {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2398989d' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 11px center;
 }
-/* 配置层打开时按块渐入（动效响应"打开"这个操作，不是页面加载装饰） */
-.ki-chat-cfg[data-open="true"] .ki-chat-cfg__head { animation: ki-cfg-in .22s ease both; }
-.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field { animation: ki-cfg-in .26s ease both; }
+/* 配置层打开时按块渐入（动效响应"打开"这个操作，不是页面加载装饰）
+ *
+ * ★ fill-mode 必须是 `backwards`，**不能是 `both`**（2026-11-16 实测踩坑）：
+ *   `both` 会把最后一帧「transform: none」以计算后的 `matrix(1,0,0,1,0,0)` 保留下来 ——
+ *   这对元素自身无影响，却让 `.ki-chat-cfg__field` 变成**层叠上下文 + fixed 包含块**。
+ *   于是块内的浮层（技能库选择器 `.sp-picker__panel`、危险开关确认卡）会被**后面**的
+ *   `.ki-chat-cfg__field` 盖住：实测 AI 设置 → AI 分析页，scope 候选面板只剩 1 行可见。
+ *   `backwards` 只在 delay 期间套用起始帧（保持"先隐藏再淡入"的观感），动画结束即回到
+ *   元素默认样式（无 transform），层叠上下文自然消失。 */
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__head { animation: ki-cfg-in .22s ease backwards; }
+.ki-chat-cfg[data-open="true"] .ki-chat-cfg__field { animation: ki-cfg-in .26s ease backwards; }
 .ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(2) { animation-delay: 45ms; }
 .ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(3) { animation-delay: 90ms; }
 .ki-chat-cfg[data-open="true"] .ki-chat-cfg__field:nth-child(4) { animation-delay: 135ms; }
@@ -5918,27 +5926,51 @@ select.ki-chat-cfg__ta--select {
 }
 
 /* ── AI 分析 · 目标目录映射行（REQ-20261113-003 · S-01） ── */
+/*
+ * 高度 32px / 4px 圆角 —— 与 `.sp-picker__input`（scope 选择器输入框）逐像素对齐。
+ * 原先 28px：与行内按钮（`.ki-chat-btn` 26px、胶囊圆角）差 2px 且形状不一致，
+ * 一整行看起来像拼错的积木（2026-11-16 用户反馈「输入框高度太窄」）。
+ */
 .ki-chat-cfg__dirrow {
   display: flex; align-items: center; gap: var(--ki-space-2);
   margin-top: 8px; min-width: 0; flex-wrap: wrap;
 }
+/* scope 映射行：选择器在**单选模式**下把已选项回显在输入框里（不再有上方 chips 行），
+   整行高度 = 32px，与普通行一致 ⇒ 用居中对齐即可（原先为压住 chips 行而底部对齐，已不需要）。 */
+.ki-chat-cfg__dirrow--picker { align-items: center; }
+/* 280px：够放下长 scope 名 + 一个徽标（240px 时 `bkmon-test` + 「维度不一致」会被挤成两行）。
+   flex-shrink 必须留 1：面板可拖窄（380→更窄）与窄屏下，固定 280 会把整行顶出容器。 */
+.ki-chat-cfg__dirrow .sp-picker { flex: 0 1 280px; min-width: 0; }
 .ki-chat-cfg__dirscope {
-  flex: 0 0 150px; min-width: 0; height: 28px;
+  flex: 0 0 150px; min-width: 0; height: 32px;
   font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
   color: var(--ki-color-text); background: var(--ki-color-bg-secondary);
   border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
   padding: 0 8px;
 }
 .ki-chat-cfg__dirinput {
-  flex: 1 1 220px; min-width: 0; height: 28px;
+  flex: 1 1 220px; min-width: 0; height: 32px;
   font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
   color: var(--ki-color-text); background: var(--ki-color-bg-secondary);
   border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
   padding: 0 8px; transition: border-color 160ms;
 }
 .ki-chat-cfg__dirinput:focus, .ki-chat-cfg__dirscope:focus { outline: none; border-color: var(--ki-color-primary); }
-.ki-chat-cfg__dirinput[aria-invalid="true"] { border-color: var(--ki-color-danger); }
+.ki-chat-cfg__dirinput[aria-invalid="true"], .ki-chat-cfg__dirscope[aria-invalid="true"] { border-color: var(--ki-color-danger); }
 .ki-chat-cfg__dirinput:disabled, .ki-chat-cfg__dirscope:disabled { opacity: .6; cursor: not-allowed; }
+/* 行内按钮：跟着输入框的高度与圆角走（.ki-chat-btn 默认是 26px 胶囊，属于聊天面板口径） */
+.ki-chat-cfg__dirrow .ki-chat-btn {
+  height: 32px; padding: 0 12px;
+  border-radius: var(--ki-radius-sm);
+}
+/* 保存失败时的逐行原因（一条一行，便于对上具体是哪一行） */
+.ki-chat-cfg__warnlist {
+  margin: 8px 0 0; padding-left: 18px;
+  color: var(--ki-color-danger); font-size: var(--ki-font-size-xs); line-height: 1.7;
+}
+/* 「已配置」= 成功色；「未配置」沿用默认的 warning 色（提示该去配了）；「保存失败」= danger */
+.ki-chat-cfg__badge--ok { color: var(--ki-color-success); }
+.ki-chat-cfg__badge--err { color: var(--ki-color-danger); }
 .ki-chat-cfg__sublabel {
   display: block; margin: 12px 0 4px;
   font-size: var(--ki-font-size-xs); font-weight: 500; color: var(--ki-color-text-muted);

@@ -56,6 +56,12 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['POST', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['DELETE', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['POST', '/governance/events/evt_1/refs/search', 'knowledge.read'],
+  ['POST', '/governance/events/evt_1/analyze', 'knowledge.write'],
+  ['GET', '/governance/events/evt_1/analysis', 'knowledge.read'],
+  ['POST', '/governance/events/evt_1/analysis/confirm', 'knowledge.write'],
+  ['DELETE', '/governance/events/evt_1/analysis/draft', 'knowledge.write'],
+  ['POST', '/governance/events/evt_1/analysis/cancel', 'knowledge.write'],
+  ['DELETE', '/governance/events/evt_1/analysis/confirmed/loc_1', 'knowledge.write'],
   ['GET', '/governance/docs', 'knowledge.read'],
   ['GET', '/governance/docs/search', 'knowledge.read'],
   ['GET', '/governance/trash', 'knowledge.read'],
@@ -88,8 +94,8 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
     assert.deepEqual(problems, [], `以下路由登记有误：\n${problems.join('\n')}`);
   });
 
-  it('表里正好 31 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 31);
+  it('表里正好 37 条（新增/删除路由必须同步这张表）', () => {
+    assert.equal(ROUTES.length, 37);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {

@@ -12,12 +12,13 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { listEvents } from '../events/event-service.js';
+import { readAnalysisDocRaw } from '../events/analysis-store.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
 
 export function registerEventListTool(server: McpServer): void {
   server.tool(
     'ki_event_list',
-    '列出事件（分页）：id / #shortId / 标题 / 类型 / 当前阶段 / 可见性 / 关联文档预览；只读，不能创建事件',
+    '列出事件（分页）：id / #shortId / 标题 / 类型 / 当前阶段 / 可见性 / 关联文档预览 / 已确认代码位置预览；只读，创建事件用 ki_event_create',
     {
       scope: z.string().optional().default('default').describe('知识库名'),
       status: z.enum(['open', 'closed', 'all']).optional().default('open').describe('筛选：未收口（默认）/ 已收口 / 全部'),
@@ -33,6 +34,14 @@ export function registerEventListTool(server: McpServer): void {
         .optional()
         .default(3)
         .describe('每个事件返回的关联文档名条数，默认 3，上限 10'),
+      locations_preview_limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(10)
+        .optional()
+        .default(5)
+        .describe('每个事件返回的已确认代码位置条数，默认 5，上限 10'),
     },
     async (args) => {
       try {
@@ -49,27 +58,41 @@ export function registerEventListTool(server: McpServer): void {
           'ki_event_list',
         );
 
+        const locLimit = args.locations_preview_limit;
         const payload = {
           ok: true,
           scope: args.scope,
           total: result.total,
           hasMore: result.hasMore,
           count: result.items.length,
-          events: result.items.map((item) => ({
-            id: item.event.id,
-            shortId: `#${item.event.shortId}`,
-            title: item.event.title,
-            type: item.type ? { id: item.type.id, name: item.type.name } : null,
-            stage: { key: item.stage.key, name: item.stage.name, index: item.stage.index },
-            visibility: item.stage.visibility,
-            closed: item.event.closedAt !== null,
-            ...(item.event.closedAt ? { closedAt: item.event.closedAt } : {}),
-            memberTotal: item.memberTotal,
-            docsPreview: item.members.map((m) => ({ group: m.group, name: m.name })),
-            ...(item.memberTotal > item.members.length
-              ? { docsPreviewNote: `仅显示前 ${item.members.length} 篇，共 ${item.memberTotal} 篇` }
-              : {}),
-          })),
+          events: result.items.map((item) => {
+            const analysis = readAnalysisDocRaw(args.scope, item.event.id);
+            const confirmed = analysis.confirmed;
+            return {
+              id: item.event.id,
+              shortId: `#${item.event.shortId}`,
+              title: item.event.title,
+              ...(item.event.description ? { description: item.event.description } : {}),
+              type: item.type ? { id: item.type.id, name: item.type.name } : null,
+              stage: { key: item.stage.key, name: item.stage.name, index: item.stage.index },
+              visibility: item.stage.visibility,
+              closed: item.event.closedAt !== null,
+              ...(item.event.closedAt ? { closedAt: item.event.closedAt } : {}),
+              memberTotal: item.memberTotal,
+              docsPreview: item.members.map((m) => ({ group: m.group, name: m.name })),
+              ...(item.memberTotal > item.members.length
+                ? { docsPreviewNote: `仅显示前 ${item.members.length} 篇，共 ${item.memberTotal} 篇` }
+                : {}),
+              codeLocationTotal: confirmed.length,
+              codeLocationsPreview: confirmed.slice(0, locLimit).map((c) => ({
+                file: c.file,
+                line: c.line,
+                ...(c.endLine !== undefined ? { endLine: c.endLine } : {}),
+                why: c.why.length > 160 ? `${c.why.slice(0, 160)}…` : c.why,
+                commit: c.commit,
+              })),
+            };
+          }),
           hint: '绑定文档用 ki_sync_relation 的 event 参数（传 id 或 #shortId）；绑定已收口事件会被拒绝',
         };
 
