@@ -74,9 +74,11 @@ test('切 scope（事件页还要换事件）时收起抽屉，避免串库', ()
     /useEffect\(\(\) => \{ setDocTarget\(null\); \}, \[scope, activeId\]\);/,
     '事件页：scope 或选中事件变化即收起抽屉',
   );
+  // 2026-11-16 起该 effect 顺带把页码归 1（REQ-20261116-001），故允许 setDocTarget 后跟其他动作；
+  // 契约不变：必须是「依赖 [scope]、且以 setDocTarget(null) 开头」的那个 effect。
   assert.match(
     lifecycle,
-    /useEffect\(\(\) => \{ setDocTarget\(null\); \}, \[scope\]\);/,
+    /useEffect\(\(\) => \{ setDocTarget\(null\);[\s\S]{0,80}?\}, \[scope\]\);/,
     '分类页：scope 变化即收起抽屉',
   );
 });

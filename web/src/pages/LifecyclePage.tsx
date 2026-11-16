@@ -8,8 +8,9 @@
  * 不用 `/api/doc/list` —— 那个接口不含分类，逐篇再查会变成 N+1。
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import '@/styles/governance.css';
+import { pageNumbers } from '@/lib/pager';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
@@ -21,6 +22,14 @@ import {
 } from '@/api/governanceApi';
 
 type Filter = 'all' | LifecycleKind;
+
+/**
+ * 客户端分页（2026-11-16 用户确认）：默认 20，可选 20 / 50 / 100。
+ * 与数据源页 / 任务页（默认 10）不同：这里是紧凑表格行（约 34px），10 行/页要翻
+ * 15 页才看完一个 144 篇的库；那两页是卡片列表，行高更大，10 行并不显得太空。
+ */
+const PAGE_SIZE_DEFAULT = 20;
+const PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
 
 const KIND_TEXT: Record<LifecycleKind, string> = { wiki: 'wiki', temp: '临时', event: '事件' };
 const BADGE_CLASS: Record<LifecycleKind, string> = {
@@ -69,8 +78,12 @@ export function LifecyclePage(): JSX.Element {
   const [filter, setFilter] = useState<Filter>('all');
   const [sortByRemain, setSortByRemain] = useState(false);
   const [docs, setDocs] = useState<GovernanceDocItem[]>([]);
+  /** 服务端返回的**过滤后全量篇数**：`docs` 一次只取前 200 篇，两者不等即被截断 */
+  const [total, setTotal] = useState(0);
   const [types, setTypes] = useState<EventTypeView[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_DEFAULT);
   const [message, setMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<EditTarget | null>(null);
@@ -85,8 +98,9 @@ export function LifecyclePage(): JSX.Element {
   /**
    * 切 scope 时收起正文抽屉：`ModuleDrawer` 载入正文后不再重取（`if (content !== null) return`），
    * 留着会在新 scope 下继续显示上一个库的正文 —— 静默串库比直接收起更糟。
+   * 页码同样归 1：新库的篇数与本页无关，沿用旧页码可能直接落在空白页。
    */
-  useEffect(() => { setDocTarget(null); }, [scope]);
+  useEffect(() => { setDocTarget(null); setPage(1); }, [scope]);
 
   /**
    * 只读账号（R34 / S-07 §3.4）：**页面可进、数据可看，写入口一律禁用**。
@@ -108,6 +122,7 @@ export function LifecyclePage(): JSX.Element {
         listEventTypes(scope).catch(() => ({ ok: true as const, scope, types: [] })),
       ]);
       setDocs(list.items);
+      setTotal(list.total);
       setTypes(typeList.types);
       setSelected(new Set());
     } catch (err) {
@@ -132,6 +147,35 @@ export function LifecyclePage(): JSX.Element {
       return av - bv;
     });
   }, [docs, filter, sortByRemain]);
+
+  /**
+   * 客户端分页：**筛选 → 排序 → 切页**，三步顺序不可换。
+   *
+   * 为什么不走服务端分页（后端其实已支持 `offset`）：分类筛选、各档计数、按剩余天数
+   * 排序全在前端算，改了服务端分页它们就只覆盖当前页 —— 页头的「事件 3」会和翻页后
+   * 的行对不上。因此 `limit` 仍取 200，用服务端 `total` 兜住「被截断」的提示。
+   */
+  const pageCount = Math.max(1, Math.ceil(visible.length / pageSize));
+  /** 收敛帧：页码越界时先按 `pageCount` 渲染，effect 回写要到下一帧才生效，否则会闪一帧空表 */
+  const currentPage = Math.min(page, pageCount);
+  const pageDocs = visible.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  /** 当前页已选篇数：「全选」作用域是当前页，跨页已选仍留在 `selected` 里 */
+  const pageSelectedCount = pageDocs.filter((d) => selected.has(keyOf(d))).length;
+  const pageAllSelected = pageDocs.length > 0 && pageSelectedCount === pageDocs.length;
+  const pageSomeSelected = pageSelectedCount > 0 && !pageAllSelected;
+  const selectAllRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    // 半选态只能走 DOM 属性（HTML 没有对应 attribute）
+    if (selectAllRef.current) selectAllRef.current.indeterminate = pageSomeSelected;
+  }, [pageSomeSelected]);
+  // 数据变少（改分类 / 换筛选 / 删文档）后把页码收回，避免停在空白页
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+  /** 列表被 200 条上限截断：`total` 是服务端过滤后的全量篇数 */
+  const truncated = total > docs.length;
+  /** 分页栏：0 条整条收起（空态行已说明「没有匹配的文档」）；单页时保留「每页」选择器，否则改不回默认值 */
+  const showPager = visible.length > 0 && (pageCount > 1 || pageSize !== PAGE_SIZE_DEFAULT);
 
   const toggle = (doc: GovernanceDocItem): void => {
     const key = keyOf(doc);
@@ -209,15 +253,31 @@ export function LifecyclePage(): JSX.Element {
         </div>
       </header>
 
+      {/* 筛选 / 搜索 / 排序都会改变结果集大小 ⇒ 一律回第 1 页，否则可能停在超界页 */}
       <div className="gov-toolbar">
         <div className="gov-seg" role="group" aria-label="按分类筛选">
+          {/* 切筛选同时清空已选：筛选是换视角（wiki / 临时 / 事件互斥），留着上一视角的勾选
+              就会变成「已选 N 篇，当前页 0 篇」的闷改入口。搜索同样是改变结果集，已由 load 清空；
+              只改顺序的「排序」不清空。跨页分批挑选（翻页）不受影响 —— 那是同一视角内的操作。 */}
           {([
             ['all', `全部 ${counts.all}`],
             ['event', `事件 ${counts.event}`],
             ['temp', `临时 ${counts.temp}`],
             ['wiki', `wiki ${counts.wiki}`],
           ] as Array<[Filter, string]>).map(([key, label]) => (
-            <button key={key} type="button" aria-pressed={filter === key} onClick={() => setFilter(key)}>
+            <button
+              key={key}
+              type="button"
+              aria-pressed={filter === key}
+              onClick={() => {
+                // 只在**真的换了视角**时清空：重复点当前 tab 不该把辛苦勾好的选择清掉
+                if (filter !== key) {
+                  setFilter(key);
+                  setSelected(new Set());
+                }
+                setPage(1);
+              }}
+            >
               {label}
             </button>
           ))}
@@ -228,16 +288,27 @@ export function LifecyclePage(): JSX.Element {
           placeholder="搜索文档名 / 路径…"
           style={{ width: 220 }}
           value={keyword}
-          onChange={(e) => setKeyword(e.target.value)}
+          onChange={(e) => { setKeyword(e.target.value); setPage(1); }}
         />
         <span className="gov-toolbar__spacer" />
-        <button className="gov-btn gov-btn--sm" onClick={() => setSortByRemain((v) => !v)}>
+        <button className="gov-btn gov-btn--sm" onClick={() => { setSortByRemain((v) => !v); setPage(1); }}>
           {sortByRemain ? '按最近活跃排序' : '按剩余天数排序'}
         </button>
         <button className="gov-btn gov-btn--sm" onClick={() => void load()}>刷新</button>
       </div>
 
       {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
+      {/*
+       * 截断提示**不能只放分页栏**：分页栏在 0 条时会收起，而「筛出 0 条」恰恰是最需要
+       * 这句话的场景 —— 未加载的那部分可能全是临时 / 事件文档，用户会据此判定「没有」。
+       * 所以独立成条，常驻在结果区上方。
+       */}
+      {truncated ? (
+        <p className="gov-hint">
+          列表仅加载前 <strong>{docs.length}</strong> 篇（全部 {total} 篇）——
+          未加载的部分不参与下面的筛选与搜索，请先用搜索词或 Group 缩小范围再判断分类。
+        </p>
+      ) : null}
       {showReadOnlyHint ? (
         <p className="gov-hint">当前账号为只读：可以查看分类与期限，改分类 / 新建分类入口已禁用。</p>
       ) : null}
@@ -245,6 +316,10 @@ export function LifecyclePage(): JSX.Element {
       {selectedDocs.length > 0 ? (
         <div className="gov-selbar">
           <strong>已选 {selectedDocs.length} 篇</strong>
+          {/* 跨页（或被筛选挡在页外）的已选行此刻看不到 —— 必须显式说明，否则等于「闷改」 */}
+          {selectedDocs.length > pageSelectedCount ? (
+            <span className="gov-cell-muted">其中当前页 {pageSelectedCount} 篇</span>
+          ) : null}
           <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('wiki')}>改为 wiki</button>
           <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('temp', 7)}>改为临时 7 天</button>
           <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('temp', 30)}>改为临时 30 天</button>
@@ -269,8 +344,23 @@ export function LifecyclePage(): JSX.Element {
           </colgroup>
           <thead>
             <tr>
-              <th><input type="checkbox" aria-label="全选" checked={visible.length > 0 && selectedDocs.length === visible.length}
-                onChange={(e) => setSelected(e.target.checked ? new Set(visible.map(keyOf)) : new Set())} /></th>
+              <th>
+                {/* 全选只作用于**当前页**（表格惯例）：跨页已选不受影响，总数由上方批量条统一显示 */}
+                <input
+                  ref={selectAllRef}
+                  type="checkbox"
+                  aria-label={`全选当前页（${pageDocs.length} 篇）`}
+                  checked={pageAllSelected}
+                  onChange={(e) => setSelected((prev) => {
+                    const next = new Set(prev);
+                    for (const doc of pageDocs) {
+                      if (e.target.checked) next.add(keyOf(doc));
+                      else next.delete(keyOf(doc));
+                    }
+                    return next;
+                  })}
+                />
+              </th>
               <th>文档名</th>
               <th>Group</th>
               <th>分类</th>
@@ -280,7 +370,7 @@ export function LifecyclePage(): JSX.Element {
             </tr>
           </thead>
           <tbody>
-            {visible.map((doc) => (
+            {pageDocs.map((doc) => (
               <tr key={keyOf(doc)}>
                 <td><input type="checkbox" aria-label={`选择 ${doc.name}`} checked={selected.has(keyOf(doc))} onChange={() => toggle(doc)} /></td>
                 <td>
@@ -338,13 +428,67 @@ export function LifecyclePage(): JSX.Element {
             ) : null}
           </tbody>
         </table>
+        {showPager ? (
+          <div className="ki-ds-pager" role="navigation" aria-label="文档分页">
+            <span className="ki-ds-pager__info" aria-live="polite">
+              第 {currentPage} / {pageCount} 页 · 共 {visible.length} 篇
+            </span>
+            <label className="ki-ds-pager__size">
+              每页
+              <select
+                value={pageSize}
+                aria-label="每页条数"
+                onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+              >
+                {PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size}</option>)}
+              </select>
+              条
+            </label>
+            <button
+              type="button"
+              className="gov-btn gov-btn--sm"
+              disabled={currentPage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              上一页
+            </button>
+            {pageNumbers(currentPage, pageCount).map((item, index) => (item === '…'
+              ? <span key={`gap-${index}`} className="ki-ds-pager__gap">…</span>
+              : (
+                <button
+                  type="button"
+                  key={item}
+                  className="ki-ds-pager__page"
+                  aria-current={item === currentPage ? 'page' : undefined}
+                  onClick={() => setPage(item)}
+                >
+                  {item}
+                </button>
+              )))}
+            <button
+              type="button"
+              className="gov-btn gov-btn--sm"
+              disabled={currentPage >= pageCount}
+              onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+            >
+              下一页
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div className="gov-notice">
         分类决定「什么时候消失」：<strong>wiki</strong> 永不删、<strong>临时</strong> 到期 → 回收站（剩 ≤3 天转红）、
         <strong>事件</strong> 由事件阶段决定去留。缺省是 wiki —— 判错两个方向代价不对称：
         临时标成 wiki 只是脏一点，wiki 标成临时会把有用知识删掉。
-        当前 scope 共 <strong>{counts.all}</strong> 篇（临时 {counts.temp} / 事件 {counts.event} / wiki {counts.wiki}）。
+        {/* 计数口径随截断切换：否则页面写「共 200 篇」而侧栏 badge 写 350，用户只会觉得数字在飘。
+            指引文案不在这里重复 —— 上方截断提示条已经说过怎么缩小范围。 */}
+        {truncated ? (
+          <>当前 scope 已加载 <strong>{counts.all}</strong> 篇（全部 {total} 篇）</>
+        ) : (
+          <>当前 scope 共 <strong>{counts.all}</strong> 篇</>
+        )}
+        （临时 {counts.temp} / 事件 {counts.event} / wiki {counts.wiki}）。
       </div>
 
       {editing ? (

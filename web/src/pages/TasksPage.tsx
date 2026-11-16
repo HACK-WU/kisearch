@@ -28,23 +28,12 @@ import { SCOPE_READONLY_BLOCKED_HINT, scopeReadonlyUnlockHint } from '@/lib/scop
 import { DetailDrawer, DetailSection, type DetailStatusTone } from '@/components/DetailDrawer';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { Notice } from '@/components/Notice';
+import { pageNumbers } from '@/lib/pager';
 
 /** 客户端分页（与数据源页同口径：默认 10，可选 50 / 100） */
 const PAGE_SIZE_DEFAULT = 10;
 /** 每页条数可选项（单页时也保留选择器，才改得回 10；0 条时整条收起） */
 const PAGE_SIZE_OPTIONS = [10, 50, 100] as const;
-/** 页码按钮：单页 1 个；>7 页时中段折叠成 …，保证分页条不换行 */
-function pageNumbers(page: number, pageCount: number): Array<number | '…'> {
-  const items: Array<number | '…'> = [];
-  for (let i = 1; i <= pageCount; i += 1) {
-    if (pageCount > 7 && i > 2 && i < pageCount - 1 && Math.abs(i - page) > 1) {
-      if (items[items.length - 1] !== '…') items.push('…');
-      continue;
-    }
-    items.push(i);
-  }
-  return items;
-}
 
 /**
  * 阶段中文映射 / 索引就绪文案 / 状态与操作文案 / 列表行摘要统一收敛到 `lib/taskDetailModel.ts`
