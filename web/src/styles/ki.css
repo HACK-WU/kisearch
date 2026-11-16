@@ -9129,6 +9129,11 @@ select.ki-chat-cfg__ta--select {
 .ki-ask-groups { display: flex; flex-direction: column; }
 /* 与人工会话区之间留一条分隔线（人工分组的最后一行没有 border，这里补一条） */
 .ki-ask-groups__one:first-child .ki-ask-grp { border-top: 1px solid var(--ki-color-border); }
+/* 组与组之间（本地连接 ↔ 各 Token）同样分隔，否则多 Token 时糊成一片 */
+.ki-ask-groups__one + .ki-ask-groups__one .ki-ask-grp {
+  border-top: 1px solid var(--ki-color-border);
+  margin-top: var(--ki-space-1);
+}
 
 /* ── 分组头：可折叠 <button>（人工分组标题是 <p>，那里不需要折叠） ── */
 .ki-ask-grp {
@@ -9212,3 +9217,76 @@ select.ki-chat-cfg__ta--select {
   color: var(--ki-color-text-subtle);
 }
 .ki-chat-convpop__group.ki-ask-more:hover { color: var(--ki-color-primary); }
+
+/* ════════════════════════════════════════════════════════════════
+   agent 问答只读详情（REQ-20261116-003 · B0.5）
+   ────────────────────────────────────────────────────────────────
+   结构：来源条 → 逐轮消息（含提问背景）→ 只读底栏（替代 composer）。
+   消息本体复用 .ki-chat-msg / .ki-chat-srcs 既有样式，这里只补三块新东西。
+   ════════════════════════════════════════════════════════════════ */
+.ki-ask-detail { display: flex; flex-direction: column; gap: var(--ki-space-5); }
+
+/* ── 来源条：谁代问的 + scope + 只读 ── */
+.ki-ask-detail__from {
+  display: flex; align-items: center; gap: var(--ki-space-2); flex-wrap: wrap;
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle);
+}
+.ki-ask-detail__chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--ki-color-border-strong);
+  color: var(--ki-color-text-muted); background: var(--ki-color-surface);
+}
+.ki-ask-detail__chip svg { width: 11px; height: 11px; }
+.ki-ask-detail__chip--local {
+  color: var(--ki-color-primary);
+  border-color: color-mix(in srgb, var(--ki-color-primary) 35%, transparent);
+}
+.ki-ask-detail__chip--token {
+  color: var(--ki-color-info);
+  border-color: color-mix(in srgb, var(--ki-color-info) 35%, transparent);
+}
+.ki-ask-detail__ro {
+  padding: 1px 7px; border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-surface-muted); color: var(--ki-color-text-subtle);
+}
+
+/* ── 提问背景（ki_ask 的 background 入参）：引用样式，贴在问题气泡内、问题之上 ──
+   ⚠️ `white-space: normal` 不能省：父级 `.ki-chat-msg__body` 是 `pre-wrap`（保留用户输入的换行），
+      不重置会把 JSX 里的缩进当成真实换行，把背景块撑成一大片空白。 */
+.ki-ask-bg {
+  white-space: normal;
+  margin: 0 0 7px; padding: 1px 0 1px 9px;
+  border-left: 2px solid color-mix(in srgb, var(--ki-color-primary) 45%, transparent);
+  font-size: var(--ki-font-size-xs); line-height: 1.6;
+  color: var(--ki-color-text-muted);
+  max-height: 200px; overflow-y: auto;
+}
+.ki-ask-bg__label {
+  display: flex; align-items: center; gap: 4px; margin-bottom: 2px;
+  font-size: 10.5px; letter-spacing: .3px; color: var(--ki-color-text-subtle);
+  white-space: nowrap;
+}
+.ki-ask-bg__label svg { width: 11px; height: 11px; flex: 0 0 auto; }
+.ki-ask-bg__text { white-space: pre-wrap; }
+
+/* ── 只读底栏：替代 composer ── */
+.ki-ask-ro {
+  display: flex; align-items: center; gap: var(--ki-space-3);
+  padding: var(--ki-space-3) var(--ki-space-4);
+  border: 1px solid var(--ki-color-border-strong); border-radius: 8px;
+  background: var(--ki-color-bg-muted);
+}
+.ki-ask-ro__ic { flex: 0 0 auto; color: var(--ki-color-text-subtle); display: grid; place-items: center; }
+.ki-ask-ro__ic svg { width: 16px; height: 16px; }
+.ki-ask-ro__main { flex: 1; min-width: 0; }
+.ki-ask-ro__t { font-size: var(--ki-font-size-sm); color: var(--ki-color-text); }
+.ki-ask-ro__d { margin-top: 2px; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+/* ── agent 问答详情失败态（REQ-20261116-003 · S-03 §4）──
+   三个码（404 / 410 / 422）各自有可读文案；必须有「返回会话列表」的出路 ——
+   fail-loud 不配给出路就等于把用户困在死胡同。 */
+.ki-ask-fail { display: flex; flex-direction: column; gap: 6px; padding: var(--ki-space-6) 0; }
+.ki-ask-fail__t { font-size: var(--ki-font-size-lg); color: var(--ki-color-text); }
+.ki-ask-fail__d { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+.ki-ask-fail__acts { margin-top: var(--ki-space-2); }

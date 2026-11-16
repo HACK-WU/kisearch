@@ -41,3 +41,22 @@ export function sourceRefTitle(ref: SourceRef): string {
   // 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略，退化成 `doc · 行号`
   return [ref.doc, groupPathSegment(ref.group), formatLineRange(ref)].filter(Boolean).join(' · ');
 }
+
+/**
+ * `updatedAt` → 紧凑时间：今天显示 HH:MM，昨天显示「昨天 HH:MM」，本年显示 M-D，跨年补年份。
+ *
+ * 2026-11-16 从 `ConversationList.tsx` 提出来：agent 问答分组（`AgentAskGroups`）
+ * 要用同一套时间口径，否则两个分组的"几分钟前"看起来会不一致。
+ */
+export function formatConvTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return hm;
+  const yesterday = new Date(now.getTime() - 86_400_000);
+  if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hm}`;
+  const md = `${d.getMonth() + 1}-${d.getDate()}`;
+  return d.getFullYear() === now.getFullYear() ? md : `${d.getFullYear()}-${md}`;
+}

@@ -231,10 +231,23 @@ export interface LlmConfig {
    */
   askMaxRounds?: number;
   /**
-   * 短会话**滑动** TTL（毫秒，60000~3600000，缺省 600000 = 10 分钟）—— 二期 S-03。
-   * 以最后一次交互起算，不是创建时间；超时后短会话文件被 GC 删除。
+   * 短会话**续接** TTL（毫秒，60000~3600000，缺省 600000 = 10 分钟）—— 二期 S-03。
+   *
+   * 以最后一次交互起算，只决定 `context_id` 还能不能续接。
+   * ⚠️ REQ-20261116-003 起它**不再删文件**：文件何时消失由 `askSessionRetainDays` 决定。
    */
   askSessionTtlMs?: number;
+  /**
+   * 短会话**保留天数**（1~365，缺省 7）—— REQ-20261116-003 · S-01。
+   *
+   * 按 `createdAt` 起算（不滑动），到期后 GC 删文件。页面「AI 对话」左栏的
+   * agent 问答分组只能回看这段时间内的记录。
+   */
+  askSessionRetainDays?: number;
+  /**
+   * 事件「AI 分析」单 scope 每日触发上限（1~1000，缺省 50）—— REQ-20261113-003 · S-04。
+   */
+  analysisDailyLimit?: number;
 }
 
 /** 会话存储目录默认值（S02 §3.1：独立于 kb/ 与 vectorDir，见 D4） */
@@ -664,6 +677,10 @@ function parseAndExpand(configFile: string): KiConfig {
       askMaxRounds: rl.askMaxRounds !== undefined ? Number(rl.askMaxRounds) : undefined,
       // REQ-20261113-001 二期：短会话滑动 TTL（同上，**必须**加在这段白名单拷贝里）
       askSessionTtlMs: rl.askSessionTtlMs !== undefined ? Number(rl.askSessionTtlMs) : undefined,
+      // REQ-20261116-003 S-01：短会话保留天数（同上白名单；漏了会"配置写了不生效"）
+      askSessionRetainDays: rl.askSessionRetainDays !== undefined ? Number(rl.askSessionRetainDays) : undefined,
+      // REQ-20261113-003 S-04：AI 分析单 scope 每日限流上限（1~1000；缺省 50）
+      analysisDailyLimit: rl.analysisDailyLimit !== undefined ? Number(rl.analysisDailyLimit) : undefined,
     };
   }
 

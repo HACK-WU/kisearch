@@ -33,6 +33,7 @@ import {
 } from '../llm-client.js';
 import { runToolLoop } from '../retrieval/tool-loop.js';
 import type { ConversationFile, SourceRef } from '../chat-contract.js';
+import type { AskOrigin } from './ask-contract.js';
 import {
   ASK_CONTEXT_MAX_CHARS,
   ASK_CONTEXT_MAX_MESSAGES,
@@ -172,13 +173,25 @@ type SessionResolution =
  *
  * 不传 `contextId` ⇒ 新建一个空会话（并把 id 返回给调用方，供下次追问）。
  */
+/**
+ * 来源标识（REQ-20261116-003 · S-01）。
+ *
+ * 优先用工具面下传的 `origin`（那里能查 Token 名称）；缺省按 `ownerKey` 推导 ——
+ * 单测与回环直连走这条，`ownerKey` 为 `'local'` 时不给 token 字段。
+ */
+function resolveOrigin(input: AskInput, ownerKey: string): AskOrigin {
+  if (input.origin) return input.origin;
+  if (ownerKey === 'local') return { kind: 'local' };
+  return { kind: 'token', tokenId: ownerKey };
+}
+
 async function resolveAskSession(
   input: AskInput,
   ownerKey: string,
   ttlMs: number,
 ): Promise<SessionResolution> {
   if (input.contextId === undefined || input.contextId.length === 0) {
-    const created = await createAskSession(input.scope, ownerKey);
+    const created = await createAskSession(input.scope, ownerKey, resolveOrigin(input, ownerKey));
     return { ok: true, session: created, history: [], resumed: false };
   }
 
@@ -241,6 +254,23 @@ async function resolveAskSession(
   return { ok: true, session: existing, history: existing.messages, resumed: true };
 }
 
+/**
+ * **模型回放**投影：把短会话历史压成上游 `messages` 需要的三个字段。
+ *
+ * ★ REQ-20261116-003 起短会话多存了 `background` 与 `sources`（服务页面回看），
+ *   但**它们绝不能进上下文**：背景最多 2000 字符/轮，逐轮重复会直接撞穿
+ *   `ASK_CONTEXT_MAX_CHARS`（60K），也违反"背景只对本轮生效"的既有语义。
+ *
+ * ⚠️ 禁止改写成 `history.map((m) => ({ ...m }))` —— 展开会把展示物一并带上，
+ *   而这条约束没有任何运行时提示，只有 `test/ask-replay-excludes-background.test.ts` 守着。
+ * 导出仅为测试可直接断言，业务侧请走 `buildMemoryConv`。
+ */
+export function replayMessagesForModel(
+  history: readonly AskSessionMessage[],
+): Array<{ role: 'user' | 'assistant'; content: string; at: string }> {
+  return history.map((m) => ({ role: m.role, content: m.content, at: m.at }));
+}
+
 /** 内存会话骨架：**13 个必填字段**（`chat-contract.ts` 的 `ConversationFile`），可选字段一律不设 */
 function buildMemoryConv(scope: string, history: readonly AskSessionMessage[]): ConversationFile {
   const now = new Date().toISOString();
@@ -257,13 +287,11 @@ function buildMemoryConv(scope: string, history: readonly AskSessionMessage[]): 
     seq: 0,
     messageCount: history.length,
     lastMessagePreview: history.length > 0 ? history[history.length - 1]!.content.slice(0, 40) : '',
-    // 回放只取 role + content（S-03 §3.2 决策）：reasoning / sources 是展示物，
-    // 回放会放大上下文且违反 N12
-    messages: history.map((m, index) => ({
+    // 回放只取 role / content / at（S-03 §3.2 决策 + REQ-20261116-003）：
+    // background / sources 是展示物，回放会放大上下文且违反 N12
+    messages: replayMessagesForModel(history).map((m, index) => ({
       id: `m${index + 1}`,
-      role: m.role,
-      content: m.content,
-      at: m.at,
+      ...m,
     })),
   };
 }
@@ -462,9 +490,21 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
   //   **只写成功的问答**：中止/失败的答案不写 —— 残缺答案留在上下文里会污染下一轮
   if (answer.length > 0) {
     const at = new Date().toISOString();
+    // ★ background / sources 落盘**只服务页面回放**（REQ-20261116-003 S-01）：
+    //   模型回放走 `buildMemoryConv`，那里仍只取 role + content，两者绝不进上下文。
     const updated = await appendAskTurn(input.scope, contextId, [
-      { role: 'user', content: input.question, at },
-      { role: 'assistant', content: answer, at },
+      {
+        role: 'user',
+        content: input.question,
+        at,
+        ...(input.background && input.background.trim() ? { background: input.background } : {}),
+      },
+      {
+        role: 'assistant',
+        content: answer,
+        at,
+        ...(sources.length > 0 ? { sources } : {}),
+      },
     ]);
     // null = 文件已被 GC 删掉或写失败 ⇒ 本次答案照给，调用方下次续接会拿到 NOT_FOUND
     if (updated !== null) expiresAt = askSessionExpiresAt(updated, ttlMs);

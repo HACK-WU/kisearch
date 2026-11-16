@@ -41,12 +41,15 @@ import {
   compactConversation,
   createConversation,
   deleteConversation,
+  getAgentAsk,
   getChatConfig,
   getConversation,
+  listAgentAsks,
   getPromptConfig,
   listConversations,
   patchConversation,
   undoCompactConversation,
+  ChatApiError,
 } from '@/api/chatApi';
 import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ChatToolArgsDisplay, type ContextCharsParts, type ConversationSummary, type PromptSkill, type SourceRef } from '@/api/chatContract';
 import { ComposerMirror } from './ComposerMirror';
@@ -97,8 +100,22 @@ import { buildTimeline, mergeInterleaveItems, layoutAnswerFlow, type TimelineNod
 import { SourcesList } from './SourcesList';
 import { clearStreamError, getStreamError, skillStep, toolEndStep, toolStartStep, useChatStream } from './useChatStream';
 import { ConversationList } from './ConversationList';
+import { AgentAskGroups } from './AgentAskGroups';
+import { AgentAskDetail } from './AgentAskDetail';
+import type { AgentAskDetail as AgentAskDetailData, AgentAskGroup } from '@/api/chatContract';
 import { aiSettingsHref } from '@/lib/aiSettingsUrl';
 import { onChatConfigSaved } from '@/lib/chatConfigEvents';
+
+/**
+ * agent 问答详情的失败文案（REQ-20261116-003 · S-03 §4）。
+ * 三个码分别对应"记录没了 / 过期了 / 文件坏了"，用户能据此决定是重开问答还是放弃。
+ */
+function agentAskFailText(code?: string): string {
+  if (code === 'AGENT_ASK_PAST_RETENTION') return '该问答已超过保留期';
+  if (code === 'AGENT_ASK_CORRUPTED') return '该问答文件已损坏';
+  if (code === 'AGENT_ASK_NOT_FOUND') return '该问答已不存在';
+  return '无法打开该问答';
+}
 
 export interface ChatPanelProps {
   store: ChatStore;
@@ -152,7 +169,9 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const scope = useScopeValue();
   const stream = useChatStream(store);
   // ── 会话深链（page 专属，URL 契约见 REQ-20261008-001 design/ui-design.md §2.4）──
-  const { convId: urlConvId } = useParams<{ convId?: string }>();
+  // agent 问答详情走独立路由 `/chat/ask/:askId`（不复用 `/chat/:convId`：
+  // 后者会触发 `GET /conversations/:id` 的 404 噪声与"会话已删除"兜底）
+  const { convId: urlConvId, askId: urlAskId } = useParams<{ convId?: string; askId?: string }>();
   const navigate = useNavigate();
 
   // ── 订阅常驻 store（订阅式而非快照：流式推进需要组件重渲染）──
@@ -912,10 +931,89 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   //   每次切换都 push 会让后退键变成"逐条回放任一会话"。
   useEffect(() => {
     if (!isPage) return;
+    // agent 问答详情有独立 URL 语义：此时地址栏由 `urlAskId` 决定，
+    // 若仍按 activeConvId 回写，会把用户刚打开的详情冲掉
+    if (urlAskId) return;
     const active = state.activeConvId;
     if (active === (urlConvId ?? null)) return;
     navigate(active ? `/chat/${active}` : '/chat', { replace: true });
-  }, [isPage, state.activeConvId, urlConvId, navigate]);
+  }, [isPage, state.activeConvId, urlConvId, urlAskId, navigate]);
+
+  // ── agent 问答分组：打开对话页 / 切 scope 时拉取（REQ-20261116-003 · S-02）──
+  // 与主会话列表**并行**：agent 区失败不阻塞人工会话（fail-loud 但局部化）
+  const refreshAgentAsks = useCallback(async (): Promise<void> => {
+    // 用 `scopeRef` 而不是闭包里的 `scope`：切 scope 后旧请求仍在飞行，
+    // 迟到的旧 scope 响应会把分组覆盖到新 scope 上（与主列表同一竞态，见 scopeRef 注释）
+    const reqScope = scopeRef.current;
+    setAgentLoading(true);
+    setAgentError(null);
+    try {
+      const res = await listAgentAsks(reqScope);
+      if (scopeRef.current !== reqScope) return;
+      setAgentGroups(res.groups);
+    } catch (err) {
+      if (scopeRef.current !== reqScope) return;
+      setAgentError(err instanceof Error ? err.message : 'Agent 问答加载失败');
+    } finally {
+      if (scopeRef.current === reqScope) setAgentLoading(false);
+    }
+  }, []);
+
+  /**
+   * 「还有 N 条…」：只把该组扩到 50 条并就地替换，不重拉其他组。
+   * 失败静默（用户再点一次即可），因为局部失败不该把整块分区打成错误态。
+   */
+  const loadMoreAgentGroup = useCallback(async (groupId: string, cursor: string): Promise<void> => {
+    const reqScope = scopeRef.current;
+    try {
+      const res = await listAgentAsks(reqScope, { group: groupId, limit: 50, cursor });
+      if (scopeRef.current !== reqScope) return;
+      const next = res.groups.find((g) => g.id === groupId);
+      if (!next) return;
+      // 追加而不是替换：`count` 用后端返回的组内总数，游标与 hasMore 用新一页的
+      setAgentGroups((prev) => prev.map((g) => (g.id === groupId
+        ? { ...next, items: [...g.items, ...next.items] }
+        : g)));
+    } catch (err) {
+      // 局部失败：不打成整块错误态（其他组还能用），但必须可观测 —— 静默的"点了没反应"最差
+      console.warn('[agent-asks] 加载更多失败：', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isPage) return;
+    // ★ 不挂 `readyScope` 守卫：它由"主会话列表已就绪"驱动，scope 切换后的闭包时序会让
+    //   条件长期不成立（实测：只发出首帧那次 `default` 查询）。重复作用域的那次空请求由
+    //   `scopeRef` 竞态保护兜住，代价是一次可忽略的空查询。
+    void refreshAgentAsks();
+  }, [isPage, scope, refreshAgentAsks]);
+
+  // ── agent 问答详情：URL → state（REQ-20261116-003 · S-03）──
+  // `cancelled` 防竞态：快速连点不同条目时，先返回的旧请求不得覆盖新的
+  useEffect(() => {
+    if (!isPage) return;
+    if (!urlAskId) {
+      setAgentAsk(null);
+      setAgentAskId(null);
+      setAgentAskError(null);
+      return;
+    }
+    setAgentAskId(urlAskId);
+    setAgentAsk(null);
+    setAgentAskError(null);
+    let cancelled = false;
+    void getAgentAsk(scope, urlAskId)
+      .then((detail) => { if (!cancelled) setAgentAsk(detail); })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const code = err instanceof ChatApiError ? err.code : undefined;
+        setAgentAskError({
+          ...(code ? { code } : {}),
+          message: err instanceof Error ? err.message : '加载失败',
+        });
+      });
+    return () => { cancelled = true; };
+  }, [isPage, urlAskId, scope]);
 
   // URL → store：用户改地址栏 / 前进后退 / 外部深链进入。
   // 列表未就绪（readyScope !== scope）时跳过——初始 effect 已按"当时的 URL"做选中，避免双重打开。
@@ -979,6 +1077,21 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
    */
   const [contentWidth, setContentWidth] = useState<ChatContentWidth>(() => readChatContentWidth());
   const [sideCollapsed, setSideCollapsed] = useState<boolean>(() => readChatpageSideCollapsed());
+
+  /**
+   * agent 问答来源分组（REQ-20261116-003 · B0）。
+   *
+   * · 数据来自 `GET /api/chat/agent-asks`（REQ-20261116-003 · S-02），与主会话列表**并行**加载；
+   * · `sideKeyword` 与人工会话共用同一个搜索词（由 `ConversationList` 的搜索框回传）。
+   */
+  const [agentGroups, setAgentGroups] = useState<AgentAskGroup[]>([]);
+  const [agentLoading, setAgentLoading] = useState(false);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [agentAskId, setAgentAskId] = useState<string | null>(null);
+  /** 当前打开的 agent 问答详情 */
+  const [agentAsk, setAgentAsk] = useState<AgentAskDetailData | null>(null);
+  const [agentAskError, setAgentAskError] = useState<{ code?: string; message: string } | null>(null);
+  const [sideKeyword, setSideKeyword] = useState('');
 
   const chooseContentWidth = useCallback((next: ChatContentWidth): void => {
     setContentWidth(next);
@@ -1640,39 +1753,39 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     </header>
   );
 
+  /**
+   * 切换会话列表按钮（REQ-20261116-003 · D3）。
+   *
+   * 2026-11-16 从上下文条**最左**移到「居中 / 铺满」右侧：
+   * · 宽屏：折叠 / 展开左栏，图标随折叠态在 `«` / `»` 间翻转；
+   * · 窄屏：`«` 语义不成立（左栏是抽屉），改汉堡图标 + 「打开会话列表」。
+   */
+  const convBtnNode = isPage ? (
+    <button
+      type="button"
+      className="ki-chat-iconbtn ki-chatpage__convbtn"
+      title={sideToggleLabel}
+      aria-label={sideToggleLabel}
+      aria-expanded={isWideSide ? !sideCollapsed : sideOpen}
+      onClick={handleSideToggle}
+    >
+      {isWideSide ? (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          {sideCollapsed
+            ? <><path d="m6 17 5-5-5-5" /><path d="m13 17 5-5-5-5" /></>
+            : <><path d="m11 17-5-5 5-5" /><path d="m18 17-5-5 5-5" /></>}
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" /></svg>
+      )}
+    </button>
+  ) : null;
+
   /* ── 主列：上下文条 + 横幅 + 消息流 + 输入区（dock / page 共用；page 在 ctx 注入抽屉钮与配置入口） ── */
   const mainColumn = (
     <>
       {/* ── 上下文条：模型 / 状态（取代原先只读地挂在标题右侧的模型名）── */}
       <div className="ki-chat-ctx">
-        {isPage ? (
-          <button
-            type="button"
-            className="ki-chat-iconbtn ki-chatpage__convbtn"
-            title={sideToggleLabel}
-            aria-label={sideToggleLabel}
-            aria-expanded={isWideSide ? !sideCollapsed : sideOpen}
-            onClick={handleSideToggle}
-          >
-            {/* 图标随视口语义切换：宽屏用「面板边界 + 方向箭头」（箭头随折叠态翻转，表达
-                「收起 / 展开左栏」），不用容易被读成「打开菜单」的汉堡三条线；窄屏保留汉堡 ——
-                那里它确实是「打开会话列表」抽屉的通用语义。
-                （用户 2026-10-16 反馈：原来的线条图标「一般人看了不知道点了可以折叠」） */}
-            {isWideSide ? (
-              /* 双 chevron（Lucide `chevrons-left` / `chevrons-right` 原坐标，24×24 由 CSS 缩到 16px）。
-                 用户拍板口径（2026-10-16）：形状就用这个方向双箭头，不用"面板外框"那类复合图形
-                 —— 15px 下笔画一多就糊成一团（前两版 `|‹` / `panel-left` 均被判「丑」）。
-                 展开态指左 `«`（点了收起左栏）；折叠态指右 `»`（点了展开）。颜色见 ki.css：主色。 */
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                {sideCollapsed
-                  ? <><path d="m6 17 5-5-5-5" /><path d="m13 17 5-5-5-5" /></>
-                  : <><path d="m11 17-5-5 5-5" /><path d="m18 17-5-5 5-5" /></>}
-              </svg>
-            ) : (
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" /></svg>
-            )}
-          </button>
-        ) : null}
         <span className="ki-chat-ctx__model">{config?.model ?? '未配置模型'}</span>
         <span className={`ki-chat-ctx__status${state.streaming.active ? ' ki-chat-ctx__status--live' : ''}${!config || !config.enabled ? ' ki-chat-ctx__status--off' : config.ackRequired ? ' ki-chat-ctx__status--warn' : ''}`}>
           <span className={`ki-chat-ctx__dot${!config || !config.enabled ? ' ki-chat-ctx__dot--off' : config.ackRequired ? ' ki-chat-ctx__dot--warn' : ''}`} />
@@ -1707,6 +1820,10 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                 铺满
               </button>
             </div>
+            {/* 切换会话列表（REQ-20261116-003 · D3）：从上下文条**最左**移到「居中 / 铺满」右侧 ——
+                用户指出原位置离它控制的左栏太远、且与「配置」这类全局入口混在一起。
+                宽屏 = 折叠左栏；窄屏 = 汉堡开抽屉（图标与 aria-label 随视口切换）。 */}
+            {convBtnNode}
             <button
               type="button"
               className="ki-chat-cfg__entry"
@@ -1740,6 +1857,48 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           </div>
         ) : null}
 
+        {agentAskId ? (
+          /* ── agent 问答详情（REQ-20261116-003）：只读，无 composer / 无操作条 ── */
+          <>
+            <div className="ki-chat-panel__body">
+              <div className="ki-chat-panel__content">
+                {agentAsk ? (
+                  <AgentAskDetail detail={agentAsk} onOpenSource={handleOpenSource} />
+                ) : agentAskError ? (
+                  <div className="ki-ask-fail" role="alert">
+                    <p className="ki-ask-fail__t">{agentAskFailText(agentAskError.code)}</p>
+                    <p className="ki-ask-fail__d">{agentAskError.message}</p>
+                    <div className="ki-ask-fail__acts">
+                      <button
+                        type="button"
+                        className="ki-chat-btn"
+                        onClick={() => navigate('/chat', { replace: true })}
+                      >返回会话列表</button>
+                    </div>
+                  </div>
+                ) : (
+                  /* 加载中：形状与真实消息一致（不用转圈） */
+                  <div className="ki-chat-convpop__skel"><i /><i /><i /></div>
+                )}
+              </div>
+            </div>
+            <div className="ki-chat-panel__foot">
+              {agentAsk ? (<div className="ki-ask-ro">
+                <span className="ki-ask-ro__ic" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+                    <rect x="3.2" y="7" width="9.6" height="6.4" rx="1.4" />
+                    <path d="M5.6 7V5.2a2.4 2.4 0 0 1 4.8 0V7" />
+                  </svg>
+                </span>
+                <div className="ki-ask-ro__main">
+                  <p className="ki-ask-ro__t">该问答由 {agentAsk.origin.label} 通过 MCP 调用产生，仅供回看</p>
+                  <p className="ki-ask-ro__d">要继续追问，请在 MCP 客户端重开一轮问答。</p>
+                </div>
+              </div>) : null}
+            </div>
+          </>
+        ) : (
+        <>
         {/* ── 消息流 ── */}
         <div
           className="ki-chat-panel__body"
@@ -2329,6 +2488,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
 
           </div>
       </footer>
+        </>
+        )}
     </>
   );
 
@@ -2338,16 +2499,46 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
       variant="inline"
       open
       items={allConvs}
-      activeId={state.activeConvId}
+      /* 打开 agent 详情时人工会话不再高亮，避免"两处同时选中" */
+      activeId={agentAskId ? null : state.activeConvId}
       loading={convLoading}
       error={convError}
       onClose={() => undefined}
-      onSelect={(id) => { handleSelectConversation(id); setSideOpen(false); }}
+      onSelect={(id) => {
+        setAgentAskId(null);
+        setAgentAsk(null);
+        // ★ 必须显式回写 URL：store→URL 的 effect 在 ask 路由下被 `urlAskId` 守卫跳过，
+        //   否则点人工会话后地址栏仍停在 `/chat/ask/…`，刷新会回到那条只读详情
+        navigate(`/chat/${id}`, { replace: true });
+        handleSelectConversation(id);
+        setSideOpen(false);
+      }}
       onCreate={() => { handleCreateConversation(); setSideOpen(false); }}
       onRefresh={() => void refreshConversations()}
       onRename={handleRename}
       onArchive={handleArchive}
       onDelete={handleDelete}
+      /* ── agent 问答来源分组（REQ-20261116-003）：挂在列表体末尾，
+            与人工会话共用顶部搜索框（同一个 keyword）与同一个滚动容器 ── */
+      hasExtra={agentGroups.length > 0}
+      onKeywordChange={setSideKeyword}
+      bodyExtra={(
+        <AgentAskGroups
+          groups={agentGroups}
+          keyword={sideKeyword}
+          activeId={agentAskId}
+          loading={agentLoading}
+          error={agentError}
+          onRetry={() => void refreshAgentAsks()}
+          onShowMore={(groupId, cursor) => void loadMoreAgentGroup(groupId, cursor)}
+          onSelect={(id) => {
+            setAgentAskId(id);
+            setSideOpen(false);
+            // replace：详情切换是"状态定位"而非页面跳转，与主会话深链同一口径
+            navigate(`/chat/ask/${id}`, { replace: true });
+          }}
+        />
+      )}
     />
   );
 

@@ -119,6 +119,29 @@ function askSessionTtlRange(value: unknown, path: string, add: AddFn): void {
   }
 }
 
+/**
+ * `llm.askSessionRetainDays` 校验：短会话列表态保留天数（1~365）。
+ *
+ * 与上面的 TTL 是两个独立概念（REQ-20261116-003 S-01）：TTL 管 `context_id` 续接，
+ * 本项管文件何时被删。上界 365 天：再长就不是"agent 问答留痕"而是持久档案，需要另做归档。
+ */
+const ASK_SESSION_RETAIN_MIN_DAYS = 1;
+const ASK_SESSION_RETAIN_MAX_DAYS = 365;
+function askSessionRetainDaysRange(value: unknown, path: string, add: AddFn): void {
+  const n = value as number;
+  if (!Number.isInteger(n) || n < ASK_SESSION_RETAIN_MIN_DAYS || n > ASK_SESSION_RETAIN_MAX_DAYS) {
+    add(path, `应为 ${ASK_SESSION_RETAIN_MIN_DAYS}~${ASK_SESSION_RETAIN_MAX_DAYS} 之间的整数天（默认 7），实际=${n}`);
+  }
+}
+
+const ANALYSIS_DAILY_LIMIT_MAX = 1000;
+function analysisDailyLimitRange(value: unknown, path: string, add: AddFn): void {
+  const n = value as number;
+  if (!Number.isInteger(n) || n < 1 || n > ANALYSIS_DAILY_LIMIT_MAX) {
+    add(path, `应为 1~${ANALYSIS_DAILY_LIMIT_MAX} 之间的整数（AI 分析单 scope 每日上限），实际=${n}`);
+  }
+}
+
 function httpUrl(value: unknown, path: string, add: AddFn): void {
   const s = value as string;
   if (!/^https?:\/\//.test(s)) {
@@ -406,6 +429,13 @@ const CONFIG_SCHEMA: ConfigNode = {
          * 上限 1 小时：再长就失去"短会话"意义（与持久会话的边界会模糊）。
          */
         askSessionTtlMs: { type: 'number', validate: askSessionTtlRange },
+        /**
+         * 天，1~365（默认 7）。按 `createdAt` 起算，到期后 GC 删除短会话文件；
+         * 页面「AI 对话」左栏的 agent 问答分组即可回看这段时间内的记录。
+         */
+        askSessionRetainDays: { type: 'number', validate: askSessionRetainDaysRange },
+        // ── v7（REQ-20261113-003）── AI 分析单 scope 每日限流上限
+        analysisDailyLimit: { type: 'number', validate: analysisDailyLimitRange },
       },
       validate: validateEffortCrossField,
     },

@@ -90,6 +90,11 @@ import { projectNextContextChars, runToolLoop } from './retrieval/tool-loop.js';
 import { summarizeForCompaction } from './compaction.js';
 import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
 import {
+  ANALYSIS_MAX_FILES_DEFAULT,
+  ANALYSIS_MAX_FILES_LIMIT,
+  ANALYSIS_MAX_ROUNDS_DEFAULT,
+  ANALYSIS_MAX_ROUNDS_LIMIT,
+  ANALYSIS_TOOL_GROUPS,
   CAPABILITY_PROMPT_MAX_CHARS,
   CONTEXT_CHARS_MAX,
   MAX_SKILLS,
@@ -106,6 +111,9 @@ import {
   readPromptConfig,
   savePromptConfig,
 } from './prompt-config.js';
+import { listRegisteredDataSourceRecords } from '../datasource.js';
+// agent 问答只读视图（REQ-20261116-003）：列表 / 详情，独立于主会话列表
+import { AgentAskError, getAgentAsk, listAgentAskGroups } from './agent-asks.js';
 
 /** 路由上下文（由 `mcp-http-api.ts` 注入，避免本模块反向依赖它） */
 export interface ChatRouteContext {
@@ -392,6 +400,16 @@ export async function handleChatRoutes(
       if (method === 'PUT') { await handlePromptConfigPut(req, res, ctx); return true; }
     }
 
+    // ── REQ-20261116-003 /api/chat/agent-asks（`ki_ask` 问答只读视图）──
+    if (segs.length === 1 && segs[0] === 'agent-asks' && method === 'GET') {
+      await handleAgentAskList(res, url, ctx);
+      return true;
+    }
+    if (segs.length === 2 && segs[0] === 'agent-asks' && method === 'GET') {
+      await handleAgentAskDetail(res, url, segs[1]!, ctx);
+      return true;
+    }
+
     // ── API-02/14 /api/chat/conversations ──
     if (segs.length === 1 && segs[0] === 'conversations') {
       if (method === 'GET') { await handleConversationList(res, url, ctx); return true; }
@@ -637,6 +655,11 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       // 前端不硬编码上限；旧 daemon 不返回这两个字段 → 前端据此判定「后端可能未重启」并 fail-loud
       analysisPromptMaxChars: CAPABILITY_PROMPT_MAX_CHARS,
       findPromptMaxChars: CAPABILITY_PROMPT_MAX_CHARS,
+      // ── AI 分析独立预算上下界（REQ-20261113-003 · S-01）──
+      analysisMaxRoundsDefault: ANALYSIS_MAX_ROUNDS_DEFAULT,
+      analysisMaxRoundsMax: ANALYSIS_MAX_ROUNDS_LIMIT,
+      analysisMaxFilesDefault: ANALYSIS_MAX_FILES_DEFAULT,
+      analysisMaxFilesMax: ANALYSIS_MAX_FILES_LIMIT,
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,
@@ -651,8 +674,31 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
     // 工具分组同样由服务端下发（工作项 4 落地时补）：工具名的 SSOT 在 `src/lib/mcp-tools/`，
     // 前端自己写一份分组清单必然会随工具增减而漂移
     toolGroups: MCP_TOOL_GROUPS,
+    // ── AI 分析专属工具分组、思考级别与数据源快捷路径（REQ-20261113-003 · S-01）──
+    analysisToolGroups: ANALYSIS_TOOL_GROUPS,
+    analysisReasoningEffort: config.analysis?.reasoningEffort ?? cfg.llm?.reasoningEffort,
+    analysisReasoningEffortOverridden: config.analysis?.reasoningEffort !== undefined,
+    datasourceDirs: collectAuthorizedDatasourceDirs(cfg, ctx.authScopes),
     issue,
   });
+}
+
+function collectAuthorizedDatasourceDirs(
+  cfg: KiConfig,
+  authScopes: string[] | null,
+): Record<string, { type: 'directory' | 'git'; dir: string }> {
+  const out: Record<string, { type: 'directory' | 'git'; dir: string }> = {};
+  try {
+    const allowAll = authScopes === null || authScopes.includes(ALL_SCOPES);
+    for (const { scope, record } of listRegisteredDataSourceRecords(cfg)) {
+      if (!allowAll && !authScopes!.includes(scope)) continue;
+      const dir = record.type === 'git' && record.git?.repoRoot ? record.git.repoRoot : record.dir;
+      if (dir) out[scope] = { type: record.type, dir };
+    }
+  } catch {
+    // 快捷提示只作辅助，数据源读取异常不阻塞设置页读取
+  }
+  return out;
 }
 
 /**
@@ -734,6 +780,61 @@ export async function handleConversationList(res: ServerResponse, url: URL, ctx:
   const total = all.items.length;
 
   sendOk(res, 200, { scope, items, total, nextCursor });
+}
+
+// ─────────────────────────────────────────────────────────────
+// agent 问答只读视图（REQ-20261116-003 · S-02 / S-03）
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * API-15 `GET /api/chat/agent-asks?scope=&limit=&cursor=&group=` —— 越权白名单：**登记**。
+ *
+ * 为什么独立接口而不给 `/conversations` 加 `source` 参数：主列表是逐文件全量解析 +
+ * `total` 二次全扫（`chat-store.ts:195-223`），混入 `ka-*` 会让主列表成本随 agent
+ * 调用次数线性增长。详见 design/S02 §3.4。
+ */
+export async function handleAgentAskList(res: ServerResponse, url: URL, ctx: ChatRouteContext): Promise<void> {
+  const scope = resolveListScope(url);
+  if (!requireScope(ctx, scope, '/agent-asks', res)) return;
+
+  const limitRaw = url.searchParams.get('limit');
+  const limit = limitRaw === null ? undefined : Number(limitRaw);
+  const group = url.searchParams.get('group');
+
+  const payload = await listAgentAskGroups({
+    scope,
+    viewer: { role: ctx.role, userId: ctx.userId },
+    ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+    cursor: url.searchParams.get('cursor'),
+    ...(group ? { group } : {}),
+  });
+  sendOk(res, 200, { ...payload });
+}
+
+/**
+ * API-16 `GET /api/chat/agent-asks/:id?scope=` —— 只读详情（含提问背景与来源）。
+ *
+ * 错误语义见 design/S03 §4：404（不存在 / 越权，两者同码防探测）/ 410（超保留期）/
+ * 422（文件损坏，**不删**）。
+ */
+export async function handleAgentAskDetail(
+  res: ServerResponse,
+  url: URL,
+  id: string,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  const scope = resolveListScope(url);
+  if (!requireScope(ctx, scope, '/agent-asks', res)) return;
+  try {
+    const detail = await getAgentAsk({ scope, viewer: { role: ctx.role, userId: ctx.userId }, id });
+    sendOk(res, 200, { ...detail });
+  } catch (error) {
+    if (error instanceof AgentAskError) {
+      sendErr(res, error.status, error.code, error.message);
+      return;
+    }
+    throw error;
+  }
 }
 
 /** API-03 `POST /api/chat/conversations` —— 非幂等（每次产生新会话） */

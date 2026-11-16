@@ -28,15 +28,25 @@ import { randomBytes } from 'node:crypto';
 import { readJson, writeJson } from '../../store.js';
 import { validateScope } from '../../scope.js';
 import { chatDirFor, withConvLock } from '../chat-store.js';
+// 来源引用直接复用对话层类型（`ask-runner.ts` 本就 import 同一份 SourceRef）；
+// 独立声明会制造类型双源，字段演进时两处漂移。
+import type { SourceRef } from '../chat-contract.js';
+import { ASK_SESSION_RETAIN_DEFAULT_DAYS, type AskOrigin } from './ask-contract.js';
 
 /** 短会话文件（S-03 §4.2） */
 export interface AskSessionFile {
-  version: 1;
+  /** 1 = 无 `origin` / 无 `background` / 无 `sources` 的旧文件；2 = 本版本 */
+  version: 1 | 2;
   /** `ka-` + base36(now) + 32 位 hex（≥128bit，不可猜：N11） */
   id: string;
   scope: string;
   /** 归属：`tokenId` / `'local'`；跨 key 复用一律拒绝（S-03 §4.3） */
   ownerKey: string;
+  /**
+   * 来源（REQ-20261116-003 · S-01）：服务**列表分组与展示**，不参与续接校验。
+   * 旧文件无此字段 → 读取时由 `normalizeOrigin` 按 `ownerKey` 推导。
+   */
+  origin: AskOrigin;
   createdAt: string;
   /** 滑动 TTL 的**唯一**依据；由 `writeJson` 每次落盘自动打戳（S-03 §3.2 决策） */
   updatedAt: string;
@@ -48,6 +58,19 @@ export interface AskSessionMessage {
   content: string;
   /** 该条消息产生时刻（与 `updatedAt` 区分：这里记录"第几轮何时"） */
   at: string;
+  /**
+   * 仅 `user`：本轮提问背景（`ki_ask` 的 `background` 入参）。
+   *
+   * ★ **写入 ≠ 回放**：落盘留痕是为了让页面回看能理解"他为什么这么问"；
+   *   `ask-runner::buildMemoryConv` 回放给上游时**必须丢弃**本字段
+   *   （否则背景每轮重复进上下文，直接撞穿 60K 字符预算）。
+   */
+  background?: string;
+  /**
+   * 仅 `assistant`：净化后的来源引用（≤ `ASK_MAX_SOURCES` 条，与对外 `sources` 同源）。
+   * 同样**只在页面回放使用**，不参与模型回放。
+   */
+  sources?: SourceRef[];
 }
 
 /** 单条消息内容上限：防止把超长答案整段留在盘上（答案本身受上游 maxTokens 约束） */
@@ -85,19 +108,25 @@ function newAskSessionId(): string {
  *
  * 非幂等：每次调用都产生新 id。失败抛（不返回半成品）。
  */
-export async function createAskSession(scope: string, ownerKey: string): Promise<AskSessionFile> {
+export async function createAskSession(
+  scope: string,
+  ownerKey: string,
+  origin: AskOrigin = { kind: 'local' },
+): Promise<AskSessionFile> {
   validateScope(scope);
   const now = new Date().toISOString();
   const file: AskSessionFile = {
-    version: 1,
+    version: 2,
     id: newAskSessionId(),
     scope,
     ownerKey,
+    origin,
     createdAt: now,
     updatedAt: now,
     messages: [],
   };
-  writeJson(askPath(scope, file.id), file);
+  // 展开成对象字面量：`writeJson` 签名要求 `Record<string, unknown>`，interface 无隐式索引签名
+  writeJson(askPath(scope, file.id), { ...file });
   return file;
 }
 
@@ -112,7 +141,10 @@ export async function readAskSession(scope: string, id: string): Promise<AskSess
   if (!isValidAskId(id)) return null;
   const filePath = askPath(scope, id);
   try {
-    return readJson<AskSessionFile>(filePath) ?? null;
+    const raw = readJson<AskSessionFile>(filePath);
+    if (!raw) return null;
+    // 旧文件（version:1）没有 origin：读时推导，**不写回**（读操作不产生写入）
+    return { ...raw, origin: normalizeOrigin(raw) };
   } catch {
     try {
       fs.rmSync(filePath, { force: true });
@@ -120,6 +152,34 @@ export async function readAskSession(scope: string, id: string): Promise<AskSess
       // 删除失败也不影响本次返回（下次仍会走到这里，逐次重试）
     }
     return null;
+  }
+}
+
+/**
+ * 只读场景的三态读取（REQ-20261116-003 · S-02/S-03）。
+ *
+ * 与 `readAskSession` 的差别：**损坏时不删文件**。
+ * `readAskSession` 的"损坏即删"是为了让 MCP 调用方能重新开始，但它带副作用；
+ * 列表 / 详情是只读接口，删文件属于越权副作用（且列表可能仍引用该 id）。
+ *
+ * 三态而非 `null`：调用方需要区分「没有这条」与「有但坏了」——前者 404、后者 422。
+ */
+export type AskSessionReadResult =
+  | { kind: 'ok'; file: AskSessionFile }
+  | { kind: 'missing' }
+  | { kind: 'corrupt'; message: string };
+
+export async function readAskSessionForRead(scope: string, id: string): Promise<AskSessionReadResult> {
+  validateScope(scope);
+  if (!isValidAskId(id)) return { kind: 'missing' };
+  const filePath = askPath(scope, id);
+  if (!fs.existsSync(filePath)) return { kind: 'missing' };
+  try {
+    const raw = readJson<AskSessionFile>(filePath);
+    if (!raw) return { kind: 'corrupt', message: '文件内容为空' };
+    return { kind: 'ok', file: { ...raw, origin: normalizeOrigin(raw) } };
+  } catch (error) {
+    return { kind: 'corrupt', message: (error as Error).message };
   }
 }
 
@@ -143,17 +203,21 @@ export async function appendAskTurn(
   return withConvLock(id, async () => {
     const current = await readAskSession(scope, id);
     if (current === null) return null;
+    // ★ 显式白名单：只接受这 5 个字段。用 `...t` 展开会让后续给 message 加内部字段时
+    //   无意中落盘（如 reasoning / progress），也让"回放排除"的约束失效。
     const appended = turns.map((t) => ({
       role: t.role,
       content: t.content.length > MAX_MESSAGE_CHARS ? t.content.slice(0, MAX_MESSAGE_CHARS) : t.content,
       at: t.at,
+      ...(t.background ? { background: t.background } : {}),
+      ...(t.sources && t.sources.length > 0 ? { sources: t.sources } : {}),
     }));
     const next: AskSessionFile = {
       ...current,
       messages: [...current.messages, ...appended],
     };
     // writeJson 落盘时自动刷新 updatedAt ⇒ 滑动 TTL 顺延（S-03 §3.2 决策）
-    writeJson(askPath(scope, id), next);
+    writeJson(askPath(scope, id), { ...next });
     return readJson<AskSessionFile>(askPath(scope, id)) ?? next;
   });
 }
@@ -201,4 +265,45 @@ export function askSessionExpiresAt(file: Pick<AskSessionFile, 'updatedAt'>, ttl
   return new Date(base + ttlMs).toISOString();
 }
 
+/**
+ * 来源归一（REQ-20261116-003 · S-01）：新文件直读 `origin`，旧文件按 `ownerKey` 推导。
+ *
+ * 为什么读时推导而不是启动时批量迁移：读操作不该产生写入（并发 / 权限 / 失败面都会翻倍），
+ * 而归一逻辑本身只有三行。
+ */
+export function normalizeOrigin(file: Partial<Pick<AskSessionFile, 'origin' | 'ownerKey'>>): AskOrigin {
+  const origin = file.origin;
+  if (origin && (origin.kind === 'local' || origin.kind === 'token')) return origin;
+  const key = file.ownerKey;
+  if (!key || key === 'local') return { kind: 'local' };
+  // 旧 Token 文件：有 tokenId 但没名称快照 → 由列表接口实时 join 补齐
+  return { kind: 'token', tokenId: key };
+}
 
+/**
+ * 是否已过**保留期**（GC 唯一判据，REQ-20261116-003 · S-01）。
+ *
+ * 口径：`now - createdAt > retainDays 天`。
+ * · 用 `createdAt` 而不是 `updatedAt`：保留期是"归档窗口"，滑动续接会让高频记录永不过期；
+ * · 与 `isAskSessionExpired`（续接 TTL，滑动、10 分钟）**互不替代**：前者管文件何时消失，
+ *   后者管 `context_id` 还能不能用。列表里能看到 ≠ 还能继续追问。
+ */
+export function isAskSessionPastRetention(
+  file: Pick<AskSessionFile, 'createdAt'>,
+  retainDays: number = ASK_SESSION_RETAIN_DEFAULT_DAYS,
+  now = Date.now(),
+): boolean {
+  const created = Date.parse(file.createdAt);
+  if (Number.isNaN(created)) return true; // 脏数据按已过期处理，与 isAskSessionExpired 同口径
+  return now - created > retainDays * 86_400_000;
+}
+
+/** 保留期截止时刻（ISO）；供列表返回 `retainUntil` 与前端「仅剩 N 天」 */
+export function askSessionRetainUntil(
+  file: Pick<AskSessionFile, 'createdAt'>,
+  retainDays: number = ASK_SESSION_RETAIN_DEFAULT_DAYS,
+): string {
+  const created = Date.parse(file.createdAt);
+  const base = Number.isNaN(created) ? Date.now() : created;
+  return new Date(base + retainDays * 86_400_000).toISOString();
+}

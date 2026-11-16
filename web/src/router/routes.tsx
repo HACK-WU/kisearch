@@ -83,6 +83,12 @@ export function AppRoutes(): JSX.Element {
         />
         {/* 独立对话页（REQ-20261008-001）；:convId 为会话深链（URL 契约 §2.4） */}
         <Route path="chat" element={<ChatPage />} />
+        {/*
+          agent 问答只读详情（REQ-20261116-003）。
+          ⚠️ 必须排在 `chat/:convId` **之前**：否则 `chat/ask/ka-xxx` 会被 `:convId` 段吞掉
+          （v6 虽按具体度排序，但静态段与动态段的边界以显式顺序 + 段数区分最稳）。
+        */}
+        <Route path="chat/ask/:askId" element={<ChatPage />} />
         <Route path="chat/:convId" element={<ChatPage />} />
         {/* 知识视图（REQ-20261104-004）：团队共享的多库聚合管理页 */}
         <Route

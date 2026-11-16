@@ -20,8 +20,8 @@ import path from 'node:path';
 
 import { loadConfig } from '../../config.js';
 import { chatRootDir } from '../chat-store.js';
-import { isAskSessionExpired, listAskSessionIds } from './ask-store.js';
-import { ASK_SESSION_TTL_DEFAULT_MS } from './ask-contract.js';
+import { isAskSessionPastRetention, listAskSessionIds } from './ask-store.js';
+import { ASK_SESSION_RETAIN_DEFAULT_DAYS, ASK_SESSION_TTL_DEFAULT_MS } from './ask-contract.js';
 
 /** 清扫间隔：60s（与 `mcp-http` 的会话清扫同量级，避免过密 readdir） */
 const SWEEP_INTERVAL_MS = 60_000;
@@ -41,12 +41,28 @@ export function resolveAskSessionTtl(): number {
 }
 
 /**
- * 扫一轮：遍历 `{chatDir}/` 下每个 scope 目录，删除过期短会话。
+ * 保留期（天）：默认 7，配置项 `llm.askSessionRetainDays`（越界由 `config-schema` fail-loud）。
+ *
+ * ⚠️ 与 `resolveAskSessionTtl` **不是一回事**（REQ-20261116-003 S-01）：
+ * · TTL（10 分钟滑动）只管 `context_id` 还能不能续接，**不删文件**；
+ * · 保留期（按 `createdAt` 起算）才决定文件何时被删 —— 页面要能回看 7 天内的问答。
+ */
+export function resolveAskSessionRetainDays(): number {
+  const raw = loadConfig().llm?.askSessionRetainDays;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return ASK_SESSION_RETAIN_DEFAULT_DAYS;
+  return raw;
+}
+
+/**
+ * 扫一轮：遍历 `{chatDir}/` 下每个 scope 目录，删除**超过保留期**的短会话。
+ *
+ * 历史上这里按"滑动 TTL 过期"删文件；REQ-20261116-003 起改按保留期 ——
+ * 否则页面列表里的问答会在 10 分钟后凭空消失。
  *
  * @returns `scanned` 检查的文件数、`deleted` 实际删除数（失败也计入 scanned，不计 deleted）
  */
 export function sweepExpiredAskSessions(now = Date.now()): { scanned: number; deleted: number } {
-  const ttlMs = resolveAskSessionTtl();
+  const retainDays = resolveAskSessionRetainDays();
   const root = chatRootDir();
 
   let scopeDirs: string[] = [];
@@ -73,8 +89,8 @@ export function sweepExpiredAskSessions(now = Date.now()): { scanned: number; de
       scanned += 1;
       const filePath = path.join(root, scope, `${id}.json`);
       try {
-        const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { updatedAt?: string };
-        if (!isAskSessionExpired({ updatedAt: String(raw.updatedAt ?? '') }, ttlMs, now)) continue;
+        const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { createdAt?: string };
+        if (!isAskSessionPastRetention({ createdAt: String(raw.createdAt ?? '') }, retainDays, now)) continue;
         fs.rmSync(filePath, { force: true });
         deleted += 1;
       } catch {

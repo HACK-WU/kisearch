@@ -24,11 +24,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { loadConfig } from '../config.js';
 import { executeScopeList } from '../../scope.js';
 import { readViews } from '../scope-view.js';
+import { listTokens, tokenLabel } from '../mcp-token.js';
 import { resolveLlmStatus } from '../chat/llm-client.js';
 import { runAsk } from '../chat/ask/ask-runner.js';
 import { acquireAskSlot, releaseAskSlot } from '../chat/ask/ask-limiter.js';
 import { ASK_LOG_EVENTS, askLog } from '../chat/ask/ask-log.js';
-import { ASK_QUESTION_MAX_CHARS, type AskResult } from '../chat/ask/ask-contract.js';
+import { ASK_QUESTION_MAX_CHARS, type AskOrigin, type AskResult } from '../chat/ask/ask-contract.js';
 import { normalizeAskBackground } from '../chat/ask/ask-prompt.js';
 import type { Capability } from '../auth/capabilities.js';
 import { TOOL_TIMEOUT, ToolTimeoutError, withTimeout } from './util.js';
@@ -40,6 +41,25 @@ import { TOOL_TIMEOUT, ToolTimeoutError, withTimeout } from './util.js';
  * 这不是"调用方权限校验"，而是**给内层设上界**，因此不受 Token 能力集影响。
  */
 const READ_ONLY_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>(['knowledge.read']);
+
+/**
+ * 构造来源标识（REQ-20261116-003 · S-01）。
+ *
+ * 只有本层同时握有 `principalKey` 与 Token 记录，所以 `origin` 在这里单点构造并下传；
+ * `ask-runner` 保持纯执行器（不依赖 `mcp-token`）。
+ *
+ * 降级：`listTokens()` 读取失败 / 查不到记录时，仍给出 `{kind:'token', tokenId}` ——
+ * 名称快照缺失只是少一个兜底展示名，不该阻断问答本身。
+ */
+function buildOrigin(principalKey: string): AskOrigin {
+  if (principalKey === 'local') return { kind: 'local' };
+  try {
+    const rec = listTokens().find((t) => t.id === principalKey);
+    return { kind: 'token', tokenId: principalKey, ...(rec ? { tokenLabel: tokenLabel(rec) } : {}) };
+  } catch {
+    return { kind: 'token', tokenId: principalKey };
+  }
+}
 
 /** 对外失败形状：**展平** S-01 的嵌套 `error`（S-02 §4a.3 步骤 9） */
 function failResult(
@@ -215,6 +235,8 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
             ...(contextIdArg.length > 0 ? { contextId: contextIdArg } : {}),
             // 归属校验用：不同 Token 不能续接同一个 contextId（S-03 §4.3）
             principalKey,
+            // 来源标识（REQ-20261116-003）：页面左栏按它分组，落盘留痕
+            origin: buildOrigin(principalKey),
             capabilities: READ_ONLY_CAPABILITIES,
           }),
           TOOL_TIMEOUT.ASK,

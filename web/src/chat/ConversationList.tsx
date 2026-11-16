@@ -20,8 +20,10 @@
  * @see design/S03_前端对话面板与流式对话_DESIGN.md §9 · api/conversations.md
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { ConversationSummary } from '@/api/chatContract';
+// 时间口径与 agent 问答分组共用一份实现（2026-11-16 提出；本文件行为不变）
+import { formatConvTime } from './format';
 
 export interface ConversationListProps {
   open: boolean;
@@ -48,6 +50,20 @@ export interface ConversationListProps {
   onDelete: (id: string) => void;
   /** 关闭浮层（Esc / 点击外部由上层处理，此处只发事件） */
   onClose: () => void;
+  /**
+   * 追加在列表体**末尾**的内容（REQ-20261116-003：agent 问答来源分组）。
+   *
+   * 为什么挂在内部而不是并列在外面：搜索框在本组件顶部，放进来才能让**同一个关键词**
+   * 同时过滤人工会话与 agent 分组，且两者共用一个滚动容器。
+   */
+  bodyExtra?: ReactNode;
+  /** 关键词变化回调（供 `bodyExtra` 里的组件做同样的过滤） */
+  onKeywordChange?: (keyword: string) => void;
+  /**
+   * `bodyExtra` 是否有内容。
+   * 用于空态判定：人工会话为空但 agent 分组非空时，不该显示「还没有会话」。
+   */
+  hasExtra?: boolean;
 }
 
 /** 列表项标题：标题为空时用末条预览兜底 */
@@ -55,20 +71,6 @@ function itemTitle(c: ConversationSummary): string {
   if (c.title && c.title.trim()) return c.title;
   if (c.lastMessagePreview && c.lastMessagePreview.trim()) return c.lastMessagePreview;
   return '（空会话）';
-}
-
-/** `updatedAt` → 紧凑时间：今天显示 HH:MM，本年显示 M-D，跨年补年份 */
-function formatConvTime(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  const now = new Date();
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) return hm;
-  const yesterday = new Date(now.getTime() - 86_400_000);
-  if (d.toDateString() === yesterday.toDateString()) return `昨天 ${hm}`;
-  const md = `${d.getMonth() + 1}-${d.getDate()}`;
-  return d.getFullYear() === now.getFullYear() ? md : `${d.getFullYear()}-${md}`;
 }
 
 const IconRename = () => (
@@ -112,7 +114,7 @@ const IconRefresh = () => (
 );
 
 export function ConversationList(props: ConversationListProps): JSX.Element | null {
-  const { open, items, activeId, loading, error, variant = 'popover' } = props;
+  const { open, items, activeId, loading, error, variant = 'popover', bodyExtra, hasExtra = false } = props;
   const inline = variant === 'inline';
   const [keyword, setKeyword] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -272,7 +274,7 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
             placeholder="搜索会话"
             aria-label="搜索会话"
             value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
+            onChange={(e) => { setKeyword(e.target.value); props.onKeywordChange?.(e.target.value); }}
           />
         </div>
         {inline ? (
@@ -301,13 +303,19 @@ export function ConversationList(props: ConversationListProps): JSX.Element | nu
               <p className="ki-chat-convpop__group">已归档<span className="ki-chat-convpop__group-count">{archived.length}</span></p>
             ) : null}
             {rowsOf(archived)}
-            {recent.length + archived.length === 0 ? (
+            {recent.length + archived.length === 0 && !hasExtra ? (
               <p className="ki-chat-convpop__empty">
                 {keyword ? '没有匹配的会话' : '还没有会话，发送第一条消息即可开始'}
               </p>
             ) : null}
           </>
         )}
+        {/*
+          agent 问答分区（REQ-20261116-003）**不放在 loading 三元里**：
+          它有自己的请求与加载态，挂在人工列表的骨架分支下会导致
+          「主列表还在转圈时 agent 分区凭空消失」，切 scope 时尤其明显。
+        */}
+        {bodyExtra}
       </div>
 
       <div className="ki-chat-convpop__foot">

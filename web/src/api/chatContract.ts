@@ -230,6 +230,74 @@ export interface ConversationSummary {
 }
 
 // ─────────────────────────────────────────────────────────────
+// 1.5 ki_ask 问答（REQ-20261116-003）：来源分组列表 + 只读详情
+//     后端契约见 design/S02、S03；数据来自 `GET /api/chat/agent-asks[/:id]`，
+//     本段类型与后端响应逐字段对齐。
+// ─────────────────────────────────────────────────────────────
+
+/** 来源组类型：本机 MCP 连接 / 某个 MCP Token */
+export type AgentAskGroupKind = 'local' | 'token';
+
+/** 列表项（只含摘要，不含消息正文） */
+export interface AgentAskSummary {
+  id: string;
+  /** 首条 user 消息截断；无 user 消息时为「（空问答）」 */
+  title: string;
+  /** 问答轮次 = user 消息条数 */
+  rounds: number;
+  messageCount: number;
+  createdAt: string;
+  lastActiveAt: string;
+  /** 保留期截止（createdAt + 7 天） */
+  retainUntil: string;
+  /** 剩余保留天数；<=1 时列表显示「仅剩 1 天」 */
+  retainDaysLeft: number;
+  /**
+   * 续接 TTL（10 分钟）已过。
+   * ★ 列表**不展示**：几乎所有历史条目都满足，恒亮即无信息量（design-review #4）。
+   */
+  contextExpired: boolean;
+  corrupted: boolean;
+}
+
+/** 一个来源组（本地连接 / 某个 Token） */
+export interface AgentAskGroup {
+  /** `local` 或 `token:<tokenId>` */
+  id: string;
+  kind: AgentAskGroupKind;
+  /** 展示名：Token 分组取**当前** Token 名（改名即跟随）；已删除时取快照名 */
+  label: string;
+  tokenId?: string;
+  tokenDeleted: boolean;
+  /** 组内总条数（不分页） */
+  count: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+  items: AgentAskSummary[];
+}
+
+/** 详情里的一条消息：比主会话的 ChatMessage 少了 progress/reasoning 等展示物 */
+export interface AgentAskMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  at: string;
+  /** 仅 user：本轮提问背景（ki_ask 的 background 入参） */
+  background?: string;
+  /** 仅 assistant：来源引用（净化后，最多 15 条） */
+  sources?: SourceRef[];
+}
+
+export interface AgentAskDetail {
+  id: string;
+  scope: string;
+  origin: { kind: AgentAskGroupKind; tokenId?: string; label: string; tokenDeleted: boolean };
+  createdAt: string;
+  lastActiveAt: string;
+  retainUntil: string;
+  messages: AgentAskMessage[];
+}
+
+// ─────────────────────────────────────────────────────────────
 // 2. SSE 事件协议（前端按 `type` 分派，不做重排）
 // ─────────────────────────────────────────────────────────────
 
@@ -392,6 +460,31 @@ export interface PromptConfig {
   analysisPrompt?: CapabilityPrompt;
   /** **能力级提示词 · AI 查找**。现有「AI 查找」是确定性检索（不调 LLM），同样无生效点（检查点 F2）。 */
   findPrompt?: CapabilityPrompt;
+  /** **AI 分析独立配置域**（REQ-20261113-003 · S-01） */
+  analysis?: AnalysisConfig;
+}
+
+export interface AnalysisTargetConfig {
+  defaultDir?: string;
+  byScope: Record<string, string>;
+}
+
+export interface AnalysisConfig {
+  targetDirs: AnalysisTargetConfig;
+  prompt: CapabilityPrompt;
+  skills: PromptSkill[];
+  tools: Record<string, boolean>;
+  maxRounds?: number;
+  maxFiles?: number;
+  reasoningEffort?: string;
+}
+
+/** AI 分析工具分组（只读，默认全开） */
+export interface AnalysisToolGroup {
+  key: 'code-read' | 'kb-read';
+  label: string;
+  names: string[];
+  descs?: Record<string, string>;
 }
 
 /** 能力级提示词载体（与后端 `CapabilityPrompt` 同形状） */
@@ -431,6 +524,11 @@ export interface PromptConfigLimits {
    */
   analysisPromptMaxChars?: number;
   findPromptMaxChars?: number;
+  /** AI 分析预算上下界（REQ-20261113-003 · S-01） */
+  analysisMaxRoundsDefault?: number;
+  analysisMaxRoundsMax?: number;
+  analysisMaxFilesDefault?: number;
+  analysisMaxFilesMax?: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
@@ -468,6 +566,11 @@ export interface PromptConfigOk {
   /** 是否使用了用户覆盖值（决定"自定义 / 默认"徽标与「恢复默认」可用性）；**旧版 daemon 缺失** */
   reasoningEffortOverridden?: boolean;
   toolGroups: PromptToolGroup[];
+  /** AI 分析专属工具分组、思考级别与数据源快捷路径 */
+  analysisToolGroups?: AnalysisToolGroup[];
+  analysisReasoningEffort?: string;
+  analysisReasoningEffortOverridden?: boolean;
+  datasourceDirs?: Record<string, { type: 'directory' | 'git'; dir: string }>;
   /** 非 null = 配置文件有问题且**已回退默认**（必须可见，不得静默） */
   issue: string | null;
 }

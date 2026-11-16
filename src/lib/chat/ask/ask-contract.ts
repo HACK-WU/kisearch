@@ -68,6 +68,32 @@ export const ASK_SESSION_TTL_LIMIT_MS = 3_600_000;
  * **超限显式报错而不是静默截断**（R17）—— 截断会让模型基于"残缺历史"作答，
  * 而调用方并不知道自己丢了上下文。
  */
+/**
+ * 问答来源（REQ-20261116-003 · S-01）：这次问答是从哪条 MCP 通道发起的。
+ *
+ * · `local` = 本机免 Token 连接（`ownerKey === 'local'`）；
+ * · `token` = 远程 Token：`tokenId` 是稳定标识（改名不变），`tokenLabel` 是**落盘时的名称快照**
+ *   —— Token 被删除后，列表仍能显示「已删除的 Token（codex）」而不是「未知」。
+ *
+ * ⚠️ 与 `ownerKey` 的分工：`ownerKey` 服务**续接归属校验**（谁能续），本类型服务**来源展示与分组**。
+ *    两者当前取值相同（tokenId / 'local'），但语义不同，不要合并。
+ */
+export interface AskOrigin {
+  kind: 'local' | 'token';
+  tokenId?: string;
+  tokenLabel?: string;
+}
+
+/**
+ * 列表态保留天数默认值（REQ-20261116-003 · S-01）。
+ *
+ * 与续接 TTL **分离**，两者回答不同问题：
+ * · `ASK_SESSION_TTL_DEFAULT_MS`（10 分钟滑动）→ `context_id` 还能不能续接；
+ * · 本常量（按 `createdAt` 起算，不滑动）→ 文件何时被 GC 删掉。
+ * 配置项：`llm.askSessionRetainDays`（1~365，越界 fail-loud）。
+ */
+export const ASK_SESSION_RETAIN_DEFAULT_DAYS = 7;
+
 export const ASK_CONTEXT_MAX_MESSAGES = 20;
 export const ASK_CONTEXT_MAX_CHARS = 60_000;
 
@@ -101,6 +127,14 @@ export interface AskInput {
    * 缺省 `'local'`（单测或回环直连）。
    */
   principalKey?: string;
+  /**
+   * 来源标识（REQ-20261116-003 · S-01）：**由工具面构造并下传**。
+   *
+   * 为什么在工具面构造：只有 `mcp-tools/ask.ts` 同时握有 `principalKey` 与 Token 记录
+   * （`listTokens()`）；`ask-runner` 保持纯执行器，不依赖 `mcp-token`。
+   * 缺省按 `principalKey` 推导（单测 / 回环直连 → `local`）。
+   */
+  origin?: AskOrigin;
   /**
    * **内层工具面的能力上界**（不是"调用方权限校验"）。
    *

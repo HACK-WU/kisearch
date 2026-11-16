@@ -14,6 +14,8 @@
  */
 
 import type {
+  AgentAskDetail,
+  AgentAskGroup,
   ChatConfigOk,
   ChatEvent,
   ChatRef,
@@ -148,6 +150,39 @@ export async function listConversations(
   );
   // 空值契约：无数据 → 空数组 + null 游标（不返回 null）
   return { items: res.items ?? [], nextCursor: res.nextCursor ?? null };
+}
+
+/**
+ * agent 问答来源分组（REQ-20261116-003 · S-02）。
+ *
+ * 独立接口：主列表 `/conversations` 是逐文件全量解析 + total 二次全扫，
+ * 混入 `ka-*` 会让主列表成本随 agent 调用次数线性增长。
+ */
+export async function listAgentAsks(
+  scope: string,
+  opts?: { limit?: number; cursor?: string | null; group?: string },
+): Promise<{ scope: string; groups: AgentAskGroup[]; groupsTotal: number }> {
+  const params = new URLSearchParams({ scope });
+  if (opts?.limit !== undefined) params.set('limit', String(opts.limit));
+  if (opts?.cursor) params.set('cursor', opts.cursor);
+  if (opts?.group) params.set('group', opts.group);
+
+  const res = await reqJson<{ scope?: string; groups?: AgentAskGroup[]; groupsTotal?: number }>(
+    `${CHAT_API_BASE}/agent-asks?${params.toString()}`,
+  );
+  // 空值契约：没有 agent 问答 → 空数组（不返回 null），左栏据此整区不渲染
+  return { scope: res.scope ?? scope, groups: res.groups ?? [], groupsTotal: res.groupsTotal ?? 0 };
+}
+
+/**
+ * agent 问答只读详情（REQ-20261116-003 · S-03）。
+ *
+ * 错误语义（`ChatApiError.code`）：`AGENT_ASK_NOT_FOUND`(404，含越权) /
+ * `AGENT_ASK_PAST_RETENTION`(410) / `AGENT_ASK_CORRUPTED`(422)。
+ */
+export async function getAgentAsk(scope: string, id: string): Promise<AgentAskDetail> {
+  const params = new URLSearchParams({ scope });
+  return reqJson<AgentAskDetail>(`${CHAT_API_BASE}/agent-asks/${encodeURIComponent(id)}?${params.toString()}`);
 }
 
 /** @param input `title` ≤48 字、`systemPrompt` ≤4000 字；均可不传（title 默认取首条用户消息前 24 字） */

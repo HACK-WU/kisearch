@@ -2,7 +2,9 @@
  * 短会话 GC（REQ-20261113-001 二期 · S-03 §4.4 / 工作项 3）
  *
  * 覆盖 4 条不变量：
- *   ① 过期 `ka-*` 被删，未过期保留（滑动 TTL 不误杀）
+ *   ① 超过**保留期**（`createdAt + 7 天`）的 `ka-*` 被删，未过期保留
+ *      —— REQ-20261116-003 起判据从"滑动 TTL 过期"改为"保留期到期"：
+ *        续接 TTL（10 分钟滑动）只管 `context_id` 还能不能用，不再删文件。
  *   ② **只碰 `ka-*`**：同目录的 `c-*.json`、`assets/`、其他文件一律不动
  *   ③ 损坏文件按"不可用"删除（否则每次调用都报同一个错）
  *   ④ 空目录 / 目录不存在不报错
@@ -41,31 +43,52 @@ afterEach(() => {
   resetConfigCache();
 });
 
-/** 直接落一个短会话文件（绕过 store，便于构造任意 updatedAt） */
-function writeSession(id: string, updatedAt: string, raw?: string): string {
+/**
+ * 直接落一个短会话文件（绕过 store，便于构造任意时间）。
+ *
+ * 注意 `createdAt` 才是 GC 判据（保留期按创建时刻起算、**不滑动**）；
+ * `updatedAt` 只影响"还能不能续接"，传它是为了构造"续接已过期但仍在保留期内"的边界样本。
+ */
+function writeSession(id: string, createdAt: string, raw?: string, updatedAt = createdAt): string {
   const filePath = path.join(scopeDir, `${id}.json`);
   fs.writeFileSync(filePath, raw ?? JSON.stringify({
-    version: 1, id, scope: 'default', ownerKey: 'local',
-    createdAt: updatedAt, updatedAt, messages: [],
+    version: 2, id, scope: 'default', ownerKey: 'local', origin: { kind: 'local' },
+    createdAt, updatedAt, messages: [],
   }));
   return filePath;
 }
 
-it('① 过期删除、未过期保留', () => {
+it('① 超保留期删除、保留期内保留', () => {
   const now = Date.parse('2026-11-13T12:00:00.000Z');
-  const fresh = writeSession('ka-fresh-0001', '2026-11-13T11:55:00.000Z'); // 5 分钟前
-  const stale = writeSession('ka-stale-0002', '2026-11-13T11:40:00.000Z'); // 20 分钟前
+  const DAY = 86_400_000;
+  const fresh = writeSession('ka-fresh-0001', new Date(now - 6 * DAY).toISOString()); // 6 天前
+  const stale = writeSession('ka-stale-0002', new Date(now - 8 * DAY).toISOString()); // 8 天前
 
   const result = sweepExpiredAskSessions(now);
   assert.equal(result.scanned, 2);
   assert.equal(result.deleted, 1);
-  assert.ok(fs.existsSync(fresh), '未过期不得删除');
-  assert.ok(!fs.existsSync(stale), '过期必须删除');
+  assert.ok(fs.existsSync(fresh), '保留期内不得删除');
+  assert.ok(!fs.existsSync(stale), '超保留期必须删除');
+});
+
+it('①b 只按 createdAt 判：updatedAt 很新也照删（保留期不滑动）', () => {
+  const now = Date.parse('2026-11-13T12:00:00.000Z');
+  const DAY = 86_400_000;
+  // 创建于 30 天前，但"刚刚"还被续接过 —— 续接 TTL 早已过期，保留期同样已过
+  const stale = writeSession(
+    'ka-stale-0009',
+    new Date(now - 30 * DAY).toISOString(),
+    undefined,
+    new Date(now - 60_000).toISOString(),
+  );
+  const result = sweepExpiredAskSessions(now);
+  assert.equal(result.deleted, 1);
+  assert.ok(!fs.existsSync(stale), '高频续接不得让记录永不过期');
 });
 
 it('② 只碰 ka-*：c-* / assets / 其他文件不受影响', () => {
   const now = Date.parse('2026-11-13T12:00:00.000Z');
-  const stale = writeSession('ka-stale-0003', '2026-11-13T11:00:00.000Z');
+  const stale = writeSession('ka-stale-0003', new Date(now - 8 * 86_400_000).toISOString());
 
   const conversation = path.join(scopeDir, 'c-legacy-0001.json');
   fs.writeFileSync(conversation, JSON.stringify({ version: 1, id: 'c-legacy-0001' }));
