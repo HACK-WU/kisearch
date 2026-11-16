@@ -206,7 +206,7 @@ scopeReadonly:
 |------|--------|
 | `ki import`、`ki datasource sync`（含 Web 数据源页同步） | 放行 —— 内容仍可批量更新 |
 | `ki scope clear / delete`（需 `--force-readonly`）、`ki restore`、`ki rebuild-vector` | 放行 |
-| Web 上传导入 / 知识写入 / 阅读页编辑与加链接、MCP 8 个写工具、CLI 单条写入 | 拒绝（`SCOPE_READONLY`） |
+| Web 的知识写入页（上传导入 / 手动写入两种方式）、阅读页编辑与加链接、MCP 8 个写工具、CLI 单条写入 | 拒绝（`SCOPE_READONLY`） |
 | 检索 / 浏览 / 导出 / 备份 | 不受影响 |
 
 > ⚠️ **不要写成 `scopes.<scope>.readonly`**：那会让该 scope 的 `registered` 变 `true`，而 `scopeMode: strict` 下 `scopes` 的 key 兼作检索白名单 —— 锁一个库等于给它开检索权限。只读状态与「是否注册」互不影响。

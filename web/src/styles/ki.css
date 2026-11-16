@@ -3580,6 +3580,34 @@ input[type="range"].ki-range { width: 180px; accent-color: var(--ki-color-primar
 /* 键盘聚焦环用主色（系统强调色为橙时会出现突兀的橙色描边） */
 .ki-segmented button:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 1px; }
 
+/* ── 合并页的页级 tab（REQ-20261116-002：上传导入 / 手动写入） ──
+   复用 .ki-segmented 的容器形态与选中态色阶，只做两处页面级调整：高度与字号。
+   选中态选择器用 `aria-selected`（tablist 语义），与「资源」页 .res-tabs 同口径；
+   `aria-pressed` 是本文件另一处（编辑/预览类分组按钮）的语义，两者互不干扰。 */
+/* 页头之下、内容之上，**按内容宽**收住：父容器 `.ki-content-inner` 是 grid（列宽 1fr），
+   grid item 默认 `justify-self: stretch` —— 不加这两行，一条两百来像素的 tab 条会被拉成
+   整页宽的空壳（右侧一大片空白 + 一整圈边框），2026-11-16 用户当场吐槽。
+   `width: fit-content` 兜住 flex 父容器（浏览页 `.ki-content--noscroll` 那套）。 */
+.ki-page-tabs { margin-top: var(--ki-space-3); justify-self: start; width: fit-content; max-width: 100%; }
+.ki-page-tabs button { min-height: 34px; padding: 0 14px; font-size: var(--ki-font-size-md); font-weight: 600; }
+.ki-page-tabs button[aria-selected="true"] {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+  font-weight: 650;
+}
+/* 导入进度徽标：只在导入 tab 未激活时出现（激活时右轨已有完整进度）。
+   百分比用等宽数字 + 固定最小宽度，避免 9%→100% 时 tab 宽度跳动。 */
+.ki-page-tabs__badge { display: inline-flex; align-items: center; gap: 5px; margin-left: 7px; }
+.ki-page-tabs__dot { width: 6px; height: 6px; border-radius: var(--ki-radius-track); background: var(--ki-color-primary); animation: ki-nav-busy 1.6s ease-in-out infinite; }
+.ki-page-tabs__pct { min-width: 3ch; font-size: var(--ki-font-size-xs); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { .ki-page-tabs__dot { animation: none; } }
+/* 窄屏：两 tab 均分撑满，百分比让位给圆点（三个元素挤在一行会折行顶掉页头） */
+@media (max-width: 640px) {
+  .ki-page-tabs { display: flex; justify-self: stretch; width: 100%; }
+  .ki-page-tabs button { flex: 1; justify-content: center; }
+  .ki-page-tabs__pct { display: none; }
+}
+
 /* 正文编辑区：撑满右卡高度 */
 .ki-md-editor { position: relative; }
 .ki-md-preview--tall { height: auto; min-height: 480px; }
@@ -5867,6 +5895,33 @@ select.ki-chat-cfg__ta--select {
 .ki-chat-cfg__warn {
   margin: 6px 0 0; color: var(--ki-color-warning);
   font-size: var(--ki-font-size-xs); line-height: 1.6;
+}
+
+/* ── AI 分析 · 目标目录映射行（REQ-20261113-003 · S-01） ── */
+.ki-chat-cfg__dirrow {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  margin-top: 8px; min-width: 0; flex-wrap: wrap;
+}
+.ki-chat-cfg__dirscope {
+  flex: 0 0 150px; min-width: 0; height: 28px;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text); background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  padding: 0 8px;
+}
+.ki-chat-cfg__dirinput {
+  flex: 1 1 220px; min-width: 0; height: 28px;
+  font-family: var(--ki-font-mono); font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text); background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-sm);
+  padding: 0 8px; transition: border-color 160ms;
+}
+.ki-chat-cfg__dirinput:focus, .ki-chat-cfg__dirscope:focus { outline: none; border-color: var(--ki-color-primary); }
+.ki-chat-cfg__dirinput[aria-invalid="true"] { border-color: var(--ki-color-danger); }
+.ki-chat-cfg__dirinput:disabled, .ki-chat-cfg__dirscope:disabled { opacity: .6; cursor: not-allowed; }
+.ki-chat-cfg__sublabel {
+  display: block; margin: 12px 0 4px;
+  font-size: var(--ki-font-size-xs); font-weight: 500; color: var(--ki-color-text-muted);
 }
 
 /* ════════════════════════════════════════════════════════════════
@@ -9040,3 +9095,100 @@ select.ki-chat-cfg__ta--select {
   font-style: normal; font-size: 10px; line-height: inherit;
   color: var(--ki-color-primary); opacity: 0.9;
 }
+
+/* ════════════════════════════════════════════════════════════════
+   agent 问答来源分组（REQ-20261116-003 · B0）
+   ────────────────────────────────────────────────────────────────
+   左栏新增区：「本地连接 / 各 Token」与人工会话（最近 / 已归档）**并列**。
+   纯追加，不改上方任何既有规则；复用 --ki-* 令牌。
+
+   ⚠️ 行样式必须与 `.ki-chat-convpop--inline .ki-chat-conv`（上方 7245 段）同口径 ——
+      同一个左栏里，人工会话行由那个选择器提供样式；agent 行若只吃基础 `.ki-chat-conv`（4631），
+      两类的字号 / 内距会肉眼可见地不一样。
+   ════════════════════════════════════════════════════════════════ */
+.ki-ask-groups { display: flex; flex-direction: column; }
+/* 与人工会话区之间留一条分隔线（人工分组的最后一行没有 border，这里补一条） */
+.ki-ask-groups__one:first-child .ki-ask-grp { border-top: 1px solid var(--ki-color-border); }
+
+/* ── 分组头：可折叠 <button>（人工分组标题是 <p>，那里不需要折叠） ── */
+.ki-ask-grp {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+  padding: var(--ki-space-2) var(--ki-space-3) 4px;
+  border: 0; background: none; cursor: pointer; text-align: left;
+  font: inherit; font-size: var(--ki-font-size-xs);
+  color: var(--ki-color-text-subtle); letter-spacing: 0.3px;
+}
+.ki-ask-grp:hover { color: var(--ki-color-text-muted); }
+.ki-ask-grp:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.ki-ask-grp__caret {
+  width: 9px; flex: 0 0 auto; color: var(--ki-color-text-subtle);
+  display: grid; place-items: center;
+  transition: transform 140ms ease;
+}
+.ki-ask-grp__caret svg { width: 9px; height: 9px; }
+.ki-ask-grp[aria-expanded="false"] .ki-ask-grp__caret { transform: rotate(-90deg); }
+.ki-ask-grp__ic { width: 12px; height: 12px; flex: 0 0 auto; display: grid; place-items: center; }
+.ki-ask-grp__ic svg { width: 12px; height: 12px; }
+.ki-ask-grp__name { font-weight: 600; color: var(--ki-color-text-muted); }
+.ki-ask-grp--local .ki-ask-grp__ic { color: var(--ki-color-primary); }
+.ki-ask-grp--token .ki-ask-grp__ic { color: var(--ki-color-info); }
+.ki-ask-grp__badge {
+  flex: 0 0 auto; padding: 0 5px; border-radius: var(--ki-radius-tag);
+  font-size: 10px; line-height: 15px; letter-spacing: 0;
+  color: var(--ki-color-text-subtle); background: var(--ki-color-surface-muted);
+}
+.ki-ask-grp--local .ki-ask-grp__badge { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
+.ki-ask-grp__badge--del { color: var(--ki-color-danger); background: var(--ki-color-danger-soft); }
+.ki-ask-grp__count { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* ── 行：与人工会话行同口径 + 缩进到与分组名对齐（12 padding + 9 caret + 4 + 12 icon + 4 = 41） ── */
+.ki-ask-groups .ki-chat-conv {
+  position: relative;
+  display: flex; flex-wrap: wrap; align-items: flex-start;
+  gap: 2px 8px; width: 100%;
+  padding: 9px 10px 9px 41px;
+  border-radius: var(--ki-chat-radius-card, var(--ki-radius-sm));
+  font-size: 12.5px;
+  text-align: left; cursor: pointer;
+  transition: background var(--ki-motion-fast) ease;
+}
+.ki-ask-groups .ki-chat-conv + .ki-chat-conv { margin-top: 2px; }
+.ki-ask-groups .ki-chat-conv:hover { background: var(--ki-color-hover); }
+.ki-ask-groups .ki-chat-conv:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: -2px; }
+.ki-ask-groups .ki-chat-conv[aria-current="true"] { background: var(--ki-color-surface-muted); }
+.ki-ask-groups .ki-chat-conv[aria-current="true"] .ki-chat-conv__name { color: var(--ki-color-primary); }
+.ki-ask-groups .ki-chat-conv[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+.ki-ask-groups .ki-chat-conv__main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ki-ask-groups .ki-chat-conv__name {
+  padding-right: 4px;                 /* agent 行没有操作按钮，不必留 60px */
+  font-size: 13px; font-weight: 500; color: var(--ki-color-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ki-ask-groups .ki-chat-conv__time { font-size: 11px; color: var(--ki-color-text-subtle); }
+.ki-ask-groups .ki-chat-conv__count {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums;
+}
+/* 类型色竖条：本地=主色 / Token=信息蓝（与分组图标同色） */
+.ki-ask-groups .ki-chat-conv[data-src="local"]::before,
+.ki-ask-groups .ki-chat-conv[data-src="token"]::before {
+  content: ''; position: absolute; left: 31px; top: 9px; bottom: 9px;
+  width: 2px; border-radius: 2px;
+}
+.ki-ask-groups .ki-chat-conv[data-src="local"]::before { background: var(--ki-color-primary); opacity: .55; }
+.ki-ask-groups .ki-chat-conv[data-src="token"]::before { background: var(--ki-color-info); opacity: .5; }
+
+/* 临期标（剩余 ≤1 天）：暖色小标，不整行灰显 —— 灰显会让人以为记录已损坏 */
+.ki-chat-conv__soon {
+  padding: 0 4px; border-radius: var(--ki-radius-tag); font-size: 10px;
+  color: var(--ki-color-warning); background: var(--ki-color-warning-soft);
+}
+
+/* 「还有 N 条…」：与行文字同起点 */
+.ki-chat-convpop__group.ki-ask-more {
+  width: 100%; padding-left: 41px; border-top: 0; margin-top: 0;
+  font-size: 11px; text-align: left; cursor: pointer;
+  background: none; border-left: 0; border-right: 0; border-bottom: 0;
+  color: var(--ki-color-text-subtle);
+}
+.ki-chat-convpop__group.ki-ask-more:hover { color: var(--ki-color-primary); }

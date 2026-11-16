@@ -11,6 +11,7 @@ import { getTasks, activeImportCount } from '@/api/tasksApi';
 import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, pruneImport, getDocContent, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate, type ImportPruneCandidate, type ImportPrunePlan } from '@/api/httpApi';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
+import { WriteTabs } from '@/components/WriteTabs';
 import { Icon } from '@/components/icons';
 import { groupError, scopeError, tagError } from '@/lib/validators';
 // 根散文件的 group 键（`__root__`）只用于存储：组标签显示「根」，路径段位置整段省略
@@ -25,6 +26,13 @@ import {
   chunkFieldsError,
 } from '@/lib/datasourceEdit';
 import { Notice } from '@/components/Notice';
+import { publishImportProgress } from '@/lib/importProgress';
+import {
+  WRITE_TAB_PATH,
+  isMergedWritePath,
+  shouldCleanupOnMergedEntry,
+  shouldReconfirmScopeOnImportReturn,
+} from '@/lib/writeTabs';
 import {
   SCOPE_READONLY_BLOCKED_HINT,
   SCOPE_READONLY_INFLIGHT_HINT,
@@ -691,12 +699,22 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
    * （此前当"偏好"保留，会造成"输入框已填好上次的 Scope 与同名策略、却没确认"的误导态）。
    */
   const location = useLocation();
-  const onImportRoute = location.pathname === '/import';
-  const wasOnImportRoute = useRef(onImportRoute);
+  /**
+   * 合并页（REQ-20261116-002）：`/import` 与 `/write` 现在是同一个页面的两个 tab。
+   * 清理只在**从别处回到合并页**时触发（false → true）；tab 之间来回切**不清** ——
+   * 否则用户去「手动写入」手写一篇再切回来，导入 tab 的文件选择、预检结果、同名策略
+   * 会被静默清空（拍板②：切 tab 不清空）。判据在 `lib/writeTabs.ts`，有单测锁定。
+   *
+   * 注意：本 effect 下的分支体（尤其是下面的 `partial` / `uploadErrors` 保留分支）
+   * 与改造前**逐字一致**，本次只改外层触发时机，不动保留语义。
+   */
+  const onMergedPage = isMergedWritePath(location.pathname);
+  const onImportTab = location.pathname === WRITE_TAB_PATH.import;
+  const wasOnMergedPage = useRef(onMergedPage);
   useEffect(() => {
-    const wasOn = wasOnImportRoute.current;
-    wasOnImportRoute.current = onImportRoute;
-    if (!onImportRoute || wasOn) return;
+    const wasOn = wasOnMergedPage.current;
+    wasOnMergedPage.current = onMergedPage;
+    if (!shouldCleanupOnMergedEntry(wasOn, onMergedPage)) return;
     if (phase !== 'idle' && phase !== 'done' && phase !== 'failed' && phase !== 'cancelled') return;
     /**
      * R2（REQ-20261009-001）与 R3 的边界：**部分成功不是「本批暂存」，而是「待处置结果」**。
@@ -764,7 +782,27 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
     setChunkOverlap('150');
     setVector(true);
     setScopeDraft('');
-  }, [onImportRoute, phase, job?.id, job?.result]);
+  }, [onMergedPage, phase, job?.id, job?.result]);
+
+  /**
+   * 切回导入 tab 时重新确认目标 Scope（REQ-20261116-002 拍板②）。
+   *
+   * 为什么只抹"确认"不清表单：拍板②要求切 tab 不清空，但「每次开始导入前都要重新确认目标」
+   * 这条既有约束不能丢 —— 否则用户去手写了一篇、回来时输入框里还留着上一批的 Scope，
+   * 会把这批文件导进上一次的目标（这正是 Q4 当初要求清空表单的原因）。
+   *
+   * 仅终态时抹：进行中的任务不在这个判据里（见 `shouldReconfirmScopeOnImportReturn`）；
+   * `partial` 结果的「重试未完成」也不依赖 `scopeConfirmed`（走 plan / localStorage 的 scope），
+   * 因此不会被这一步挡住。
+   */
+  const wasOnImportTab = useRef(onImportTab);
+  useEffect(() => {
+    const was = wasOnImportTab.current;
+    wasOnImportTab.current = onImportTab;
+    if (!onImportTab || was) return;
+    if (!shouldReconfirmScopeOnImportReturn(phase)) return;
+    setScopeConfirmed(false);
+  }, [onImportTab, phase]);
 
   /**
    * P2（review）：任务进入终态后复位「取消请求」状态——否则顶部会同时出现
@@ -1709,6 +1747,16 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
   const scopeBusyImports = activeImportCount(tasksQuery.data?.tasks, completedScope || scope);
 
   /**
+   * 把「阶段 / 百分比 / 目标库」发布给合并页的 tab 条（REQ-20261116-002 拍板④）。
+   *
+   * 只发布这三个值：用户在「手动写入」tab 时本页是 `display:none`，tab 条拿不到 phase，
+   * 「导入在跑」就彻底不可见（顶栏只报终态，见 `lib/taskNotice.ts`）。单向、覆盖写、无历史。
+   */
+  useEffect(() => {
+    publishImportProgress({ phase, percent: activePercent, scope: completedScope || scope });
+  }, [phase, activePercent, completedScope, scope]);
+
+  /**
    * R2（REQ-20261009-001）：「重试未完成 N 篇」。
    * 部分成功后，未完成清单随任务结果下发（`job.result.incomplete`）；重试**复用同一 uploadId**
    * 直接调 /api/import/run + `onlyRelPaths`——不必重新上传，已完成文件不重算 embedding
@@ -2100,6 +2148,11 @@ export function ImportPage({ onTaskChange }: { onTaskChange?: (task: ImportTaskS
           <p>目标：{scopeConfirmed ? scope : '请选择并确认本次导入的 Scope'} · 直导无需 AI · 无第三方依赖 · 幂等追加（重复导入即增量）</p>
         </div>
       </div>
+
+      {/* 合并页的页级 tab（REQ-20261116-002）；副标题留在本页内 —— 它含动态目标态。
+          只在**本页可见时**渲染：本页常驻（离开 `/import` 只是 display:none），若无条件渲染，
+          与写入页各持一份 tab 条会产生重复 id，键盘 `←/→` 还会把焦点送进隐藏子树。 */}
+      {onImportTab ? <WriteTabs /> : null}
 
       {/* 只读 scope（REQ-20261029-001）：常驻原因 + 出路 + 进行中任务说明。
           页面仍可进入、可切换目标库，只把写入类动作置灰（设计 S04 屏 2）。 */}

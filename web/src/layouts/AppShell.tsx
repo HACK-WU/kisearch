@@ -16,7 +16,9 @@ import { HealthDetailPanel } from '@/components/HealthDetailPanel';
 import { DocumentEditor } from '@/components/DocumentEditor';
 import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/documentEditorContext';
 import { ImportPage } from '@/pages/ImportPage';
+import { WritePage } from '@/pages/WritePage';
 import { useScopeValue } from '@/lib/scopeContext';
+import { MERGED_WRITE_LABEL, navItemActive, writeTabFromPath } from '@/lib/writeTabs';
 import { getTasks, refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { dimensionStatusDetail, DEGRADED_TITLE, UNKNOWN_TITLE } from '@/lib/vectorDimensionCopy';
 import { visibleTaskNotices } from '@/lib/taskNotice';
@@ -64,14 +66,28 @@ function readDismissedAt(keys: string[]): number {
   return latest;
 }
 
-const NAV_MAIN = [
+interface NavItem {
+  to: string;
+  label: string;
+  icon: string;
+  /** 精确匹配（只有根路径 `/` 需要） */
+  end?: boolean;
+  /** 额外算作激活的路径（合并页：一个入口承载 `/import` 与 `/write`） */
+  also?: readonly string[];
+}
+
+const NAV_MAIN: NavItem[] = [
   { to: '/', label: '总览', icon: 'grid', end: true },
   { to: '/browse', label: '知识库浏览', icon: 'book' },
   { to: '/search', label: '语义搜索', icon: 'search' },
   // REQ-20261008-001：独立对话页入口（用户拍板 Q1：位于「语义搜索」之下）
   { to: '/chat', label: 'AI 对话', icon: 'chat' },
-  { to: '/import', label: '上传导入', icon: 'upload' },
-  { to: '/write', label: '知识写入', icon: 'edit' },
+  /**
+   * REQ-20261116-002：原「上传导入」+「知识写入」两项合并为一个入口。
+   * 图标取 `edit`（与页面名「知识写入」一致；`upload` 保留给导入 tab 里的拖拽区，
+   * 侧栏与页内同义重复会让"哪个是导入"更难认）。`also` 让 `/write` 上侧栏仍然高亮。
+   */
+  { to: '/import', label: MERGED_WRITE_LABEL, icon: 'edit', also: ['/write'] },
   { to: '/datasource', label: '数据源', icon: 'database' },
   { to: '/tasks', label: '后台任务', icon: 'clock' },
   // 知识视图（REQ-20261104-004）：多库聚合视图的团队共享管理页
@@ -243,7 +259,8 @@ export function AppShell(): JSX.Element {
   };
 
   const navItems = NAV_MAIN.filter((item) => {
-    if (!can('knowledge.write') && (item.to === '/import' || item.to === '/write')) return false;
+    // 合并项（REQ-20261116-002）：一个入口同时承载导入与手动写入，能力要求不变
+    if (!can('knowledge.write') && item.to === '/import') return false;
     if (!can('datasource.read') && item.to === '/datasource') return false;
     return true;
   });
@@ -296,7 +313,23 @@ export function AppShell(): JSX.Element {
   const serverInfo = useServerInfo();
 
   const location = useLocation();
-  const importVisible = location.pathname === '/import';
+  /**
+   * 合并页（REQ-20261116-002）：`/import` 与 `/write` 是同一个页面的两个 tab，页面本体都在
+   * AppShell 里常驻渲染、用 `display` 切换 —— **不能**改由 `<Outlet />` 渲染，否则路由一离开
+   * 组件就卸载，在途导入的轮询会随之停掉（见 plan 护栏 1）。
+   */
+  const mergedTab = writeTabFromPath(location.pathname);
+  const importTabVisible = mergedTab === 'import';
+  const writeTabVisible = mergedTab === 'write';
+  /**
+   * 写入页改为**首次进入后常驻**（懒挂载）：此前它只在 `/write` 时挂载，合并后若仍按需挂载，
+   * 切回导入 tab 会卸载正在写的正文草稿（拍板②要求切 tab 不丢）。
+   * 懒挂载而非无条件挂载：未进过写入 tab 的用户不必为它付 `useVectorAvailability` 等查询开销。
+   */
+  const [writeMounted, setWriteMounted] = useState(writeTabVisible);
+  useEffect(() => {
+    if (writeTabVisible) setWriteMounted(true);
+  }, [writeTabVisible]);
   const isChatRoute = location.pathname.startsWith('/chat');
   /**
    * Q4/Q5（REQ-20261008-001 用户拍板）：处于独立对话页时右侧面板**自动收起**，
@@ -368,9 +401,9 @@ export function AppShell(): JSX.Element {
 
   const currentLabel = aiSettingsActive
     ? 'AI 设置'
-    : govLabel ?? navItems.find((item) =>
-      item.end ? location.pathname === item.to : location.pathname.startsWith(item.to)
-    )?.label ?? (location.pathname.startsWith('/users')
+    // 用 navItemActive 而不是裸 startsWith：合并项的 `also` 也要命中，
+    // 否则在 `/write` 上 H1 会查不到 label 而变空（REQ-20261116-002）
+    : govLabel ?? navItems.find((item) => navItemActive(item, location.pathname))?.label ?? (location.pathname.startsWith('/users')
       ? '用户管理'
       : location.pathname.startsWith('/profile')
         ? '个人中心'
@@ -596,14 +629,18 @@ export function AppShell(): JSX.Element {
           {navItems.map((item) => {
             /** 「AI 对话」进行中标记（用户需求 2026-10-14）：挂在图标上，侧栏收起态同样可见 */
             const busy = item.to === '/chat' && chatStreaming;
+            /**
+             * 高亮改用 `navItemActive`（含 `also`）而不是 NavLink 自带的 isActive：
+             * 合并项只声明 `to: '/import'`，NavLink 在 `/write` 上会判为未激活 —— 侧栏不亮、
+             * 而顶栏 H1 却显示「知识写入」，两处打架。改用 Link 保留同一视觉与 aria-current。
+             */
+            const active = navItemActive(item, location.pathname);
             return (
-              <NavLink
+              <Link
                 key={item.to}
                 to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  `ki-nav-item${isActive ? ' ki-nav-item--active' : ''}`
-                }
+                className={`ki-nav-item${active ? ' ki-nav-item--active' : ''}`}
+                aria-current={active ? 'page' : undefined}
                 title={busy ? 'AI 正在生成回答' : undefined}
               >
                 <span className="ki-nav-item__icon">
@@ -611,7 +648,7 @@ export function AppShell(): JSX.Element {
                   {busy ? <span className="ki-nav-item__busy" aria-hidden="true" /> : null}
                 </span>
                 <span className="ki-nav-item__name">{item.label}</span>
-              </NavLink>
+              </Link>
             );
           })}
         </nav>
@@ -826,9 +863,21 @@ export function AppShell(): JSX.Element {
                 </button>
               </div>
             ) : null}
-            <div style={{ display: importVisible ? 'contents' : 'none' }}>
+            {/* 合并页（REQ-20261116-002）：两个 tab 的面板都在这里常驻，用 display 切换。
+                导入页**始终挂载**（含离开 `/import` 时）—— 在途导入的轮询靠它延续；
+                写入页首次进入后常驻 —— 切 tab 不丢正文草稿。 */}
+            <div style={{ display: importTabVisible ? 'contents' : 'none' }}>
               <ImportPage />
             </div>
+            {/* 能力门禁仍是知识的写权限：`routes.tsx` 的 RequireCapability 会把人重定向走，
+                但重定向前 AppShell 已经渲染了一帧 —— 这里先拦住，别让只读账号短暂挂载写入页
+                （改造前该页在路由里渲染，只读账号根本不挂载）。导入页是改造前就无条件挂载的，
+                不在本次调整范围。 */}
+            {writeMounted && can('knowledge.write') ? (
+              <div style={{ display: writeTabVisible ? 'contents' : 'none' }}>
+                <WritePage />
+              </div>
+            ) : null}
             <Outlet />
           </div>
         </main>

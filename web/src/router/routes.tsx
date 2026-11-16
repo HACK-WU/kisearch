@@ -4,7 +4,6 @@ import { AppShell } from '@/layouts/AppShell';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { BrowsePage } from '@/pages/BrowsePage';
 import { SearchPage } from '@/pages/SearchPage';
-import { WritePage } from '@/pages/WritePage';
 import { TasksPage } from '@/pages/TasksPage';
 import { DataSourcePage } from '@/pages/DataSourcePage';
 import { ChatPage } from '@/pages/ChatPage';
@@ -57,14 +56,18 @@ export function AppRoutes(): JSX.Element {
         <Route index element={<DashboardPage />} />
         <Route path="browse" element={<BrowsePage />} />
         <Route path="search" element={<SearchPage />} />
-        {/* 导入页由 AppShell 内联渲染（importVisible），路由本身只做能力门禁 */}
+        {/*
+          合并页（REQ-20261116-002）：`/import` 与 `/write` 是同一个页面的两个 tab。
+          页面本体（ImportPage / WritePage）由 AppShell 常驻渲染，两条路由只做能力门禁
+          —— 不能在这里渲染组件，否则离开路由即卸载，在途导入会中断。
+        */}
         <Route
           path="import"
           element={<RequireCapability cap="knowledge.write">{null}</RequireCapability>}
         />
         <Route
           path="write"
-          element={<RequireCapability cap="knowledge.write"><WritePage /></RequireCapability>}
+          element={<RequireCapability cap="knowledge.write">{null}</RequireCapability>}
         />
         <Route path="tasks" element={<TasksPage />} />
         {/* 任务详情抽屉（REQ-20261022-002）：URL 可分享 / 刷新可恢复 */}

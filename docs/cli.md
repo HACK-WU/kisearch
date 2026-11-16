@@ -278,7 +278,7 @@ ki scope readonly my-project --off    # 解除只读（恢复可写）
 |------|-------------|
 | `ki import`、`ki datasource sync`（含 Web 数据源页「同步」） | ✅ **放行** —— 内容仍可批量更新 |
 | `ki scope clear / delete`、`ki restore`、`ki rebuild-vector` | ✅ 放行（`clear/delete` 需额外 `--force-readonly`） |
-| Web 上传导入页、知识写入页、阅读页「编辑文档 / 添加链接」 | ⛔ 拒绝（HTTP 409 / `SCOPE_READONLY`） |
+| Web 的知识写入页（上传导入 / 手动写入）、阅读页「编辑文档 / 添加链接」 | ⛔ 拒绝（HTTP 409 / `SCOPE_READONLY`） |
 | MCP 写工具（`ki_store`、`ki_sync_relation` 等 8 个） | ⛔ 拒绝 |
 | CLI 单条写入（`ki store`、`ki sync-relation`、`ki group create` 等） | ⛔ 拒绝 |
 | 检索 / 浏览 / 导出 / 备份 | ✅ 不受影响 |

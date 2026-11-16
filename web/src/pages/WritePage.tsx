@@ -9,12 +9,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
+import { WRITE_TAB_PATH } from '@/lib/writeTabs';
 import { kiSyncRelation } from '@/api/mcpClient';
 import { fetchTags } from '@/api/httpApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
+import { WriteTabs } from '@/components/WriteTabs';
 import { groupError, relationError, scopeError, tagError } from '@/lib/validators';
 import { resolveWriteGroup } from '@/lib/writeGroup';
 import { useScopeReadonly, useVectorAvailability, vectorAvailabilityHint, useWritableScope } from '@/lib/hooks';
@@ -40,6 +42,21 @@ export function WritePage(): JSX.Element {
   const scopeReadonly = useScopeReadonly(scopeConfirmed ? scope : undefined);
   /** 「新建 Scope」模式下未回车确认的草稿；非空且与已确认 scope 不同 → 禁止静默写到旧 scope */
   const [scopeDraft, setScopeDraft] = useState('');
+  /**
+   * 合并页（REQ-20261116-002）：本页改为首次进入后**常驻**（切 tab 不卸载，否则正文草稿会丢），
+   * 于是"离开再回来"不再自动清空目标。这里显式补上「每次保存前重新确认目标」的既有约束：
+   * 每次进入写入 tab 都把确认态抹掉（正文与 Group 保留），避免"上次确认过的库 + 残留草稿"
+   * 被一路点保存直接写进错误的库。
+   */
+  const location = useLocation();
+  const onWriteTab = location.pathname === WRITE_TAB_PATH.write;
+  const wasOnWriteTab = useRef(onWriteTab);
+  useEffect(() => {
+    const was = wasOnWriteTab.current;
+    wasOnWriteTab.current = onWriteTab;
+    if (!onWriteTab || was) return;
+    setScopeConfirmed(false);
+  }, [onWriteTab]);
   const [preview, setPreview] = useState(false);
   const [vector, setVector] = useState(true);
   /**
@@ -261,6 +278,12 @@ export function WritePage(): JSX.Element {
           <p>sync-relation · 目标 scope：{scopeConfirmed ? scope : '尚未确认'}</p>
         </div>
       </div>
+
+      {/* 合并页的页级 tab（REQ-20261116-002）；与 ImportPage 共用同一个组件，
+          所以两个 tab 的层级、间距、键盘行为不会各演化一份。
+          只在**本页可见时**渲染：本页首次进入后常驻，无条件渲染会与导入页各持一份 tab 条
+          （重复 id + 键盘焦点被送进隐藏子树）。 */}
+      {onWriteTab ? <WriteTabs /> : null}
 
       {/* 只读 scope（REQ-20261029-001）：表单保持可填（不做只读遮罩），仅保存不可用 */}
       {scopeReadonly && scopeConfirmed && (
