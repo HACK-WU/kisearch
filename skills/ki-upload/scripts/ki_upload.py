@@ -263,9 +263,35 @@ def build_query(args, *, archive: bool) -> str:
         params["chunkSize"] = str(args.chunk_size)
     if args.chunk_overlap is not None:
         params["chunkOverlap"] = str(args.chunk_overlap)
+    # 分类（2026-11-16）：不传 = 长期保留；temp 需 ttlDays；event 需 event（id 或 #编号）
+    if args.lifecycle:
+        params["lifecycle"] = args.lifecycle
+    if args.ttl_days is not None:
+        params["ttlDays"] = str(args.ttl_days)
+    if args.event:
+        params["event"] = args.event
     if archive:
         params["archive"] = "tar.gz"
     return "?" + urllib.parse.urlencode(params)
+
+
+def validate_lifecycle_args(args) -> None:
+    """分类参数的本地预检。
+
+    与服务端同一套规则，但拦在上传之前 —— 否则要先传完整包才收到 400，
+    而这类错误与文件内容毫无关系（纯参数）。`--ttl-days` / `--event` 单独传时
+    服务端会按携带字段推断分类，这里同样放行。
+    """
+    kind = args.lifecycle or ("event" if args.event else ("temp" if args.ttl_days is not None else None))
+    if kind == "temp" and args.ttl_days is None:
+        raise UploadError("config", "--lifecycle temp 必须同时给 --ttl-days（1~365），不猜测期限")
+    if kind == "event" and not args.event:
+        raise UploadError("config", "--lifecycle event 必须同时给 --event（事件 id 或 #编号）")
+    if kind in (None, "wiki") and (args.ttl_days is not None or args.event):
+        raise UploadError(
+            "config",
+            "--ttl-days / --event 只能配合 --lifecycle temp / event 使用（长期保留不接受这两个参数）",
+        )
 
 
 def precheck_limits(base: str, token: str, total_bytes: int, largest: tuple[str, int], args) -> dict:
@@ -297,6 +323,7 @@ def precheck_limits(base: str, token: str, total_bytes: int, largest: tuple[str,
 
 def cmd_upload(args) -> dict:
     base, token = require_env(args)
+    validate_lifecycle_args(args)
     paths = [Path(p) for p in args.paths]
     missing = [str(p) for p in paths if not p.is_file()]
     if missing:
@@ -344,6 +371,7 @@ def cmd_upload(args) -> dict:
 
 def cmd_upload_dir(args) -> dict:
     base, token = require_env(args)
+    validate_lifecycle_args(args)
     root = Path(args.dir).resolve()
     if not root.is_dir():
         raise UploadError("input", f"不是目录：{root}")
@@ -405,6 +433,9 @@ def finish(args, base: str, token: str, uploaded: dict, *, mode: str) -> dict:
         "totalBytes": uploaded.get("totalBytes"),
         "import": None,
     }
+    # 分类回显（仅请求里带了分类时出现）：requested/temp 期限/事件，实际落地看 import.result.lifecycle
+    if isinstance(uploaded.get("lifecycle"), dict):
+        out["lifecycle"] = uploaded["lifecycle"]
     if args.wait:
         status = wait_for_task(base, token, task_id, args.wait_timeout)
         out["import"] = status
@@ -482,6 +513,13 @@ def main(argv: list[str]) -> int:
     def add_upload_opts(p):
         p.add_argument("--group", help="落点目录（留空则由文件所在子目录推导）")
         p.add_argument("--tags", help="逗号分隔的自定义标签")
+        p.add_argument(
+            "--lifecycle",
+            choices=["wiki", "temp", "event"],
+            help="文档分类：wiki=长期保留（默认）/ temp=到期进回收站 / event=跟随事件阶段",
+        )
+        p.add_argument("--ttl-days", type=int, help="仅 --lifecycle temp：保留天数 1~365（必填）")
+        p.add_argument("--event", help="仅 --lifecycle event：事件 id（evt_…）或 #编号")
         p.add_argument("--no-vector", action="store_true", help="只建全文索引，不做向量化（等价 ki import --no-vector）")
         p.add_argument("--conflict-mode", choices=["incremental", "overwrite", "skip", "suffix"], help="同名文档策略（默认 incremental）")
         p.add_argument("--chunk-size", type=int, help="切分长度 100–4000")

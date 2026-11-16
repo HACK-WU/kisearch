@@ -76,6 +76,19 @@ python scripts/ki_upload.py upload ./a.md ./sub/b.md --scope prod --group wiki
 
 `filename` 会保留相对目录（`sub/b.md` 落在 `sub/` 下）。文件数 > 300 时请改用 `upload-dir`。
 
+**带分类上传**（2026-11-16 起）：不传分类 = 长期保留；到期回收 / 挂事件：
+
+```bash
+# 临时保留 7 天（到期进回收站）
+python scripts/ki_upload.py upload ./meeting.md --scope prod --group 会议记录 --lifecycle temp --ttl-days 7
+
+# 挂到事件 #3（也可传 evt_… 开头的 id）
+python scripts/ki_upload.py upload ./incident.md --scope prod --group 故障复盘 --lifecycle event --event '#3'
+```
+
+> 上传来的文档是**普通文档**：事后可在「知识治理 → 生命周期」页改分类。数据源（目录/Git 同步）来的文档固定长期保留，不受影响。
+> 事件只能由人在 Web「知识治理 → 事件」创建；`--event` 不知道填什么时，先随便传一个再读错误响应里的 `available`（列出可用事件）。
+
 ### 3. 上传整个目录
 
 ```bash
@@ -83,6 +96,8 @@ python scripts/ki_upload.py upload-dir ./docs --scope prod
 ```
 
 **打包根目录 = 知识库根目录**：`./docs/a.md` → 根，`./docs/sub/b.md` → `sub/`。与 `ki import --source ./docs` 的结果一致。默认只打包 `.md` / `.mdx`（`--all-files` 放开，服务端仍会跳过非文档）。
+
+分类参数对整批生效（一次上传一个分类）：`upload-dir ./日报 --lifecycle temp --ttl-days 30`。
 
 ### 4. 查进度
 
@@ -101,6 +116,9 @@ python scripts/ki_upload.py status --task <taskId>
 | `--scope` | `default` | 目标库 |
 | `--group` | 由子目录推导 | 落点目录；不能写 `__root__`（要落根就留空） |
 | `--tags` | — | 逗号分隔标签 |
+| `--lifecycle` | 不传 = 长期保留 | `wiki` / `temp` / `event`；上传的文档是普通文档，可事后在页面改分类 |
+| `--ttl-days` | — | 仅 `temp`：保留天数 1~365，**必填**（不猜期限） |
+| `--event` | — | 仅 `event`：事件 id 或 `#编号`；已收口的事件不能挂文档 |
 | `--no-vector` | 关 | 只建全文索引，不做向量化（无 embedding key 时用） |
 | `--conflict-mode` | `incremental` | `incremental` / `overwrite` / `skip` / `suffix` |
 | `--chunk-size` / `--chunk-overlap` | 服务端配置 | 100–4000 / 0–500，且重叠须小于段长 |
@@ -125,6 +143,8 @@ stdout 一行 JSON：
 - `import.state` 为 `queued` + `waitingForScopeLock: true` 表示**在排队**（同库同一时刻只允许一个导入），不是卡住，别取消、别重投。
 - `import.source`：`memory` = 实时进度；`ledger` = 服务重启后从任务记录读到的终态；`log` = 只剩日志，需 `ki log <taskId>` 查。
 - `import.result.wikiWriteback`：**目标库配了 wiki 回写目录时才有**，`{written, skipped, failed}` 三个计数。它是「库里这份文档有没有同步成 wiki 文件」的唯一凭据；`written: 0` + `skipped > 0` 属正常（回写只补缺、不覆盖，重复上传的文档早就在目录里）。
+- `lifecycle`（请求里带了分类才有）：回显 `requested` / `ttlDays` / `expiresAt` / `event`，是**请求侧**口径。
+- `import.result.lifecycle`：分类的**落地**情况——`applied`（写入几篇）、`lockedSkipped`（目标同名文档由数据源同步维护、分类固定，这些文件被跳过且**没有导入**）、`hidden`（绑定事件的文档当前阶段为「隐藏」，上传成功但立刻搜不到）。后两个非空时必须转告用户，别只说"上传成功"。
 - 退出码：`0` 成功；`2` 配置/参数/依赖问题；`3` 上传或导入被判失败（JSON 里有 `code`）。
 
 ## 失败处理
@@ -136,6 +156,10 @@ stdout 一行 JSON：
 | `OPEN_API_SCOPE_FORBIDDEN` | Token 未授权该库（响应对库名脱敏，具体以服务端日志为准） |
 | `OPEN_API_SCOPE_READONLY` | 目标库被设成只读：`ki scope readonly <库名> --off` |
 | `FILE_TOO_LARGE_PREFLIGHT` | 本地预检就拦下了：文件超单文件上限，让运维调大 `scopes.<库名>.import.maxFileSize`（默认仅 1MB） |
+| `OPEN_API_INVALID_LIFECYCLE` | 分类参数不合法：`temp` 缺 `--ttl-days`、`wiki` 带了期限/事件、期限不在 1~365、`--lifecycle` 取值不认识。响应 `reason` 给出精确原因（`TTL_REQUIRED` 等） |
+| `OPEN_API_EVENT_NOT_FOUND` | `--event` 指的事件不存在：响应 `available` 列出可用的未收口事件；事件只能在 Web「知识治理 → 事件」创建，AI 不能创建 |
+| `OPEN_API_EVENT_CLOSED` | 事件已收口，不能再挂新文档：改挂进行中的事件，或先在页面重开该事件 |
+| `DATASOURCE_LIFECYCLE_LOCKED`（任务失败态，不在上传响应里） | 目标同名文档由数据源同步维护、分类固定为长期保留，这次带分类的文件被跳过且没导入：去掉 `--lifecycle/--ttl-days/--event` 重传（按原口径覆盖），或换个文档名 |
 | `VECTOR_UNAVAILABLE` | 导入阶段失败：该库没有可用的 embedding（未配 `apiKey` 或密钥失效）。**加 `--no-vector`** 先以全文模式入库（正文仍可被全文检索，之后可用 `ki restore <库名> --rebuild-vector` 补齐向量） |
 | `OPEN_API_PAYLOAD_TOO_LARGE` | 超过单次请求体上限：分批，或调大 `mcp.http.uploadMaxBytes` |
 | `OPEN_API_ARCHIVE_UNSAFE` | 归档里有 `..` / 绝对路径 / 链接文件，整包被拒且不落盘 |

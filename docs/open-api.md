@@ -153,6 +153,44 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
 | `conflictSuffix` | — | `conflictMode=suffix` 时的后缀模板 |
 | `chunkSize` | 配置值 | 切分长度 100–4000 |
 | `chunkOverlap` | 配置值 | 切分重叠 0–500，且必须小于 `chunkSize` |
+| `lifecycle` | 不传 = 长期保留 | 文档分类：`wiki` / `temp` / `event`，见下一节 |
+| `ttlDays` | — | 仅 `lifecycle=temp`：保留天数 1–365，**必填** |
+| `event` | — | 仅 `lifecycle=event`：事件 id（`evt_…`）或编号（`#3`） |
+
+### 给上传的文档打分类（临时 / 事件）
+
+不传分类时上传的文档是**长期保留**。要让它到期自动进回收站，或者挂到某个进行中的事件上：
+
+```bash
+# 临时保留 7 天
+curl -s -H "Authorization: Bearer $KI_TOKEN" \
+  -F "files=@meeting.md" \
+  "http://127.0.0.1:7423/open/v1/import/upload?scope=default&group=会议记录&lifecycle=temp&ttlDays=7"
+
+# 挂到事件 #3（事件编号或 evt_ 开头的 id 都行）
+curl -s -H "Authorization: Bearer $KI_TOKEN" \
+  -F "files=@incident.md" \
+  "http://127.0.0.1:7423/open/v1/import/upload?scope=default&group=故障复盘&lifecycle=event&event=%233"
+```
+
+行为要点：
+
+- **不传分类 = 长期保留**，即使该目录在治理配置里设了「默认临时」，上传也不会跟随（目录默认只作用于页面上手动写入的文档）。
+- **重复上传同一文件、这次没传分类 → 保留它原来的分类**，不会被重置成长期保留；显式传 `lifecycle=wiki` 才会清掉期限/事件。
+- 上传来的文档是**普通文档**，可以在「知识治理 → 生命周期」页改分类；而数据源（目录/Git 仓库同步）来的文档固定为长期保留，不能改。
+- **绑定事件后能不能被搜到，由该事件当前阶段决定**：阶段是「隐藏」时，上传成功但立刻搜不到，响应里会把这类文档列出来（`result.lifecycle.hidden`）。
+- 事件收口时，如果该事件类型设置的是「关联文档进回收站」，这批文档会跟着进回收站。
+- `temp` 文档到期后进回收站（保留天数按治理配置的回收站设置），不会立刻被永久删除。
+
+导入结果的 `result.lifecycle` 会说明这次分类的落地情况：
+
+```json
+{"requested": "temp", "applied": 3,
+ "lockedSkipped": [], "lockedSkippedTotal": 0,
+ "hidden": [], "hiddenTotal": 0}
+```
+
+- `lockedSkipped`：目标位置已有同名文档，而它是数据源同步来的（分类固定为长期保留）——这些文件**被跳过、没有导入**。去掉 `lifecycle`/`ttlDays`/`event` 重传即可按原口径覆盖。
 
 ### 上限与「为什么传不上去」
 
@@ -208,6 +246,9 @@ ki mcp status                      # 查看当前状态：uploadApi / uploadApiS
 | 415 | `OPEN_API_UNSUPPORTED_CONTENT_TYPE` | 只支持 `multipart/form-data` 与 `application/gzip` 两种形态 |
 | 400 | `OPEN_API_BAD_REQUEST` | 参数非法（如 `group` 写绝对路径、`conflictMode` 不是四个取值之一） |
 | 400 | `OPEN_API_INVALID_CHUNK` | `chunkSize` 不在 100–4000，或 `chunkOverlap` 不在 0–500 且小于 `chunkSize` |
+| 400 | `OPEN_API_INVALID_LIFECYCLE` | 分类参数不合法：`temp` 缺 `ttlDays`、`wiki` 带了 `ttlDays`/`event`、`ttlDays` 不在 1–365、`lifecycle` 取值不认识等。`reason` 给出精确原因（如 `TTL_REQUIRED`） |
+| 400 | `OPEN_API_EVENT_NOT_FOUND` | 指定的 `event` 不存在；`available` 列出可用的未收口事件（最多 5 个） |
+| 400 | `OPEN_API_EVENT_CLOSED` | 该事件已收口，不能再挂新文档；改挂进行中的事件，或先在页面重开该事件 |
 | 400 | `OPEN_API_VIEW_NOT_WRITABLE` | 把知识视图当成库名了——视图是多库的检索范围，不能作为写入目标 |
 | 400 | `OPEN_API_BAD_MULTIPART` | multipart 请求缺 boundary 或结构不完整（请用 `curl -F`，不要手拼请求体） |
 | 400 | `OPEN_API_ARCHIVE_UNSAFE` | 归档里有越界路径或链接文件，整包拒收且不落盘 |

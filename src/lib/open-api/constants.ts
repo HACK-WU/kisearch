@@ -71,4 +71,14 @@ export type OpenApiErrorCode =
   | 'OPEN_API_INVALID_CHUNK'
   | 'OPEN_API_DUPLICATE_CONTENT'
   | 'OPEN_API_STORAGE_FAILED'
-  | 'OPEN_API_SCOPE_READONLY';
+  | 'OPEN_API_SCOPE_READONLY'
+  /**
+   * 分类参数非法（400，2026-11-16）：`lifecycle` 取值不在 wiki/temp/event、
+   * `temp` 缺 `ttlDays`、`wiki` 带了伴随字段、`ttlDays` 越界或 `event` 缺失。
+   * `extra.reason` 给内部码（`TTL_REQUIRED` 等），便于精确分支。
+   */
+  | 'OPEN_API_INVALID_LIFECYCLE'
+  /** 绑定的事件不存在（400）：`extra.available` 列出未收口事件（最多 5 个） */
+  | 'OPEN_API_EVENT_NOT_FOUND'
+  /** 绑定的事件已收口（400）：已收口事件不再接收新文档 */
+  | 'OPEN_API_EVENT_CLOSED';

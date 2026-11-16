@@ -25,7 +25,17 @@
 | `conflictSuffix` | — | `suffix` 模式的后缀模板 |
 | `chunkSize` | 服务端配置 | 100–4000 的整数 |
 | `chunkOverlap` | 服务端配置 | 0–500 且小于 `chunkSize` |
+| `lifecycle` | 不传 = 长期保留 | `wiki` / `temp` / `event`。上传的文档**不是**数据源文档（`isImported=false`），可事后在页面改分类 |
+| `ttlDays` | — | 仅 `lifecycle=temp`：1–365 的整数，**必填**（缺 → `TTL_REQUIRED`） |
+| `event` | — | 仅 `lifecycle=event`：`evt_…` 或 `#3`；不存在 → `EVENT_NOT_FOUND`（附可用事件），已收口 → `EVENT_CLOSED` |
 | `archive` | — | 传 `tar.gz` 显式声明整包模式（与 Content-Type 双判） |
+
+分类语义（2026-11-16 起）：
+
+- 不传分类 = 长期保留，**不跟随目录默认分类**（目录默认只作用于页面手动写入）。
+- 重复上传同一文件且这次没传分类 → **保持原分类**；显式 `lifecycle=wiki` 才清空期限/事件。
+- 目标是数据源同步来的同名文档（`isImported`）→ 带分类的该文件被跳过（`lifecycle.lockedSkipped`），不改原文档。
+- 分类为 `event` 且事件当前阶段为 `hidden` → 上传成功但索引被摘除（`lifecycle.hidden`），检索不到。
 
 ### 两种请求体
 
@@ -41,8 +51,12 @@
 ```json
 {"ok": true, "uploadId": "...", "taskId": "...", "scope": "default", "group": "wiki",
  "files": {"saved": 1, "skipped": 0, "skippedSample": [{"rel": "x.txt", "reason": "扩展名不支持..."}]},
- "totalBytes": 1843200, "statusUrl": "/open/v1/import/status?taskId=..."}
+ "totalBytes": 1843200,
+ "lifecycle": {"requested": "temp", "ttlDays": 7, "expiresAt": 1764000000000},
+ "statusUrl": "/open/v1/import/status?taskId=..."}
 ```
+
+`lifecycle` 只在请求里带了分类时出现（**请求侧**口径）；落地情况看 status 的 `result.lifecycle`。
 
 `files.saved` 是**服务端收下的文件数**；非文档扩展名、超单文件上限的文件会进 `skippedSample`（最多 10 条），其余照常导入。
 
@@ -72,6 +86,9 @@
 | 400 | `OPEN_API_BAD_REQUEST` | 参数非法（`group` 绝对路径、`conflictMode` 非法值等） |
 | 400 | `OPEN_API_INVALID_CHUNK` | `chunkSize` / `chunkOverlap` 越界或非整数 |
 | 400 | `OPEN_API_VIEW_NOT_WRITABLE` | 把知识视图当库名了（视图是检索范围，不可写） |
+| 400 | `OPEN_API_INVALID_LIFECYCLE` | 分类参数不合法：`temp` 缺 `ttlDays`（`TTL_REQUIRED`）、`wiki` 带期限/事件（`LIFECYCLE_ARG_CONFLICT`）、期限越界（`TTL_INVALID`）、取值不认识（`LIFECYCLE_INVALID`）、事件缺失（`EVENT_REQUIRED`）。看响应 `reason` |
+| 400 | `OPEN_API_EVENT_NOT_FOUND` | 绑定的事件不存在：响应 `available` 给出未收口事件（最多 5 个）。事件只能由人在 Web 创建 |
+| 400 | `OPEN_API_EVENT_CLOSED` | 事件已收口，不能挂新文档：改挂进行中的事件或重开该事件 |
 | 400 | `OPEN_API_BAD_MULTIPART` | multipart 缺 boundary 或结构不完整 |
 | 400 | `OPEN_API_UNSUPPORTED_CONTENT_TYPE`（实际是 415） | 只支持 multipart 与 `application/gzip` |
 | 400 | `OPEN_API_ARCHIVE_UNSAFE` | 归档含越界路径/链接条目，整包拒收 |

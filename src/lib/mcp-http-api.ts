@@ -4471,6 +4471,19 @@ export interface RunImportArgs {
    * 「重试未完成」（`/api/import/retry-incomplete`）也刻意不传——用户裁定范围只到上传。
    */
   wikiWriteback?: boolean;
+  /**
+   * 文档身份（2026-11-16）：缺省 `true` = 数据源文档（`isImported`，分类固定 wiki）。
+   *
+   * **只有 `/open/v1/import/upload` 传 `false`**（用户 2026-11-16 拍板：Web 上传暂不动）。
+   * 传 `false` 后上传的文档是普通文档，可带 `lifecycle` / `ttlDays` / `eventId`。
+   */
+  isDatasourceDocument?: boolean;
+  /** 仅上传通道：分类（wiki / temp / event）；未传 = 新建 wiki / 覆盖保持原值 */
+  lifecycle?: string;
+  /** 仅 temp：期限天数（1~365） */
+  ttlDays?: number;
+  /** 仅 event：事件 id（`evt_…`）或 `#3` */
+  eventId?: string;
 }
 
 export async function runImportJob(job: Job, args: RunImportArgs, requestConfig: KiConfig): Promise<void> {
@@ -4512,6 +4525,12 @@ export async function runImportJob(job: Job, args: RunImportArgs, requestConfig:
         jobId: job.id,
         // 上传即回写（2026-11-13）：Web 上传页 / 对外上传接口都经本函数，口径见 RunImportArgs
         wikiWriteback: args.wikiWriteback,
+        // 文档身份与分类（2026-11-16）：只有 /open/v1 上传传 isDatasourceDocument=false，
+        // 其余调用点不传 → 缺省 true，行为与改前完全一致
+        ...(args.isDatasourceDocument === false ? { isDatasourceDocument: false } : {}),
+        ...(args.lifecycle !== undefined ? { lifecycle: args.lifecycle } : {}),
+        ...(args.ttlDays !== undefined ? { ttlDays: args.ttlDays } : {}),
+        ...(args.eventId !== undefined ? { eventId: args.eventId } : {}),
         onProgress: (progress) => {
           job.phase = progress.phase;
           job.progress = { done: progress.done, total: progress.total };

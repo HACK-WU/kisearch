@@ -18,6 +18,8 @@ import { groupDisplayName, isUserAssignableGroup } from '../../import-path.js';
 import { DEFAULT_IMPORT_CONFLICT_MODE, type ImportConflictMode } from '../../import-conflict.js';
 import { readTaskLog } from '../../task-log.js';
 import { getTaskRecord, type TaskRecord } from '../../task-registry.js';
+// 分类（2026-11-16）：与 `ki_sync_relation` 共用同一套校验（TTL / 事件归属 / 参数互斥）
+import { precheckLifecycle } from '../../relation-lifecycle.js';
 import { createJob, getJobById, runImportJob, type Job } from '../../mcp-http-api.js';
 import type { TaskOperator } from '../../task-registry.js';
 import { sendJson, sendOpenApiError } from '../respond.js';
@@ -117,6 +119,48 @@ export async function handleOpenApiImportUpload(input: RouteInput): Promise<void
   const tags = (q.get('tags') ?? '').trim() || undefined;
   const conflictSuffix = (q.get('conflictSuffix') ?? '').trim() || undefined;
 
+  // ── 4.7) 分类（2026-11-16）：上传通道的文档不是「数据源文档」，可带 lifecycle/ttlDays/event ──
+  // 校验必须在这里（**收流之前**）：事件不存在/已收口时连一个字节都不该收。
+  const lifecycleRaw = (q.get('lifecycle') ?? '').trim().toLowerCase();
+  const ttlRaw = (q.get('ttlDays') ?? '').trim();
+  const eventRef = (q.get('event') ?? '').trim() || undefined;
+  const lifecycleSpecified = lifecycleRaw !== '' || ttlRaw !== '' || eventRef !== undefined;
+  let lifecycleEcho: Record<string, unknown> | undefined;
+  if (lifecycleSpecified) {
+    // 非整数先当 NaN 交出去：`TTL_INVALID` 的分支与 sync_relation 完全同源，不另写一套判定
+    const ttlParsed = ttlRaw === '' ? undefined : Number(ttlRaw);
+    const check = precheckLifecycle({
+      scope,
+      // group 只用于错误详情，不影响校验结果；根落点用空串（与写入口径一致）
+      group,
+      relation: '(upload)',
+      locked: false,
+      lifecycle: lifecycleRaw || undefined,
+      ttlDays: ttlParsed,
+      eventId: eventRef,
+      now: Date.now(),
+    });
+    if (!check.ok) {
+      if (check.code === 'EVENT_NOT_FOUND') {
+        sendOpenApiError(res, 400, 'OPEN_API_EVENT_NOT_FOUND', check.message, { ...(check.details ?? {}) });
+        return;
+      }
+      if (check.code === 'EVENT_CLOSED') {
+        sendOpenApiError(res, 400, 'OPEN_API_EVENT_CLOSED', check.message, { ...(check.details ?? {}) });
+        return;
+      }
+      sendOpenApiError(res, 400, 'OPEN_API_INVALID_LIFECYCLE', check.message, { reason: check.code });
+      return;
+    }
+    lifecycleEcho = {
+      requested: check.summary.lifecycle,
+      ...(check.summary.ttlDays !== undefined ? { ttlDays: check.summary.ttlDays } : {}),
+      ...(check.summary.expiresAt !== undefined ? { expiresAt: check.summary.expiresAt } : {}),
+      ...(check.summary.eventId ? { eventId: check.summary.eventId } : {}),
+      ...(check.summary.event ? { event: check.summary.event } : {}),
+    };
+  }
+
   // ── 5) 按 Content-Type 分流收流 ──
   const contentType = String(req.headers['content-type'] ?? '');
   const receiveOpts = { config: ctx.config, scope, uploadMaxBytes: ctx.uploadMaxBytes };
@@ -198,6 +242,12 @@ export async function handleOpenApiImportUpload(input: RouteInput): Promise<void
       // 上传即回写：scope 配了 wikiSync.sourceDir 时，本次导入完成的文档会同步成
       // wiki 文件（已存在文件跳过）。未配置就是零副作用。
       wikiWriteback: true,
+      // 上传通道的文档不是「数据源文档」（2026-11-16）：新建时 isImported=false，
+      // 显式分类才生效；不传分类时落 wiki（不跟 group 默认），覆盖已有文档时保持原值。
+      isDatasourceDocument: false,
+      ...(lifecycleRaw ? { lifecycle: lifecycleRaw } : {}),
+      ...(ttlRaw !== '' ? { ttlDays: Number(ttlRaw) } : {}),
+      ...(eventRef ? { eventId: eventRef } : {}),
     },
     ctx.config,
   ).then(() => {
@@ -221,6 +271,8 @@ export async function handleOpenApiImportUpload(input: RouteInput): Promise<void
       skippedSample: received.skippedSample,
     },
     totalBytes: received.totalBytes,
+    // 分类回显（2026-11-16）：请求侧口径（实际落地结果在 status.result.lifecycle）
+    ...(lifecycleEcho ? { lifecycle: lifecycleEcho } : {}),
     statusUrl: `/open/v1/import/status?taskId=${job.id}`,
   });
 }
@@ -352,6 +404,7 @@ function summarizeImportResult(raw: unknown): Record<string, unknown> | null {
     stats?: { total?: number; vectorized?: number; skipped?: number; errors?: number; vector?: boolean };
     groups?: string[];
     wikiWriteback?: WikiWritebackLike;
+    lifecycle?: ImportLifecycleLike;
   };
   const groups = Array.isArray(r.groups) ? r.groups : [];
   return {
@@ -365,6 +418,28 @@ function summarizeImportResult(raw: unknown): Record<string, unknown> | null {
     groupsTotal: groups.length,
     ...(r.stats?.vector === undefined ? {} : { vectorStored: r.stats.vector }),
     ...(r.wikiWriteback ? { wikiWriteback: summarizeWikiWriteback(r.wikiWriteback) } : {}),
+    ...(r.lifecycle ? { lifecycle: summarizeLifecycle(r.lifecycle) } : {}),
+  };
+}
+
+/**
+ * 分类结果（2026-11-16）→ 对外摘要。
+ *
+ * 只给计数与前 10 条标识：`lockedSkipped`（目标文档是数据源文档、分类锁定故未导入）与
+ * `hidden`（绑定事件处于隐藏阶段、索引已摘除，上传成功但立刻搜不到）都是调用方
+ * **必须能看见**的事实——静默吞掉会让「上传成功」变成一句假话。
+ */
+function summarizeLifecycle(raw: ImportLifecycleLike): Record<string, unknown> {
+  const locked = Array.isArray(raw.lockedSkipped) ? raw.lockedSkipped : [];
+  const hidden = Array.isArray(raw.hidden) ? raw.hidden : [];
+  const label = (item: { group?: string; relation?: string }): string => `${item.group ?? ''}/${item.relation ?? ''}`;
+  return {
+    requested: typeof raw.requested === 'string' ? raw.requested : null,
+    applied: typeof raw.applied === 'number' ? raw.applied : 0,
+    lockedSkipped: locked.slice(0, 10).map(label),
+    lockedSkippedTotal: locked.length,
+    hidden: hidden.slice(0, 10).map(label),
+    hiddenTotal: hidden.length,
   };
 }
 
@@ -375,6 +450,14 @@ function summarizeImportResult(raw: unknown): Record<string, unknown> | null {
  * 本地重声明则会静默变成 undefined（对外只会看到 `0/0/0`，看着像"一篇都没写"）。
  */
 type WikiWritebackLike = Pick<WikiImportWritebackResult, 'written' | 'skipped' | 'failed' | 'failedCount'>;
+
+/** 导入内核的分类汇总（只声明本通道用到的字段，避免把内部类型泄进对外契约） */
+type ImportLifecycleLike = {
+  requested?: string;
+  applied?: number;
+  lockedSkipped?: { group?: string; relation?: string }[];
+  hidden?: { group?: string; relation?: string }[];
+};
 
 /**
  * wiki 写回 → 对外摘要。

@@ -54,6 +54,11 @@ import type { ScanResultEntry } from './ai-results.js';
 // 落点推导与重复判据共用同一实现（debug：group 吸收路径前缀时的疑似重复误判）
 import { ROOT_GROUP_KEY, isUserAssignableGroup, resolveGroupForSource } from './import-path.js';
 import { writeImportedDocsToWiki, type WikiImportWritebackResult } from './wiki-sync.js';
+// 分类（2026-11-16）：上传通道的文档不再算「数据源文档」，分类与阶段可见性由本模块落地。
+// 只在上传通道（`isDatasourceDocument: false`）启用；数据源同步 / `ki import --source` 保持 R4 强制 wiki。
+import { precheckLifecycle, applyLifecyclePlan, type LifecyclePlan } from './relation-lifecycle.js';
+import { readAllEvents } from './events/store.js';
+import { resolveVisibilityOfRelation, applyVisibility } from './visibility-index.js';
 
 // 保持既有对外契约：这些工具原先定义在本模块，统一迁到 chunk-entries（与 rebuild 共用）后继续 re-export
 export { deriveChunkRelation, deriveChunkSourcePath, deriveRelationText, toPosix };
@@ -227,6 +232,23 @@ export interface ImportConflict {
   unchanged?: boolean;
 }
 
+/**
+ * 上传通道的分类应用汇总（`isDatasourceDocument: false` 且显式传了分类时出现）。
+ *
+ * 为什么不复用 `stats`：分类是**文档级**结果，与「文件/条目」两种计数口径都不对齐；
+ * 放进 `stats` 会让既有的 `conflict + duplicate + other === skipped` 不变量变形。
+ */
+export interface ImportLifecycleSummary {
+  /** 本次请求的分类（`ttlDays` / `event` 单独传时按推断值回显，与 `validateLifecycleInput` 同口径） */
+  requested: 'wiki' | 'temp' | 'event';
+  /** 实际写入分类的文档数 */
+  applied: number;
+  /** 目标文档已是数据源文档（`isImported` → 分类锁定）：这些文件被跳过，未导入 */
+  lockedSkipped: { path: string; group: string; relation: string }[];
+  /** 分类为 event 且当前阶段为 hidden：已摘除四类索引（上传成功但立刻搜不到） */
+  hidden: { group: string; relation: string }[];
+}
+
 export interface ImportResult {
   ok: true;
   action: 'import';
@@ -300,6 +322,8 @@ export interface ImportResult {
    * wikiSync.enabled + sourceDir 时出现；未配置时不返回该字段）。
    */
   wikiWriteback?: WikiImportWritebackResult;
+  /** 分类应用汇总（仅上传通道且显式传了分类时出现） */
+  lifecycle?: ImportLifecycleSummary;
 }
 
 export interface HandleDirectImportArgs {
@@ -412,6 +436,26 @@ export interface HandleDirectImportArgs {
    * 数据源同步刻意不传（源目录就是用户自己的目录，写回会自我复制）。
    */
   wikiWriteback?: boolean;
+  /**
+   * 文档身份（2026-11-16）：缺省 `true` = 数据源文档（`isImported: true`，分类固定 wiki）。
+   *
+   * `false` = **上传通道**（`/open/v1/import/upload`）：上传是一次性推送，没有持续同步源，
+   * 不存在「标了临时、到期删掉、下次同步又拉回来」的死循环，因此不该按数据源锁定。
+   * 开启后：新建文档 `isImported: false`；覆盖已有文档时**不改动原身份**（不把数据源文档降级）；
+   * 显式分类生效；目标已是数据源文档时该文件被跳过（`lifecycle.lockedSkipped`）。
+   */
+  isDatasourceDocument?: boolean;
+  /**
+   * 文档分类（仅 `isDatasourceDocument: false` 时生效）。
+   *
+   * 与 `ki_sync_relation` 的差别只有一条：**未传时落 wiki，不读 group 默认**
+   * （上传通道的口径，用户 2026-11-16 拍板）。覆盖已有文档且未传分类时保持原值。
+   */
+  lifecycle?: string;
+  /** 仅 temp：期限天数（1~365） */
+  ttlDays?: number;
+  /** 仅 event：事件 id（`evt_…`）或 `#3` */
+  eventId?: string;
   /**
    * 候选所有权基线（数据源路径用）：只有这些相对路径能进入待删候选。
    * 缺省 = 现有 Web 导入行为（全 scope 差集）；**首次同步须传空数组**而非 undefined。
@@ -1031,9 +1075,31 @@ async function handleDirectImportUnlocked(
     previousLocalText?: string;
     chunks: Chunk[];          // 清洗后切分结果（向量化输入）
     entries: ScanResultEntry[]; // 向量化条目（text=清洗后 chunk）
+    /** 上传通道的分类决策（`undefined` = 本次不涉及分类，数据源通道恒为此） */
+    lifecyclePlan?: LifecyclePlan;
   }[] = [];
   const skipped: string[] = [];
   const conflicts: ImportConflict[] = [];
+  /**
+   * 上传通道分类（2026-11-16）：显式传了任一分类字段才启用。
+   *
+   * 刻意**不**复用 `precheckLifecycle` 的「未传 → group 默认」分支：上传通道的约定是
+   * 「未分类 = wiki」，不跟随目录默认（用户 2026-11-16 拍板，避免上传文档被目录默认静默变成临时）。
+   */
+  const lifecycleRequested = args.isDatasourceDocument === false
+    && (args.lifecycle !== undefined || args.ttlDays !== undefined || args.eventId !== undefined);
+  const eventsSnapshot = lifecycleRequested ? readAllEvents(scope) : [];
+  /** 回显用的分类：`lifecycle` 缺省时按携带字段推断（与 `validateLifecycleInput` 同序：event 先于 temp） */
+  const lifecycleRequestedKind: ImportLifecycleSummary['requested'] | undefined = !lifecycleRequested
+    ? undefined
+    : ((args.lifecycle as ImportLifecycleSummary['requested'] | undefined)
+      ?? (args.eventId !== undefined ? 'event' : args.ttlDays !== undefined ? 'temp' : undefined));
+  const lifecycleBlocked: ImportLifecycleSummary['lockedSkipped'] = [];
+  const lifecycleHidden: ImportLifecycleSummary['hidden'] = [];
+  const lifecycleErrors: { path: string; error: string }[] = [];
+  /** 因分类校验被跳过的路径：`skipped` 里混着它们，但日志不能说成"过大或超限" */
+  const lifecycleSkippedPaths = new Set<string>();
+  let lifecycleAppliedCount = 0;
   /**
    * 本次新建的文档（group\u0000relation → 条目）。
    * 用 Map 而不是数组：同一批次内 `a.md` 新建后又被 `a.md`（另一 sourcePath）覆盖时，
@@ -1186,6 +1252,44 @@ async function handleDirectImportUnlocked(
     }
     const relation = resolution.relation;
     const previousRelation = groupData?.hot_relations.find((item) => item.text === relation);
+    /**
+     * 上传通道的分类决策（2026-11-16）：**写入任何数据之前**判定，失败只影响本条
+     * （与批量写入「单条失败不影响其他条」同口径，不因一个文件毁掉整批）。
+     *
+     * `locked` 只认 `isImported`（与 relation-lifecycle 同口径）：目标已是数据源文档时
+     * 拒绝改分类 —— 一次上传不得把数据源文档降级成普通文档。
+     * 判定放在「同批去重剔除前一条 record」之前：被跳过的文件不该误删前一条已登记的记录。
+     */
+    let fileLifecyclePlan: LifecyclePlan | undefined;
+    if (lifecycleRequested) {
+      const check = precheckLifecycle({
+        scope,
+        group: groupPath,
+        relation,
+        existing: previousRelation,
+        locked: previousRelation?.isImported === true,
+        lifecycle: args.lifecycle,
+        ttlDays: args.ttlDays,
+        eventId: args.eventId,
+        now: Date.now(),
+        events: eventsSnapshot,
+      });
+      if (!check.ok) {
+        if (check.code === 'DATASOURCE_LIFECYCLE_LOCKED') {
+          lifecycleBlocked.push({ path: rel, group: groupPath, relation });
+        } else {
+          lifecycleErrors.push({ path: rel, error: `${check.code}: ${check.message}` });
+        }
+        // 计入 skipped：该文件既不导入也不产生半成品分类（分类必须与内容同时成立）
+        skipped.push(rel);
+        lifecycleSkippedPaths.add(rel);
+        logWarn(`分类校验未通过，跳过该文件（${groupPath}/${relation}）：${check.message}`);
+        processedFileCount++;
+        args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
+        continue;
+      }
+      if (check.plan.action !== 'keep') fileLifecyclePlan = check.plan;
+    }
     let previousLocalText = readLocalKb(scope, groupPath)[relation];
     // 同一批次内显式 overwrite 的两个不同 sourcePath 会解析到同一个逻辑 relation。
     // 后者应替换前者，不能让前者也进入向量化后变成无 relation 挂载的孤儿向量。
@@ -1330,6 +1434,7 @@ async function handleDirectImportUnlocked(
       previousLocalText: typeof previousLocalText === 'string' ? previousLocalText : undefined,
       chunks,
       entries,
+      ...(fileLifecyclePlan ? { lifecyclePlan: fileLifecyclePlan } : {}),
     });
     const planned = plannedRelations.get(groupPath) ?? [];
     const plannedIndex = planned.findIndex((item) => item.text === relation);
@@ -1339,7 +1444,8 @@ async function handleDirectImportUnlocked(
       score: 0,
       useCount: 0,
       lastUsedTime: null,
-      isImported: true,
+      // 上传通道的文档不是数据源文档（覆盖已有文档时沿用其原身份，不在这里改）
+      isImported: args.isDatasourceDocument !== false,
       sourcePath: rel,
     };
     if (plannedIndex >= 0) planned[plannedIndex] = plannedRelation;
@@ -1351,8 +1457,11 @@ async function handleDirectImportUnlocked(
     logProgress(fileRecords.length, effectiveFiles.length);
     args.onProgress?.({ phase: 'scan', done: processedFileCount, total: effectiveFiles.length });
   }
-  if (skipped.length > 0) {
-    logWarn(`跳过 ${skipped.length} 个文件（过大或 chunk 超限）：${skipped.join(', ')}`);
+  // 分类跳过的文件已在上面逐条打过原因，不能再混进「过大或 chunk 超限」那句
+  // （用户会去查文件大小，永远查不出原因）
+  const oversizeSkipped = skipped.filter((item) => !lifecycleSkippedPaths.has(item));
+  if (oversizeSkipped.length > 0) {
+    logWarn(`跳过 ${oversizeSkipped.length} 个文件（过大或 chunk 超限）：${oversizeSkipped.join(', ')}`);
   }
   const skippedConflicts = conflicts.filter((item) => item.action === 'skip');
   if (skippedConflicts.length > 0) {
@@ -1467,6 +1576,19 @@ async function handleDirectImportUnlocked(
         groups: [],
         source: { dir: sourceDir, chunkSize, chunkOverlap },
       };
+    }
+    // 分类锁定是**可判别的**失败：文案要点明"为什么没导进去"及出路，
+    // 不能混进"过大/超限/冲突"那句（用户会去查文件大小，永远查不出原因）。
+    if (lifecycleBlocked.length > 0 && skipped.length === lifecycleBlocked.length) {
+      const sample = lifecycleBlocked.slice(0, 5).map((item) => `${item.group}/${item.relation}`).join('、');
+      const rest = lifecycleBlocked.length > 5 ? ` ...等 ${lifecycleBlocked.length} 个` : '';
+      throw Object.assign(
+        new Error(
+          `全部 ${lifecycleBlocked.length} 个文件的分类被锁定（目标文档由数据源同步维护，分类固定 wiki）：${sample}${rest}。`
+          + '改为不带 lifecycle/ttlDays/event 重传（按数据源口径覆盖），或换一个文档名',
+        ),
+        { code: 'DATASOURCE_LIFECYCLE_LOCKED' },
+      );
     }
     throw new Error(`无可导入文件（全部被跳过：过大/超限/冲突 ${skipped.length + skippedConflictCount} 个）`);
   }
@@ -2035,9 +2157,17 @@ async function handleDirectImportUnlocked(
   logPhaseDone(3, TOTAL, `Group 树构建完成，涉及 ${ctx.groups.size} 个 Group`);
 
   logPhaseStart(4, TOTAL, `写入元数据（${ctx.entries.length} 条 relations）...`);
-  phase4WriteRelations(ctx, relationsCache);
+  phase4WriteRelations(ctx, relationsCache, args.isDatasourceDocument !== false);
   for (const rec of activeFileRecords) {
     const rel = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
+    /**
+     * 上传通道的分类（2026-11-16）：与内容**同批落盘**（紧跟其后的元数据提交窗口），
+     * 不做"先写内容、事后再分类"——那会留下「内容已是新的、分类还是旧的」中间态。
+     */
+    if (rel && rec.lifecyclePlan) {
+      applyLifecyclePlan(rel, rec.lifecyclePlan);
+      lifecycleAppliedCount++;
+    }
     const ftsIds = fullTextIdsByKey.get(`${rec.groupPath}\u0000${rec.relation}`);
     const ftsLocators = fullTextLocatorsByKey.get(`${rec.groupPath}\u0000${rec.relation}`);
     if (rel && ftsIds) rel.ftsIds = ftsIds;
@@ -2096,6 +2226,52 @@ async function handleDirectImportUnlocked(
   });
   args.onProgress?.({ phase: 'persist', done: 1, total: 1 });
   logPhaseDone(4, TOTAL, '元数据写入完成');
+
+  /**
+   * 阶段可见性（S-03，2026-11-16 接入导入链路）：`event` 分类的文档受事件当前阶段控制，
+   * `hidden` 阶段必须**不可检索**。导入内核此前完全不认可见性 —— 上传一篇绑到 hidden
+   * 阶段事件的文章，它会照常写进 dense/FTS，事件阶段语义被静默推翻且没有任何测试会红。
+   *
+   * 顺序：必须在上面的元数据提交窗口之后 —— `applyVisibility` 按 ID 摘除索引，
+   * 而这些 ID（memoryIds/ftsIds）正是随这次提交才落盘的。
+   * 只处理 `event` 文档：其余分类恒为 full，跳过（`resolveVisibilityOfRelation` 亦如此判定）。
+   */
+  for (const rec of activeFileRecords) {
+    const rel = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
+    if (!rel) continue;
+    /**
+     * ★ 判据必须是**落盘后的实际分类**，不能是"本次入参有没有传 event"。
+     * 若只看入参，`keep` 路径（重复上传同一篇、这次不带分类）会整段跳过 —— 而上面的
+     * Phase 4 已经把内容重新写进 dense/FTS，于是「排查中（hidden）」的文档被一次普通
+     * 覆盖悄悄索引回来，阶段语义被静默推翻。这正是 `sync-relation` 里那条
+     * 「hidden 文档不能被任何写入路径重新索引回去」的镜像，两处判据必须同构。
+     * 先判 `lifecycle`，非 event 文档不读事件表（纯 wiki 导入零额外读盘）。
+     */
+    if (rel.lifecycle !== 'event') continue;
+    const visibility = resolveVisibilityOfRelation(scope, rel);
+    if (visibility.mode !== 'hidden') continue;
+    try {
+      /**
+       * ★ `from` 必须显式传 `'full'`：`applyVisibility` 缺省时按**当前语义**现算旧档位，
+       * 而分类刚在 Phase 4 落盘，此刻语义上已经是 hidden ⇒ 计划退化成「hidden → hidden」
+       * 的空操作，索引一条都不会摘（真机实测：接口回显 hidden、全文检索照常命中）。
+       * 刚写完的索引就是 full，这是事实而不是推断 —— 与 `sync-relation` 覆盖写同一口径。
+       */
+      const applied = await applyVisibility({ scope, group: rec.groupPath, relation: rec.relation, to: 'hidden', from: 'full' });
+      lifecycleHidden.push({ group: rec.groupPath, relation: rec.relation });
+      if (applied.failed.length > 0) {
+        lifecycleErrors.push({
+          path: rec.rel,
+          error: `阶段为 hidden，索引摘除未全部成功（${applied.failed.join('/')}），该文档可能仍可被检索`,
+        });
+      }
+    } catch (err) {
+      lifecycleErrors.push({
+        path: rec.rel,
+        error: `阶段为 hidden，索引摘除失败：${(err as Error).message}`,
+      });
+    }
+  }
   const kbResult = ctx;
 
   // Phase 5: 记录 source（含切分参数持久化 H-18；不再依赖 git commit——增量由幂等追加承载）
@@ -2105,7 +2281,7 @@ async function handleDirectImportUnlocked(
     ? 'source 块已跳过（数据源同步不写 group-index.source）'
     : `source 已记录（dir=${sourceDir}）`);
 
-  const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors];
+  const importErrors = [...vectorizeResult.errors, ...tagErrors, ...auxiliaryErrors, ...vectorCleanupErrors, ...fullTextErrors, ...lifecycleErrors];
   // ★ created 在扫描阶段记录，后续向量化/元数据提交失败的文件并不会真正落库 ——
   //   必须剔除，否则失败会被报成「新增」。排序与待删候选同口径（group/relation 升序）。
   const failedKeys = new Set([...failedRecords].map((rec) => `${rec.groupPath}\u0000${rec.relation}`));
@@ -2301,6 +2477,17 @@ async function handleDirectImportUnlocked(
     /** S-02：只报告"是否入队"，不等整理完成 */
     indexMaintenance: { scheduled: indexMaintenance.accepted, merged: indexMaintenance.merged },
     ...(wikiWriteback ? { wikiWriteback } : {}),
+    // 分类汇总（2026-11-16）：只在显式传了分类时出现，未传时既有消费方零影响
+    ...(lifecycleRequested && lifecycleRequestedKind
+      ? {
+          lifecycle: {
+            requested: lifecycleRequestedKind,
+            applied: lifecycleAppliedCount,
+            lockedSkipped: lifecycleBlocked,
+            hidden: lifecycleHidden,
+          } satisfies ImportLifecycleSummary,
+        }
+      : {}),
   };
   } finally {
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
@@ -2359,10 +2546,13 @@ function upsertRelation(
   relationText: string,
   memoryIds: string[] | null | undefined,
   sourcePath: string | null | undefined,
-  tags?: string[]
+  tags?: string[],
+  identity?: { isDatasourceDocument?: boolean }
 ): void {
   const groupData = ensureCacheGroup(cache, groupPath);
   let rel = groupData.hot_relations.find((r) => r.text === relationText);
+  /** 缺省 = 数据源文档（CLI / 数据源同步 / Web 上传，行为与改前完全一致） */
+  const datasource = identity?.isDatasourceDocument !== false;
 
   if (!rel) {
     rel = {
@@ -2371,10 +2561,11 @@ function upsertRelation(
       score: 0,
       useCount: 0,
       lastUsedTime: null,
-      isImported: true,
+      // 上传通道的文档是普通文档（不是数据源同步来的），因此可带分类
+      isImported: datasource,
     };
     groupData.hot_relations.push(rel);
-  } else {
+  } else if (datasource) {
     // 已存在：刷新为导入态，不做评分回退（与 import-kb 行为一致）
     rel.isImported = true;
     /**
@@ -2388,6 +2579,12 @@ function upsertRelation(
     delete rel.eventId;
     delete rel.ttlDays;
   }
+  /**
+   * 上传通道覆盖已有文档（`datasource === false`）时**什么都不改**：
+   *   - 身份沿用原值：一次上传不得把数据源文档降级成普通文档（否则下次同步又变回来，来回跳）；
+   *   - 分类沿用原值：用户上次设的「临时 30 天」不能被一次不带分类的重传静默抹掉。
+   * 本次显式传的分类由调用方随后 `applyLifecyclePlan` 写入（与内容同批落盘）。
+   */
   // 方案 D：持久化全部 chunk docId（文件级 relation 多值）
   // 向量化失败/--no-vector 时 memoryIds 为空数组（文件级 relation 记录仍存在，sourcePath 必写）
   if (Array.isArray(memoryIds)) {
@@ -2553,7 +2750,8 @@ function phase3EnsureGroups(
 /** Phase 4（方案 D）：只写 relations-cache 文件级 relation（local KB 已在导入第 1 步写入文件原文） */
 function phase4WriteRelations(
   ctx: ImportContext,
-  cache: RelationsCache
+  cache: RelationsCache,
+  isDatasourceDocument: boolean
 ): void {
   // 文件级 relation 聚合：同 group 下相同 relation 名（文件级，basename 去扩展名）→ 一条记录
   const fileRelMap = new Map<string, { groupPath: string; relation: string; sourcePath: string }>();
@@ -2573,6 +2771,6 @@ function phase4WriteRelations(
     // 不传 sourcePath detail：避免 TTY \r 刷新长路径残留叠加成乱码（与全量导入进度一致）
     logProgress(i, total);
     // 方案 D：文件级 relation 挂 memoryIds（向量化完成后由回填逻辑写入），此处先建空记录占位
-    upsertRelation(cache, groupPath, relation, [], sourcePath);
+    upsertRelation(cache, groupPath, relation, [], sourcePath, undefined, { isDatasourceDocument });
   }
 }
