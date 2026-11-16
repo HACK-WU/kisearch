@@ -13,7 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { loadConfig, resolveScope, type KiConfig } from './config.js';
-import { getKbDir, getSource } from './scope.js';
+import { getKbDir, getSource, validateScope } from './scope.js';
 import { ensureScopeDir } from './store.js';
 import {
   DEFAULT_IMPORT_CONFLICT_MODE,
@@ -803,20 +803,44 @@ export interface ReusableManagedClone {
   ownerScope: string;
 }
 
+/**
+ * 枚举「可能有 KB 目录」的 scope 名：`config.scopes` 里声明过的 ∪ dataDir 下的目录。
+ *
+ * KB 目录不总在 dataDir 下——`config.scopes.<scope>.kbDir` 会把整个库挪到别处
+ * （本项目 `kisearch` / `kisearch-memory` 即如此）。只扫 dataDir 会让这些 scope 的
+ * `datasource.json` 永远扫不到：CLI 登记成功，列表页 / 调度器 / 共享 clone 引用计数
+ * 却全当它不存在（2026-11-16 kisearch-memory 实测）。
+ */
+function enumerateScopeNames(config: KiConfig): string[] {
+  const names = new Set<string>();
+  const accept = (name: string): void => {
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) return;
+    try {
+      validateScope(name);
+    } catch {
+      // 调度器保留字：readDataSource 必然抛错，不该在列表里变成「损坏」
+      return;
+    }
+    names.add(name);
+  };
+  for (const name of Object.keys(config.scopes ?? {})) accept(name);
+  try {
+    for (const entry of fs.readdirSync(config.dataDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) accept(entry.name);
+    }
+  } catch {
+    // dataDir 不可读：仍以配置声明的 scope 为准，不因目录缺失把整表清空
+  }
+  return [...names];
+}
+
 /** 读取所有已登记记录（不做源目录可达性过滤；共享 clone/引用计数/调度器必须看到它们）。 */
 export function listRegisteredDataSourceRecords(config: KiConfig): { scope: string; record: DataSourceRecord }[] {
   const out: { scope: string; record: DataSourceRecord }[] = [];
-  let entries: fs.Dirent[] = [];
-  try {
-    entries = fs.readdirSync(config.dataDir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^[a-zA-Z0-9_-]+$/.test(entry.name)) continue;
+  for (const scope of enumerateScopeNames(config)) {
     try {
-      const read = readDataSource(entry.name);
-      if (read.ok) out.push({ scope: entry.name, record: read.record });
+      const read = readDataSource(scope);
+      if (read.ok) out.push({ scope, record: read.record });
     } catch {
       /* 单条损坏不影响其余记录 */
     }
@@ -1230,15 +1254,7 @@ export interface DataSourceScopeScan {
  */
 export function scanDataSources(config: KiConfig = loadConfig()): DataSourceScopeScan {
   const out: DataSourceScopeScan = { registered: [], missing: [], corrupt: [] };
-  let entries: fs.Dirent[] = [];
-  try {
-    entries = fs.readdirSync(config.dataDir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !/^[a-zA-Z0-9_-]+$/.test(entry.name)) continue;
-    const scope = entry.name;
+  for (const scope of enumerateScopeNames(config)) {
     let read: ReadDataSourceResult;
     try {
       read = readDataSource(scope);

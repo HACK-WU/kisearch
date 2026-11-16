@@ -113,6 +113,20 @@ export function resolveVectorAvailability(input: VectorAvailabilityInput): Vecto
 }
 
 /**
+ * 「已确诊向量不可用」——只有它才允许把界面**改写成降级叙事**（顶部横幅、行内「仅全文」徽标）。
+ *
+ * ★ 与 `status !== 'available'` 不是同一件事：`checking`（首屏两路 query 未回）与 `unknown`
+ *   （探测失败 / daemon 版本旧）都不代表向量真的坏了。用「非 available」驱动这类**陈述性**标记，
+ *   会让页面刷新瞬间先给所有向量源挂一遍「仅全文 / 同步会失败」，探测回来后又集体消失
+ *   （2026-11-16 数据源页实测，用户报为 bug）。
+ * ★ 禁用写入按钮仍用 `!available`（checking 期间宁可不放行，避免提交注定失败的任务）——
+ *   那是**行为约束**，短暂禁用无副作用；而错的标记会让人怀疑自己的配置。
+ */
+export function isVectorConfirmedUnavailable(availability: VectorAvailability): boolean {
+  return availability.status === 'unavailable';
+}
+
+/**
  * 就地说明文案（三个写入/检索页面的 hint 统一口径）。
  *
  * ★ 不用「未知」而用「无法确认」：用户能理解的话，且指向可行动作（重试 / 稍后）；

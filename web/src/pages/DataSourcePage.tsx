@@ -26,6 +26,8 @@ import { addRemoteDataSource, getDataSourceDetail, getDocContent, pruneDataSourc
 import { getTask } from '@/api/tasksApi';
 import { DatasourceEditDialog } from '@/components/DatasourceEditDialog';
 import { describeSchedule, scheduleBadge, scheduleNextLine } from '@/lib/datasourceSchedule';
+// 「已确诊不可用」才算降级：checking / unknown 期间挂「仅全文」会让刷新时闪一遍（2026-11-16）
+import { isVectorConfirmedUnavailable } from '@/lib/vectorAvailability';
 // 根散文件的 group 是保留键（`__root__`）：落点列用它所属的「根目录」描述，不回显内部键
 import { ROOT_GROUP_FIELD_LABEL, ROOT_GROUP_KEY } from '@/lib/rootGroup';
 import { applyRowOrder, mergeRowOrder } from '@/lib/datasourceOrder';
@@ -1013,9 +1015,15 @@ export function DataSourcePage(): JSX.Element {
    */
   const vectorAvailability = useVectorAvailability();
   const vectorAvailable = vectorAvailability.status === 'available';
-  const vectorBlockedSources = vectorAvailable
-    ? []
-    : (listQuery.data?.sources ?? []).filter((item) => item.vector);
+  /**
+   * 「确诊不可用」≠「非 available」（2026-11-16）：checking 期间（首屏两路请求未回）也挂横幅，
+   * 刷新时就会先闪一句「向量服务不可用：N 个源同步会失败」再整条消失 —— 与行内「仅全文」
+   * 徽标同源误报。横幅是**陈述**，只在确诊时出。
+   */
+  const vectorConfirmedBlocked = isVectorConfirmedUnavailable(vectorAvailability);
+  const vectorBlockedSources = vectorConfirmedBlocked
+    ? (listQuery.data?.sources ?? []).filter((item) => item.vector)
+    : [];
 
   return (
     <div className={`ki-datasource-page${scope ? ' ki-datasource-page--drawer' : ''}`}>
@@ -1650,6 +1658,9 @@ export function DataSourcePage(): JSX.Element {
                    * 关闭向量化（编辑弹窗里可改）或修好 embedding 后自动恢复可点。
                    */
                   const rowVectorBlocked = source.vector === true && !vectorAvailable;
+                  // 徽标只在**确诊不可用**时挂（2026-11-16）：用「非 available」会让刷新瞬间
+                  // 所有向量源先闪一遍「仅全文」，探测回来又集体消失（用户报的 bug）
+                  const rowVectorBadge = source.vector === true && vectorConfirmedBlocked;
                   // 只禁本行：别的行仍可点（不同 scope 各有服务端锁）
                   const rowCanSync = !source.running && rowAvailability?.allowed === true && !rowSyncing
                     && !rowVectorBlocked;
@@ -1668,7 +1679,11 @@ export function DataSourcePage(): JSX.Element {
                     : source.running
                       ? (source.activeState === 'queued' ? '同步已排队' : '同步进行中')
                       : rowVectorBlocked
-                        ? '向量服务不可用：本次同步会失败。请在「编辑」里关闭向量化（改为仅全文），或修复 embedding 后重试'
+                        ? (vectorConfirmedBlocked
+                          ? '向量服务不可用：本次同步会失败。请在「编辑」里关闭向量化（改为仅全文），或修复 embedding 后重试'
+                          : vectorAvailability.status === 'checking'
+                            ? '正在检查向量可用性，检查完成前暂不能同步'
+                            : '无法确认向量可用性，暂不能同步（刷新页面可重试）')
                         : rowAvailability === undefined
                           ? '当前 daemon 不支持页面同步，请升级并重启'
                         : rowAvailability.reason === 'cooldown'
@@ -1722,8 +1737,10 @@ export function DataSourcePage(): JSX.Element {
                             状态列只有 7%（约 76px 可用），塞两个徽标必然折行，有标记的行会比别的行高，
                             正是之前反复避免的行高抖动。此处复用 `ki-ds-sync-badge` 的外形与占位
                             （实测 7 档视口不改变行高，代价是长 scope 名更早省略，与「同步中」同款）。
-                            只标开了向量化的行：关闭向量化的源在同样环境下照常同步，标它等于误伤。 */}
-                        {rowVectorBlocked ? (
+                            只标开了向量化的行：关闭向量化的源在同样环境下照常同步，标它等于误伤。
+                            条件必须是「确诊不可用」（rowVectorBadge），不是「被阻断」（rowVectorBlocked）：
+                            后者含 checking，会让刷新瞬间所有行闪一遍「仅全文」（2026-11-16 用户报的 bug）。 */}
+                        {rowVectorBadge ? (
                           <span
                             className="ki-ds-sync-badge ki-ds-sync-badge--vector"
                             title="向量服务不可用：该源已开启「向量化」，同步会整体失败；在「编辑」里关闭向量化或修复 embedding 后恢复"

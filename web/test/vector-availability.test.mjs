@@ -32,7 +32,7 @@ const vite = await createServer({
   appType: 'custom',
   logLevel: 'silent',
 });
-const { resolveVectorAvailability, vectorAvailabilityHint, editorVectorizeHint, vectorBadgeLabel } =
+const { resolveVectorAvailability, vectorAvailabilityHint, editorVectorizeHint, vectorBadgeLabel, isVectorConfirmedUnavailable } =
   await vite.ssrLoadModule('/src/lib/vectorAvailability.ts');
 const { summarizeHealth, vectorOnlyFailureLabel, isVectorHealthCheck, VECTOR_HEALTH_CHECK_NAMES } =
   await vite.ssrLoadModule('/src/lib/healthSummary.ts');
@@ -346,5 +346,51 @@ describe('文档编辑器「保存时向量化」默认值 = 跟随文档索引�
 
   it('向量不可用时仍强制降级为 FTS（与 2026-11-02 的口径一致）', () => {
     assert.match(src, /const effectiveVectorize = vectorizeChoice && vectorAvailable/);
+  });
+});
+
+/**
+ * 「确诊不可用」判据（2026-11-16 用户报的 bug）。
+ *
+ * 现象：刷新数据源页时，所有开了向量化的行先集体挂上「仅全文」徽标，探测回来又立刻消失。
+ * 根因：横幅与行内徽标用「非 available」驱动，而首屏两路 query 未回时判据是 **checking**，
+ * 同样落在「非 available」里 ⇒ 误报。这两处是**陈述性**标记（"你现在的源按仅全文跑"），
+ * 只有确诊 unavailable 才成立；行为约束（禁用同步按钮）仍按 `!available`，checking 期间
+ * 短暂禁用无副作用。
+ */
+describe('isVectorConfirmedUnavailable（陈述性标记只认确诊不可用）', () => {
+  it('只有 unavailable 为真；checking / unknown / available 一律为假', () => {
+    assert.equal(isVectorConfirmedUnavailable({ status: 'unavailable' }), true);
+    for (const status of ['checking', 'unknown', 'available']) {
+      assert.equal(isVectorConfirmedUnavailable({ status }), false, `${status} 不得算确诊不可用`);
+    }
+  });
+
+  const page = readFileSync(path.join(webRoot, 'src/pages/DataSourcePage.tsx'), 'utf8');
+
+  it('数据源页：顶部横幅与行内「仅全文」都改按确诊判据', () => {
+    assert.match(
+      page,
+      /const vectorConfirmedBlocked = isVectorConfirmedUnavailable\(vectorAvailability\)/,
+      '必须引入确诊判据（否则 checking 时横幅会闪）',
+    );
+    assert.match(page, /const vectorBlockedSources = vectorConfirmedBlocked/, '横幅候选须按确诊判据筛选');
+    assert.match(
+      page,
+      /const rowVectorBadge = source\.vector === true && vectorConfirmedBlocked/,
+      '行内徽标须按确诊判据',
+    );
+    assert.match(page, /\{rowVectorBadge \? \(/, '徽标 JSX 必须用 rowVectorBadge');
+    // 回归防线：徽标不得退回 rowVectorBlocked（它含 checking ⇒ 刷新必闪）
+    assert.doesNotMatch(
+      page,
+      /\{rowVectorBlocked \? \(\s*<span[\s\S]{0,200}ki-ds-sync-badge--vector/,
+      '「仅全文」徽标挂在了 rowVectorBlocked 上：checking 期间会闪一遍',
+    );
+  });
+
+  it('数据源页：同步按钮仍按 !available 拦截（checking 不放行，属行为约束而非标记）', () => {
+    assert.match(page, /const rowVectorBlocked = source\.vector === true && !vectorAvailable/);
+    assert.match(page, /&& !rowVectorBlocked/, '同步按钮仍须被向量阻断拦住');
   });
 });
