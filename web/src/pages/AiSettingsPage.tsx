@@ -27,7 +27,7 @@ import '@/styles/ai-settings.css';
 /** 能力分组（顺序 = 用户从"最常用"到"尚未接入"） */
 const CAPABILITIES: ReadonlyArray<{ key: CapabilitySection; label: string; state: string; icon: string }> = [
   { key: 'chat', label: 'AI 对话', state: '提示词 · Skill · 工具', icon: 'chat' },
-  { key: 'analysis', label: 'AI 分析', state: '未接入 · 提示词可预设', icon: 'spark' },
+  { key: 'analysis', label: 'AI 分析', state: '目录 · 提示词 · Skill · 工具', icon: 'spark' },
   { key: 'find', label: 'AI 查找', state: '确定性检索 · 未接入', icon: 'search' },
 ];
 
@@ -55,7 +55,7 @@ export function AiSettingsPage(): JSX.Element {
    *     会发出一个必然 403 的写入请求，界面显示"保存失败"而不是"没权限"。
    *   后台 PUT 仍按能力 403 兜底，前端锁只是体验层。
    */
-  const canWrite = can('knowledge.write');
+  const canWrite = can('ops.write');
   const isViewer = status !== 'loading' && !canWrite;
   const controlsLocked = isViewer || status === 'loading';
 
@@ -79,7 +79,7 @@ export function AiSettingsPage(): JSX.Element {
 
       {isViewer && (
         <p className="ai-set__ro" role="status">
-          当前账号为只读：可以查看全部 AI 配置，修改需要写权限（<code>knowledge.write</code>）。
+          当前账号为只读：可以查看全部 AI 配置，修改全局 AI 配置需要管理员写权限（<code>ops.write</code>）。
         </p>
       )}
 

@@ -32,4 +32,20 @@ export const clonePromptConfig = (c: PromptConfig): PromptConfig => ({
   // （浅拷对象会让改草稿时顺手改到基线，表现为"没保存也生效了"）
   ...(c.analysisPrompt !== undefined ? { analysisPrompt: { ...c.analysisPrompt } } : {}),
   ...(c.findPrompt !== undefined ? { findPrompt: { ...c.findPrompt } } : {}),
+  ...(c.analysis !== undefined
+    ? {
+        analysis: {
+          targetDirs: {
+            ...(c.analysis.targetDirs.defaultDir !== undefined ? { defaultDir: c.analysis.targetDirs.defaultDir } : {}),
+            byScope: { ...c.analysis.targetDirs.byScope },
+          },
+          prompt: { ...c.analysis.prompt },
+          skills: c.analysis.skills.map((s) => ({ ...s })),
+          tools: { ...c.analysis.tools },
+          ...(c.analysis.maxRounds !== undefined ? { maxRounds: c.analysis.maxRounds } : {}),
+          ...(c.analysis.maxFiles !== undefined ? { maxFiles: c.analysis.maxFiles } : {}),
+          ...(c.analysis.reasoningEffort !== undefined ? { reasoningEffort: c.analysis.reasoningEffort } : {}),
+        },
+      }
+    : {}),
 });

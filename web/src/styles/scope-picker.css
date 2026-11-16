@@ -253,11 +253,23 @@
 }
 
 /* ── 候选项右侧徽标 ───────────────────────── */
+/*
+ * ★ 必须固定行高：徽标在 flex 行里会被 `align-items: center` 拉伸，
+ *   原先只有 font-size 10px + padding 1px 5px，继承父级 line-height 1.4 后
+ *   高度约 16px —— 与 17px 的行内文字差 1px，短徽标行与长徽标行看起来不一样高
+ *   （用户截图里「只读」行比「维度不一致」行矮一截就是这个原因）。
+ *   定成 inline-flex + line-height:1 + min-height 16px 后，任何字数都同高。
+ */
 .sp-tag {
-  padding: 1px 5px;
+  display: inline-flex;
+  align-items: center;
+  min-height: 16px;
+  padding: 0 5px;
   border-radius: 3px;
   font-size: 10px;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
   background: var(--ki-color-bg-muted);
   color: var(--ki-color-text-subtle);
 }
@@ -272,3 +284,4 @@
   background: var(--ki-color-danger-soft);
   color: var(--ki-color-danger);
 }
+

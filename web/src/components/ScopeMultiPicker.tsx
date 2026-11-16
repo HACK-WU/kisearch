@@ -1,13 +1,14 @@
 /**
- * ScopeMultiPicker.tsx —— 知识库多选下拉（搜索过滤 + 候选面板 + 已选 chips）
+ * ScopeMultiPicker.tsx —— 知识库下拉（搜索过滤 + 候选面板 + 已选 chips）
  *
- * 单一来源：知识视图页「包含哪些知识库」（新建 / 编辑视图）与个人中心
- * 「创建 MCP Token → 访问范围 · 指定」共用这一份交互实现。
+ * 单一来源：知识视图页「包含哪些知识库」（新建 / 编辑视图）、个人中心
+ * 「创建 MCP Token → 访问范围 · 指定」，以及 AI 设置 →「AI 分析 → 分析目标目录」
+ * 的 scope 映射行（**单选**，见 `single`）共用这一份交互实现。
  * 原先该交互内嵌在 ViewsPage，Token 表单另有一套扁平 chips —— 两套并存会漂移
  * （键盘处理、点外收起、空态文案都得改两遍），故抽成组件。
  *
  * 组件**不发请求**：数据源由调用方决定。视图页的「维度不一致」来自 /api/views 的
- * memberMeta，Token 表单只能拿到 ki_scope_list 的字段，口径不可混。
+ * memberMeta，Token 表单与 AI 设置只能拿到 ki_scope_list 的字段，口径不可混。
  * 差异点通过 chipLabel / chipClassName / chipTitle / optionMeta / optionTitle 注入。
  *
  * 三条踩过的坑（原实现注释原样保留，改之前先读）：
@@ -54,6 +55,12 @@ export interface ScopeMultiPickerProps {
   maxWidth?: number | string;
   /** 面板页脚的快捷键提示，默认开启 */
   showShortcutHint?: boolean;
+  /**
+   * 单选模式（默认 `false` = 多选）：选中即收起面板，已选只保留 1 项。
+   * 供「AI 分析 → 分析目标目录」的 scope 映射行使用 —— 那里一行只对应一个 scope，
+   * 但仍需要搜索过滤与库状态徽标（原生 select 给不了）。
+   */
+  single?: boolean;
 }
 
 export function ScopeMultiPicker({
@@ -69,12 +76,15 @@ export function ScopeMultiPicker({
   optionTitle,
   maxWidth = 340,
   showShortcutHint = true,
+  single = false,
 }: ScopeMultiPickerProps): JSX.Element {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  /** 右侧「展开/收起」按钮：单选选完后焦点落回这里（否则掉到 body，键盘用户丢失位置） */
+  const toggleRef = useRef<HTMLButtonElement>(null);
   const [box, setBox] = useState<{ top: number; left: number; width: number; maxHeight: number } | null>(null);
 
   /*
@@ -172,9 +182,17 @@ export function ScopeMultiPicker({
 
   const add = (name: string): void => {
     if (value.includes(name)) return;
-    onChange([...value, name]);
+    onChange(single ? [name] : [...value, name]);
     setFilter('');
     setActiveIndex(0);
+    if (single) {
+      // 单选：这一步已经是终态，收起面板即可。**不要**再 focus 输入框 ——
+      // 它的 onFocus 语义是「展开」，会把面板立刻弹回来。
+      // 但焦点不能就这么掉到 <body>（被点的 option 已经卸载），交给右侧的展开按钮。
+      setOpen(false);
+      toggleRef.current?.focus();
+      return;
+    }
     setOpen(true);
     inputRef.current?.focus();
   };
@@ -222,37 +240,51 @@ export function ScopeMultiPicker({
       ? `已添加全部 ${scopes.length} 个知识库`
       : `没有匹配「${filter}」的知识库`);
 
+  /*
+   * 单选模式把已选项**渲染在输入框里**（选中即收起、不另起一行 chips）：
+   * 映射表一行只有一个目标，chip 行会把行高顶到 60px，还要用户多看一眼"上面那行是什么"。
+   * 展开时输入框让位给搜索词，收起时回显已选值 —— 与原生 select 的心智一致。
+   */
+  const selectedName = single ? (value[0] ?? '') : '';
+  const inputValue = single ? (open ? filter : selectedName) : filter;
+
   return (
     <div className="sp-picker" ref={rootRef} style={{ maxWidth }}>
-      <div className="sp-picker__selected">
-        {value.length === 0 ? <span className="sp-picker__empty">{emptyHint}</span> : null}
-        {value.map((m) => (
-          <button
-            key={m}
-            type="button"
-            className={`sp-chip sp-chip--pick${chipClassName?.(m) ?? ''}`}
-            title={chipTitle?.(m)}
-            onClick={() => remove(m)}
-          >
-            {chipLabel ? chipLabel(m) : m}
-            <span className="sp-chip__x" aria-hidden="true">×</span>
-          </button>
-        ))}
-      </div>
+      {single ? null : (
+        <div className="sp-picker__selected">
+          {value.length === 0 ? <span className="sp-picker__empty">{emptyHint}</span> : null}
+          {value.map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={`sp-chip sp-chip--pick${chipClassName?.(m) ?? ''}`}
+              title={chipTitle?.(m)}
+              onClick={() => remove(m)}
+            >
+              {chipLabel ? chipLabel(m) : m}
+              <span className="sp-chip__x" aria-hidden="true">×</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       <div className="sp-picker__field">
         <Icon name="search" />
         <input
           ref={inputRef}
           className="sp-picker__input"
-          value={filter}
-          placeholder={placeholder}
+          value={inputValue}
+          placeholder={single && selectedName ? '' : placeholder}
           role="combobox"
           aria-expanded={open}
           aria-controls={listboxId}
           aria-autocomplete="list"
           aria-activedescendant={activeOptionId}
-          onFocus={() => setOpen(true)}
+          onFocus={() => {
+            setOpen(true);
+            // 单选：展开就是要换一个，别把已选值当搜索词留在框里
+            if (single) setFilter('');
+          }}
           onClick={() => {
             if (!open) setOpen(true);
           }}
@@ -264,6 +296,7 @@ export function ScopeMultiPicker({
           onKeyDown={onKeyDown}
         />
         <button
+          ref={toggleRef}
           className="sp-picker__toggle"
           type="button"
           aria-label={open ? '收起候选' : '展开候选'}
@@ -322,7 +355,9 @@ export function ScopeMultiPicker({
             )}
           </div>
           {showShortcutHint && candidates.length > 0 ? (
-            <div className="sp-picker__hint">↑↓ 选择 · 回车添加 · Esc 收起 · 点已选项可移除</div>
+            <div className="sp-picker__hint">
+              {single ? '↑↓ 选择 · 回车确认 · Esc 收起 · 点已选项可移除' : '↑↓ 选择 · 回车添加 · Esc 收起 · 点已选项可移除'}
+            </div>
           ) : null}
         </div>
       ) : null}

@@ -24,10 +24,12 @@ import {
   type ReactElement,
 } from 'react';
 
-import type { PromptConfig, PromptSkill } from '@/api/chatContract';
+import type { AnalysisConfig, PromptConfig, PromptSkill } from '@/api/chatContract';
 import { PromptConfigModal, type PromptEditDraft } from '@/chat/PromptConfigModal';
 import { clonePromptConfig } from '@/chat/promptConfigClone';
 import { usePromptConfig } from '@/chat/usePromptConfig';
+import { ScopeMultiPicker } from '@/components/ScopeMultiPicker';
+import { useScopeList } from '@/lib/hooks';
 import {
   CONTEXT_LIMIT_K_MAX,
   DEFAULT_CONTEXT_CHARS,
@@ -111,8 +113,10 @@ type ModalState =
   | { kind: 'prompt' }
   | { kind: 'new-skill' }
   | { kind: 'skill'; id: string }
-  /** 能力级提示词（2026-11-15）：AI 分析 / AI 查找 —— 当前都无消费方，仅"提前设计" */
+  /** AI 分析独立配置域（REQ-20261113-003 · S-01） */
   | { kind: 'analysis' }
+  | { kind: 'new-analysis-skill' }
+  | { kind: 'analysis-skill'; id: string }
   | { kind: 'find' };
 
 /** 条目类型图标（与 demo 同一套，纯装饰） */
@@ -134,6 +138,45 @@ const cloneConfig = clonePromptConfig;
 
 /** 新增 skill 的 id：符合服务端 `SKILL_ID_RE`（小写字母/数字开头，允许连字符） */
 const newSkillId = () => `skill-${Date.now().toString(36)}`;
+
+/** AI 分析 skill ↔ 只读工具前置依赖（与后端 `ANALYSIS_SKILL_REQUIRED_TOOLS` 手工同源） */
+const ANALYSIS_SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
+  'builtin-code-locate': 'fs_read',
+};
+
+const EMPTY_ANALYSIS_CONFIG: AnalysisConfig = {
+  targetDirs: { byScope: {} },
+  prompt: { content: '', at: '' },
+  skills: [],
+  tools: {},
+};
+
+function isAbsPathInvalid(value: string): boolean {
+  const v = value.trim();
+  return v !== '' && !v.startsWith('/');
+}
+
+/** 系统路径黑名单（与后端 `prompt-config.ts` 的 `FORBIDDEN_TARGET_ROOTS` 同口径） */
+const FORBIDDEN_DIR_ROOTS = ['/proc', '/sys', '/dev'];
+
+/**
+ * 分析目标目录的本地校验：返回错误文案，`null` = 通过。
+ *
+ * 与后端 `validateTargetDirString` 对齐（绝对路径 / 空字符 / 系统路径），
+ * 目的只是让用户点「保存」时当场看到原因（后端 400 的文案不落在这一行，
+ * 用户很难对上号）；真正的强约束仍在后端。
+ */
+function dirPathIssue(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return '目录路径不能为空';
+  if (v.includes('\0')) return '目录路径不能包含空字符';
+  if (!v.startsWith('/')) return '目录路径必须是绝对路径（以 / 开头）';
+  const norm = v.length > 1 ? v.replace(/\/+$/, '') : v;
+  if (norm === '/' || FORBIDDEN_DIR_ROOTS.some((r) => norm === r || norm.startsWith(`${r}/`))) {
+    return `不允许使用系统路径（${norm}）`;
+  }
+  return null;
+}
 
 /** 设置页的能力分组（与 `/settings/ai` 左栏一一对应） */
 export type CapabilitySection = 'chat' | 'analysis' | 'find';
@@ -161,6 +204,7 @@ export interface PromptConfigLayerProps {
 export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideHeader = false, readOnly = false }: PromptConfigLayerProps) {
   const { loading, loadError, data, saving, saveError, fieldErrors, savedAt, reload, save } =
     usePromptConfig(true);
+  const { data: scopeListData } = useScopeList();
 
   const [draft, setDraft] = useState<PromptConfig | null>(null);
   const [modal, setModal] = useState<ModalState | null>(null);
@@ -254,9 +298,35 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     drainRef.current();
   }, []);
 
-  /** 关闭配置层：先把防抖里的改动落地，否则「改完立刻关」会丢掉最后一次输入 */
+  /** 「分析目标目录」是否有未保存草稿（handleClose 与数据回填 effect 都要读，故走 ref） */
+  const analysisDirtyRef = useRef(false);
+  /**
+   * 目录块的显式保存动作由下方 `saveAnalysisDirs` 定义后注入 —— 这里只存引用：
+   * `handleClose` 的依赖数组会在**渲染期**求值，直接引用后声明的 const 会撞 TDZ。
+   */
+  const saveAnalysisDirsRef = useRef<() => boolean>(() => true);
+
+  /**
+   * 关闭配置层：先把防抖里的改动落地，否则「改完立刻关」会丢掉最后一次输入。
+   *
+   * ★ 「分析目标目录」是**显式保存**块，草稿不进 `draftRef` —— 它的未保存改动不在这里
+   *   拦一下就静默蒸发了（同层的其它字段都是即时落盘，唯独它可能丢）。所以脏的时候先问。
+   */
   const handleClose = useCallback((): void => {
     flushPending();
+    if (analysisDirtyRef.current) {
+      setConfirm({
+        title: '分析目标目录有未保存的改动',
+        text: '这些目录配置还没保存，直接关闭会丢失。',
+        yesLabel: '保存并关闭',
+        yesDanger: false,
+        onYes: () => {
+          // 校验不通过就留在页面上看逐行原因，不能"关掉就算存了"
+          if (saveAnalysisDirsRef.current()) onClose();
+        },
+      });
+      return;
+    }
     onClose();
   }, [flushPending, onClose]);
 
@@ -286,6 +356,22 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   //    输入单位：返回上限用 **K 字符**（与上面同口径）；条数用 **条**。
   const [toolRespText, setToolRespText] = useState('');
   const [hitsText, setHitsText] = useState('');
+  // ── AI 分析独立配置（REQ-20261113-003 · S-01）──
+  const [analysisDefaultDirText, setAnalysisDefaultDirText] = useState('');
+  const [analysisByScopeRows, setAnalysisByScopeRows] = useState<Array<{ scope: string; dir: string }>>([]);
+  const [analysisRoundsText, setAnalysisRoundsText] = useState('');
+  const [analysisFilesText, setAnalysisFilesText] = useState('');
+  const [newScopePick, setNewScopePick] = useState('');
+  const [newScopeDir, setNewScopeDir] = useState('');
+  /** 「保存目录配置」被拦下的原因（逐行文案，空 = 无错） */
+  const [analysisDirErrors, setAnalysisDirErrors] = useState<string[]>([]);
+  /**
+   * 上一次基线里的 `targetDirs` 签名。
+   * 目录块是显式保存，而本层**其他字段**仍是即时保存 —— 它们每次 PUT 成功都会回传新基线，
+   * 若无条件把基线铺回输入框，用户填了一半的目录就会被冲掉。只有「基线里的目录真的变了」
+   * （= 自己点了保存 / 别的端改了配置）才覆盖草稿。
+   */
+  const lastSavedTargetDirsRef = useRef<string>('');
 
   /** 「恢复默认」的目标值 = 部署默认（config.yaml 的 llm.contextChars，缺省 1000K） */
   const ctxDefaultChars = data?.contextCharsDefault ?? DEFAULT_CONTEXT_CHARS;
@@ -340,6 +426,228 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   const hitsOverridden = draft?.searchHitsPerCall !== undefined;
   /** 组合提示（场景推演发现）：条数 × 典型单条 ≈1.2K 字符 > 返回上限 ⇒ 多数返回会被截断 */
   const comboWarn = budgetComboWarn(hitsParsed, trParsed);
+
+  // ── AI 分析预算与思考级别（REQ-20261113-003 · S-01）──
+  const analysisCfg: AnalysisConfig = draft?.analysis ?? data?.defaults.analysis ?? EMPTY_ANALYSIS_CONFIG;
+  const analysisDirsConfigured = Boolean(analysisCfg.targetDirs.defaultDir)
+    || Object.keys(analysisCfg.targetDirs.byScope).length > 0;
+  /**
+   * 目录块是否有未保存改动。
+   * 连「半截行」（scope 或路径为空、路径非法）也算脏 —— 否则用户正在打字时
+   * 「保存」按钮一直是禁用态，看不出还有没落盘的东西。
+   *
+   * ★ 按 scope **排序后**比对，不按下标：删掉中间一行再补回来、或先保存再加行，
+   *   行序与 `byScope` 的键序会不同 —— 按下标比会把"顺序不同"误判成"有改动"。
+   */
+  const analysisDirsDirty = useMemo(() => {
+    if (analysisDefaultDirText.trim() !== (analysisCfg.targetDirs.defaultDir ?? '')) return true;
+    const saved = Object.entries(analysisCfg.targetDirs.byScope)
+      .map(([scope, dir]) => `${scope}\u0000${dir}`)
+      .sort();
+    const local = analysisByScopeRows
+      .filter((r) => r.scope.trim() && r.dir.trim())
+      .map((r) => `${r.scope.trim()}\u0000${r.dir.trim()}`)
+      .sort();
+    if (saved.length !== local.length) return true;
+    return saved.some((v, i) => v !== local[i]);
+  }, [analysisByScopeRows, analysisDefaultDirText, analysisCfg.targetDirs]);
+  /**
+   * 把脏状态同步给 ref：数据回填 effect 只依赖 `[data]`，读不到最新的 `analysisDirsDirty`。
+   * 本 effect 定义在回填 effect **之前**，同一渲染内先执行，后者读到的是新值。
+   */
+  useEffect(() => {
+    analysisDirtyRef.current = analysisDirsDirty;
+  }, [analysisDirsDirty]);
+  /**
+   * 目录块的角标。`saveError` 时显示「保存失败」—— 这一块是**乐观更新**（先改草稿再 PUT），
+   * 落盘失败时 `analysisDirsDirty` 已是 false、按钮又被禁用，光看这一块会以为存上了。
+   */
+  const analysisDirsBadge = analysisDirsDirty
+    ? { text: '有未保存改动', cls: '' }
+    : saveError
+      ? { text: '保存失败', cls: ' ki-chat-cfg__badge--err' }
+      : analysisDirsConfigured
+        ? { text: '已配置', cls: ' ki-chat-cfg__badge--ok' }
+        : { text: '未配置', cls: '' };
+  const analysisRoundsDefault = data?.limits.analysisMaxRoundsDefault ?? 6;
+  const analysisRoundsMax = data?.limits.analysisMaxRoundsMax ?? 12;
+  const analysisFilesDefault = data?.limits.analysisMaxFilesDefault ?? 8;
+  const analysisFilesMax = data?.limits.analysisMaxFilesMax ?? 30;
+  const analysisRoundsParsed = parseStrictInt(analysisRoundsText);
+  const analysisFilesParsed = parseStrictInt(analysisFilesText);
+  const analysisRoundsInvalid = analysisRoundsText.trim() !== '' && (analysisRoundsParsed === null || analysisRoundsParsed < 1 || analysisRoundsParsed > analysisRoundsMax);
+  const analysisFilesInvalid = analysisFilesText.trim() !== '' && (analysisFilesParsed === null || analysisFilesParsed < 1 || analysisFilesParsed > analysisFilesMax);
+  const analysisRoundsOverridden = analysisCfg.maxRounds !== undefined;
+  const analysisFilesOverridden = analysisCfg.maxFiles !== undefined;
+
+  const analysisEffortOverridden = analysisCfg.reasoningEffort !== undefined;
+  const analysisEffortCurrent = analysisCfg.reasoningEffort ?? data?.reasoningEffortDefault;
+  const analysisEffortOptions = useMemo(
+    () => buildEffortOptions(data?.reasoningEffortOptions, analysisEffortCurrent),
+    [data?.reasoningEffortOptions, analysisEffortCurrent],
+  );
+  const analysisEffortView = resolveEffortView({
+    options: data?.reasoningEffortOptions,
+    def: data?.reasoningEffortDefault,
+    current: analysisEffortCurrent,
+    overridden: analysisEffortOverridden,
+  });
+
+  const mutateAnalysis = (mutate: (a: AnalysisConfig, root: PromptConfig) => AnalysisConfig, debounced = false): void => {
+    const fn = debounced ? commitDebounced : commit;
+    fn((d) => {
+      const base = d.analysis ?? data?.defaults.analysis ?? EMPTY_ANALYSIS_CONFIG;
+      const nextAnalysis = mutate(base, d);
+      return {
+        ...d,
+        analysis: nextAnalysis,
+        analysisPrompt: nextAnalysis.prompt,
+      };
+    });
+  };
+
+  const handleAnalysisRoundsInput = (v: string): void => {
+    setAnalysisRoundsText(v);
+    const parsed = parseStrictInt(v);
+    if (parsed !== null && parsed >= 1 && parsed <= analysisRoundsMax) {
+      mutateAnalysis((a) => ({ ...a, maxRounds: parsed }), true);
+    } else if (v.trim() === '') {
+      mutateAnalysis((a) => {
+        const { maxRounds: _drop, ...rest } = a;
+        return rest;
+      }, true);
+    }
+  };
+  const handleAnalysisRoundsReset = (): void => {
+    setAnalysisRoundsText(String(analysisRoundsDefault));
+    mutateAnalysis((a) => {
+      const { maxRounds: _drop, ...rest } = a;
+      return rest;
+    });
+  };
+  const handleAnalysisFilesInput = (v: string): void => {
+    setAnalysisFilesText(v);
+    const parsed = parseStrictInt(v);
+    if (parsed !== null && parsed >= 1 && parsed <= analysisFilesMax) {
+      mutateAnalysis((a) => ({ ...a, maxFiles: parsed }), true);
+    } else if (v.trim() === '') {
+      mutateAnalysis((a) => {
+        const { maxFiles: _drop, ...rest } = a;
+        return rest;
+      }, true);
+    }
+  };
+  const handleAnalysisFilesReset = (): void => {
+    setAnalysisFilesText(String(analysisFilesDefault));
+    mutateAnalysis((a) => {
+      const { maxFiles: _drop, ...rest } = a;
+      return rest;
+    });
+  };
+  const handleAnalysisEffortChange = (v: string): void => {
+    mutateAnalysis((a) => {
+      if (v === EFFORT_FOLLOW_DEFAULT) {
+        const { reasoningEffort: _drop, ...rest } = a;
+        return rest;
+      }
+      return { ...a, reasoningEffort: v };
+    });
+  };
+  const handleAnalysisEffortReset = (): void => {
+    mutateAnalysis((a) => {
+      const { reasoningEffort: _drop, ...rest } = a;
+      return rest;
+    });
+  };
+
+  // ── 分析目标目录：**块级草稿 + 显式保存**（2026-11-16 用户拍板「输入框旁边要有保存按钮」）──
+  //    不像本层其它字段那样即时落盘，原因有三个：
+  //      1. 逐字符保存会把半截路径写成配置（路径很长，通常靠粘贴）；
+  //      2. 编辑中途把某行清空会被"整份重建 byScope"当成删除，静默丢映射；
+  //      3. 目录是否需要可读，只有触发分析时才知道 —— 保存动作给用户一个明确的确认点。
+  //    未保存的草稿**不会被别的字段的保存回传基线冲掉**：见下方 lastSavedTargetDirsRef。
+  const setAnalysisRow = (idx: number, patch: Partial<{ scope: string; dir: string }>): void => {
+    setAnalysisByScopeRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+    setAnalysisDirErrors([]);
+  };
+  const removeAnalysisRow = (idx: number): void => {
+    const nextRows = analysisByScopeRows.filter((_, i) => i !== idx);
+    setAnalysisByScopeRows(nextRows);
+    setAnalysisDirErrors([]);
+    // 删除同样是明确动作：立即落盘（否则用户点完 × 还以为删掉了）
+    saveAnalysisDirs(nextRows);
+  };
+  const clearAnalysisDefaultDir = (): void => {
+    setAnalysisDefaultDirText('');
+    setAnalysisDirErrors([]);
+  };
+  /** 「确认」= 加入映射并**立即落盘**（新增行不留在草稿里等全局保存） */
+  const addAnalysisRow = (): void => {
+    const sc = newScopePick.trim();
+    const dir = newScopeDir.trim();
+    if (!sc || !dir) return;
+    const nextRows = [...analysisByScopeRows.filter((r) => r.scope !== sc), { scope: sc, dir }];
+    setAnalysisByScopeRows(nextRows);
+    setNewScopePick('');
+    setNewScopeDir('');
+    setAnalysisDirErrors([]);
+    saveAnalysisDirs(nextRows);
+  };
+  /**
+   * 保存整块（默认目录 + 全部映射）：先本地校验，全部通过才一次性写入草稿并立即落盘。
+   * 校验口径与后端 `validateTargetDirString` 对齐（绝对路径 + 禁系统路径），
+   * 避免"前端放行、后端 400"这种来回。
+   *
+   * @param overrideRows 刚算出来、还没进 state 的行（选 scope / 新增行时同步落盘用）——
+   *   直接读 state 会拿到上一帧的旧值
+   * @returns 是否通过校验并已提交（`handleClose` 的「保存并关闭」要据此决定关不关）
+   */
+  const saveAnalysisDirs = (overrideRows?: Array<{ scope: string; dir: string }>): boolean => {
+    if (readOnly) return false;
+    const rows = overrideRows ?? analysisByScopeRows;
+    const errors: string[] = [];
+    const defaultDir = analysisDefaultDirText.trim();
+    if (defaultDir) {
+      const issue = dirPathIssue(defaultDir);
+      if (issue) errors.push(`默认目录：${issue}`);
+    }
+    const byScope: Record<string, string> = {};
+    const seen = new Set<string>();
+    rows.forEach((row, i) => {
+      const sc = row.scope.trim();
+      const dir = row.dir.trim();
+      const at = sc || `第 ${i + 1} 行`;
+      if (!sc) {
+        errors.push(`${at}：请选择 scope`);
+        return;
+      }
+      if (seen.has(sc)) {
+        errors.push(`${at}：scope 重复映射（同一 scope 只能有一条）`);
+        return;
+      }
+      seen.add(sc);
+      const issue = dirPathIssue(dir);
+      if (issue) {
+        errors.push(`${at}：${issue}`);
+        return;
+      }
+      byScope[sc] = dir;
+    });
+    if (errors.length > 0) {
+      setAnalysisDirErrors(errors);
+      return false;
+    }
+    setAnalysisDirErrors([]);
+    mutateAnalysis((a) => ({
+      ...a,
+      targetDirs: defaultDir ? { defaultDir, byScope } : { byScope },
+    }));
+    return true;
+  };
+  // 注入给 `handleClose`（它声明在更上方，依赖数组不能直接引用这个后声明的 const）
+  useEffect(() => {
+    saveAnalysisDirsRef.current = saveAnalysisDirs;
+  });
 
   // ── 思考级别（REQ-20261016-001）：选项**一律来自 config.yaml 的清单**（本地不内置取值表）──
   //    「跟随配置默认（不覆盖）」= **删除覆盖值**（哨兵只存在内存里，不落盘、不下发）
@@ -435,6 +743,32 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     // 工具预算两个输入同样只在「基线变化」时同步（不随草稿逐字符刷新，避免打断输入）
     setToolRespText(String((next.toolResponseChars ?? (data.limits.toolResponseCharsDefault ?? 10000)) / 1000));
     setHitsText(String(next.searchHitsPerCall ?? data.limits.searchHitsDefault ?? 5));
+    // AI 分析独立配置域同步
+    const a = next.analysis ?? data.defaults.analysis ?? EMPTY_ANALYSIS_CONFIG;
+    /*
+     * 目录块是**显式保存**，其余字段仍是即时保存 —— 后者每次 PUT 成功都会回传新基线。
+     * 无条件铺回输入框会把用户填了一半的目录冲掉，所以只在「磁盘上的 targetDirs 真的变了」
+     * （= 自己点了保存，或别的端改了配置）时才覆盖草稿。
+     */
+    const targetSig = JSON.stringify({
+      d: a.targetDirs.defaultDir ?? '',
+      b: Object.entries(a.targetDirs.byScope),
+    });
+    if (targetSig !== lastSavedTargetDirsRef.current) {
+      lastSavedTargetDirsRef.current = targetSig;
+      /*
+       * 本地还有未保存的目录改动时**不覆盖**：典型序列是「点保存 → PUT 在途 → 又改了下一行」，
+       * 响应回来时若直接铺服务端值，刚改的东西会静默消失（目录行不进 draftRef，
+       * queuedRef 拦不住这种情况）。
+       */
+      if (!analysisDirtyRef.current) {
+        setAnalysisDefaultDirText(a.targetDirs.defaultDir ?? '');
+        setAnalysisByScopeRows(Object.entries(a.targetDirs.byScope).map(([scope, dir]) => ({ scope, dir })));
+        setAnalysisDirErrors([]);
+      }
+    }
+    setAnalysisRoundsText(String(a.maxRounds ?? (data.limits.analysisMaxRoundsDefault ?? 6)));
+    setAnalysisFilesText(String(a.maxFiles ?? (data.limits.analysisMaxFilesDefault ?? 8)));
   }, [data]);
 
   // "已保存"顶部细条：1.2s 自隐
@@ -617,6 +951,59 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     commit((d) => ({ ...d, skills: d.skills.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
   };
 
+  const isDefaultAnalysisSkill = (s: PromptSkill): boolean => {
+    const def = data?.defaults.analysis?.skills.find((d) => d.id === s.id);
+    if (!def) return false;
+    return def.content === s.content && (def.description ?? '') === (s.description ?? '');
+  };
+  const isDefaultAnalysisPrompt = (content: string): boolean =>
+    (data?.defaults.analysis?.prompt.content ?? data?.defaults.analysisPrompt?.content) === content;
+
+  const toggleAnalysisSkill = (id: string, anchor?: HTMLElement): void => {
+    const target = analysisCfg.skills.find((s) => s.id === id);
+    const need = ANALYSIS_SKILL_REQUIRED_TOOLS[id];
+    if (target && !target.enabled && need && analysisCfg.tools[need] !== true) {
+      setConfirm({
+        title: `需先启用 ${need} 工具`,
+        text: '请先开启这个只读工具，再回来启用该 skill。',
+        yesLabel: '去启用',
+        yesDanger: false,
+        onYes: () => revealTool(need),
+        ...(anchor ? { anchor } : {}),
+      });
+      return;
+    }
+    mutateAnalysis((a) => ({
+      ...a,
+      skills: a.skills.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)),
+    }));
+  };
+
+  const analysisGroups = data?.analysisToolGroups ?? [];
+  const analysisToolEntries = useMemo(
+    () => analysisGroups.map((g) => ({ ...g, rows: g.names.map((n) => ({ name: n, on: analysisCfg.tools[n] !== false })) })),
+    [analysisGroups, analysisCfg.tools],
+  );
+  /**
+   * scope 候选的右侧徽标：**只标注与「能不能读到代码」相关的信息**。
+   * 「维度不一致 / 仅全文」是知识库检索状态，与目标代码目录无关，不在这里显示（视图页才有）。
+   * 只标与「能不能读到代码」有关的信息（只读库）。数据源目录不在这里出现。
+   */
+  /**
+   * 候选只标「只读」。
+   *
+   * ★ 不再标「Git 仓库 / 本地目录」，也**不**把数据源的目录填进来（2026-11-16 用户纠正）：
+   *   数据源是"知识要到哪去取"，分析目标目录是"代码在哪"，两者是不同的概念 ——
+   *   一旦允许一键填入，用户会误以为它们绑在一起。数据源登记信息仍由后端
+   *   `datasourceDirs` 下发（设置页其它地方可能用），但这里不消费。
+   */
+  const analysisScopeMeta = (info: { scope: string; readonly?: boolean }): ReactElement => (
+    <>{info.readonly ? <span className="sp-tag sp-tag--ro">只读</span> : null}</>
+  );
+  const analysisScopeOptionTitle = (info: { scope: string; readonly?: boolean }): string | undefined => (
+    info.readonly ? '只读库：AI 分析只能读取它的文档' : undefined
+  );
+
   /** 落盘失败后的「重试」：把当前草稿重新排进队列（不丢用户改动，也不静默吞错） */
   const retrySave = (): void => {
     const latest = draftRef.current;
@@ -635,15 +1022,20 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
       return { id: newSkillId(), name: '', description: '', content: '', builtin: false };
     }
     if (modal.kind === 'analysis') {
-      // 能力级提示词：内置文案（不可改名 / 不可删除，可恢复默认内容）——
-      // 与"基础提示词"同一档，不是可调用的 skill
       return {
         id: 'analysis-prompt',
         name: '代码定位提示词',
         description: '',
-        content: draft.analysisPrompt?.content ?? data?.defaults.analysisPrompt?.content ?? '',
+        content: analysisCfg.prompt.content || data?.defaults.analysis?.prompt.content || data?.defaults.analysisPrompt?.content || '',
         builtin: true,
       };
+    }
+    if (modal.kind === 'new-analysis-skill') {
+      return { id: newSkillId(), name: '', description: '', content: '', builtin: false };
+    }
+    if (modal.kind === 'analysis-skill') {
+      const s = analysisCfg.skills.find((x) => x.id === modal.id);
+      return s ? { id: s.id, name: s.name, description: s.description, content: s.content, builtin: s.builtin } : null;
     }
     if (modal.kind === 'find') {
       return {
@@ -1027,17 +1419,380 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
         )}
 
         {capability === 'analysis' && draft && data && (
-          <CapabilityPromptPanel
-            title="分析提示词"
-            name="代码定位提示词"
-            intro="「AI 分析」尚未接入：目前只是事件页上的方案说明弹窗，没有后端调用。下面这段提示词可以先写好并保存，但改动暂时不会产生行为 —— 接入后自动生效，无需再迁移。"
-            hint="决定 AI 拿到事件描述与关联文档后，如何在代码仓库里定位相关位置、以什么形式回报候选。"
-            prompt={draft.analysisPrompt ?? data.defaults.analysisPrompt}
-            defaultContent={data.defaults.analysisPrompt?.content ?? ''}
-            {...(data.limits.analysisPromptMaxChars !== undefined ? { maxChars: data.limits.analysisPromptMaxChars } : {})}
-            readOnly={readOnly}
-            onEdit={() => { if (!readOnly) setModal({ kind: 'analysis' }); }}
-          />
+          <>
+            {data.limits.analysisMaxRoundsMax === undefined && (
+              <p className="ki-chat-cfg__warn">
+                服务端未返回 AI 分析扩展配置：通常是后端尚未重启，目录与工具配置保存可能不会生效。
+              </p>
+            )}
+
+            {/* 1. 分析目标目录（按 scope 映射 + 默认目录；块级草稿 + 显式保存） */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                分析目标目录
+                <em className={`ki-chat-cfg__badge${analysisDirsBadge.cls}`}>
+                  {analysisDirsBadge.text}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                配置「AI 分析」允许只读访问的本地代码目录或 Git 仓库根目录（不限必须是 Git 仓库）；
+                按 scope 映射优先，未单独映射的 scope 使用默认目录。
+                映射行改动<b>即时保存</b>（选 scope / 路径失焦 / 点「确认」），默认目录点「保存」生效。
+              </p>
+
+              <span className="ki-chat-cfg__sublabel">默认目录（兜底）</span>
+              <div className="ki-chat-cfg__dirrow">
+                <input
+                  type="text"
+                  className="ki-chat-cfg__dirinput"
+                  aria-label="默认分析目标目录"
+                  placeholder="例如 /root/workspace（绝对路径，可留空）"
+                  disabled={readOnly}
+                  aria-invalid={isAbsPathInvalid(analysisDefaultDirText) || undefined}
+                  value={analysisDefaultDirText}
+                  onChange={(e) => {
+                    setAnalysisDefaultDirText(e.target.value);
+                    setAnalysisDirErrors([]);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveAnalysisDirs();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="ki-chat-btn"
+                  disabled={readOnly || !analysisDirsDirty}
+                  title={analysisDirsDirty ? '保存默认目录与全部 scope 映射' : '没有未保存的改动'}
+                  onClick={() => saveAnalysisDirs()}
+                >
+                  保存
+                </button>
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || !analysisDefaultDirText.trim()}
+                  title="清空默认目录（仍需点「保存」才生效）"
+                  onClick={clearAnalysisDefaultDir}
+                >
+                  清除
+                </button>
+              </div>
+
+              <span className="ki-chat-cfg__sublabel">按 scope 映射</span>
+              {analysisByScopeRows.map((row, idx) => {
+                const rowInvalid = !row.scope.trim() || isAbsPathInvalid(row.dir) || !row.dir.trim();
+                const label = row.scope || `第 ${idx + 1} 行`;
+                return (
+                  <div className="ki-chat-cfg__dirrow ki-chat-cfg__dirrow--picker" key={`${row.scope}-${idx}`}>
+                    <ScopeMultiPicker
+                      single
+                      scopes={scopeListData?.scopes ?? []}
+                      value={row.scope ? [row.scope] : []}
+                      // 选 scope 是明确动作：整行合法就**立即落盘**，不必再点一次「保存」
+                      onChange={(next) => {
+                        const nextRows = analysisByScopeRows.map((r, i) => (
+                          i === idx ? { ...r, scope: next[0] ?? '' } : r
+                        ));
+                        setAnalysisDirErrors([]);
+                        setAnalysisByScopeRows(nextRows);
+                        const target = nextRows[idx];
+                        if (target && target.scope.trim() && target.dir.trim()) {
+                          saveAnalysisDirs(nextRows);
+                        }
+                      }}
+                      maxWidth={280}
+                      placeholder="搜索并选择 scope…"
+                      emptyHint="未选择 scope"
+                      optionMeta={analysisScopeMeta}
+                      optionTitle={analysisScopeOptionTitle}
+                    />
+                    <input
+                      type="text"
+                      className="ki-chat-cfg__dirinput"
+                      aria-label={`${label} 目标目录`}
+                      placeholder="例如 /root/knowledge-indexer（绝对路径）"
+                      disabled={readOnly}
+                      aria-invalid={rowInvalid || undefined}
+                      value={row.dir}
+                      onChange={(e) => setAnalysisRow(idx, { dir: e.target.value })}
+                      // 路径是"打字"类输入：失焦才落盘，免得把半截路径写成配置
+                      onBlur={() => saveAnalysisDirs()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') saveAnalysisDirs();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="ki-chat-btn ki-chat-btn--ghost"
+                      disabled={readOnly}
+                      aria-label={`移除 ${label} 映射`}
+                      onClick={() => removeAnalysisRow(idx)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                );
+              })}
+
+              {/* 新增映射行：填完点「确认」= 加入并立即落盘 */}
+              <div className="ki-chat-cfg__dirrow ki-chat-cfg__dirrow--picker">
+                <ScopeMultiPicker
+                  single
+                  scopes={(scopeListData?.scopes ?? []).filter((s) => !analysisByScopeRows.some((r) => r.scope === s.scope))}
+                  value={newScopePick ? [newScopePick] : []}
+                  onChange={(next) => setNewScopePick(next[0] ?? '')}
+                  maxWidth={280}
+                  placeholder="搜索并选择 scope…"
+                  emptyHint="未选择 scope"
+                  optionMeta={analysisScopeMeta}
+                  optionTitle={analysisScopeOptionTitle}
+                />
+                <input
+                  type="text"
+                  className="ki-chat-cfg__dirinput"
+                  aria-label="新增映射目标目录"
+                  placeholder="例如 /root/knowledge-indexer（绝对路径）"
+                  disabled={readOnly}
+                  aria-invalid={isAbsPathInvalid(newScopeDir) || undefined}
+                  value={newScopeDir}
+                  onChange={(e) => setNewScopeDir(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') addAnalysisRow();
+                  }}
+                />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || !newScopePick.trim() || !newScopeDir.trim()}
+                  title="确认并加入映射（立即生效）"
+                  onClick={addAnalysisRow}
+                >
+                  确认
+                </button>
+              </div>
+              {analysisDirErrors.length > 0 ? (
+                <ul className="ki-chat-cfg__warnlist">
+                  {/* key 用序号：两行可能报同一句（如都是「目录路径不能为空」），用文案做 key 会重复 */}
+                  {analysisDirErrors.map((msg, i) => <li key={`${i}-${msg}`}>{msg}</li>)}
+                </ul>
+              ) : null}
+            </div>
+
+            {/* 2. 基础提示词 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                基础提示词
+                <em className="ki-chat-cfg__badge">恒定生效</em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                触发「AI 分析」时注入（与事件标题、描述、阶段进度及文档路径清单组合下发；文档正文由 AI 按需调用只读工具读取）。
+              </p>
+              <div className="ki-chat-cfg__list">
+                <ItemCard
+                  group="prompt"
+                  name="代码定位提示词"
+                  content={analysisCfg.prompt.content}
+                  isDefault={isDefaultAnalysisPrompt(analysisCfg.prompt.content)}
+                  onClick={() => setModal({ kind: 'analysis' })}
+                />
+              </div>
+            </div>
+
+            {/* 3. Skill（AI 分析专属） */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                Skill
+                <em className="ki-chat-cfg__badge">{analysisCfg.skills.filter((s) => s.enabled).length} / {data.limits.maxSkills} 可调用</em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                仅作用于「AI 分析」，与「AI 对话」的 Skill 互相独立；启用的 skill 由 AI 按需加载正文。
+              </p>
+              <div className="ki-chat-cfg__list">
+                {analysisCfg.skills.map((s) => {
+                  const need = ANALYSIS_SKILL_REQUIRED_TOOLS[s.id];
+                  return (
+                    <ItemCard
+                      key={s.id}
+                      group="skill"
+                      name={s.name}
+                      description={s.description}
+                      content={s.content}
+                      isDefault={isDefaultAnalysisSkill(s)}
+                      disabled={!s.enabled}
+                      {...(need && analysisCfg.tools[need] !== true ? { note: `需先启用 ${need} 工具` } : {})}
+                      {...(need ? { onNoteClick: () => revealTool(need) } : {})}
+                      onToggleEnabled={(e) => toggleAnalysisSkill(s.id, e.currentTarget)}
+                      onClick={() => setModal({ kind: 'analysis-skill', id: s.id })}
+                    />
+                  );
+                })}
+              </div>
+              <button
+                type="button"
+                className="ki-chat-cfg__add"
+                disabled={readOnly || analysisCfg.skills.length >= data.limits.maxSkills}
+                onClick={() => setModal({ kind: 'new-analysis-skill' })}
+              >
+                ＋ 新增 skill
+              </button>
+            </div>
+
+            {/* 4. 分析预算 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                分析预算
+                <em className="ki-chat-cfg__badge">
+                  {analysisRoundsOverridden || analysisFilesOverridden ? '自定义' : `默认 ${analysisRoundsDefault} 轮 / ${analysisFilesDefault} 文件`}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                仅作用于事件「AI 分析」：单次分析受 90 秒总超时与下方轮次/文件上限保护，防止大仓扫描失控。
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="ki-chat-cfg__ctxinput"
+                  aria-label="最大工具轮次（轮）"
+                  disabled={readOnly}
+                  aria-invalid={analysisRoundsInvalid || undefined}
+                  value={analysisRoundsText}
+                  onChange={(e) => handleAnalysisRoundsInput(e.target.value)}
+                  onBlur={flushPending}
+                />
+                <span className="ki-chat-cfg__ctxunit">轮（1–{analysisRoundsMax}）</span>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || !analysisRoundsOverridden}
+                  onClick={handleAnalysisRoundsReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              <div className="ki-chat-cfg__ctxrow">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="ki-chat-cfg__ctxinput"
+                  aria-label="最多读取文件数（个）"
+                  disabled={readOnly}
+                  aria-invalid={analysisFilesInvalid || undefined}
+                  value={analysisFilesText}
+                  onChange={(e) => handleAnalysisFilesInput(e.target.value)}
+                  onBlur={flushPending}
+                />
+                <span className="ki-chat-cfg__ctxunit">个文件（1–{analysisFilesMax}）</span>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || !analysisFilesOverridden}
+                  onClick={handleAnalysisFilesReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              {analysisRoundsInvalid && (
+                <p className="ki-chat-cfg__warn">最大工具轮次请输入 1–{analysisRoundsMax} 之间的整数。</p>
+              )}
+              {analysisFilesInvalid && (
+                <p className="ki-chat-cfg__warn">最多读取文件数请输入 1–{analysisFilesMax} 之间的整数。</p>
+              )}
+            </div>
+
+            {/* 5. 思考级别 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                思考级别
+                <em className="ki-chat-cfg__badge">{analysisEffortView.badge}</em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                档位由 config.yaml 的 llm.reasoningEfforts 提供，仅作用于「AI 分析」请求。
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <select
+                  className="ki-chat-cfg__select"
+                  aria-label="AI 分析思考级别"
+                  title={analysisEffortOptions.find((o) => o.value === analysisEffortView.selectValue)?.label ?? ''}
+                  disabled={readOnly || !analysisEffortView.editable}
+                  value={analysisEffortView.selectValue}
+                  onChange={(e) => handleAnalysisEffortChange(e.target.value)}
+                >
+                  {analysisEffortOptions.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || !analysisEffortOverridden}
+                  onClick={handleAnalysisEffortReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              {analysisEffortView.warn !== null && <p className="ki-chat-cfg__warn">{analysisEffortView.warn}</p>}
+            </div>
+
+            {/* 6. 工具与权限（全部只读 · 默认全开） */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">工具与权限</span>
+              <p className="ki-chat-cfg__hint">
+                全部为只读工具且默认全开；源码只读工具（fs_*）仅限事件「AI 分析」使用，其他场景不可见。
+              </p>
+              {analysisToolEntries.map((g) => (
+                <div key={g.key}>
+                  <p className="ki-chat-cfg__group">
+                    <span className="ki-chat-cfg__group-dot" aria-hidden="true" />
+                    {g.label}
+                    <span className="ki-chat-cfg__group-n">{g.rows.length} 个 · 默认开</span>
+                  </p>
+                  {g.rows.map((r) => (
+                    <div className="ki-chat-cfg__tool" key={r.name} data-tool={r.name}>
+                      <span className="ki-chat-cfg__tool-main">
+                        <span className="ki-chat-cfg__tool-name" title={r.name}>{r.name}</span>
+                        {g.descs?.[r.name] ? <span className="ki-chat-cfg__tool-desc">{g.descs[r.name]}</span> : null}
+                      </span>
+                      <span className="ki-chat-cfg__tool-sp" />
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={r.on}
+                        aria-label={r.name}
+                        disabled={readOnly}
+                        className="ki-chat-cfg__sw"
+                        onClick={(e) => {
+                          const next = !r.on;
+                          const dependents = analysisCfg.skills.filter(
+                            (s) => s.enabled && ANALYSIS_SKILL_REQUIRED_TOOLS[s.id] === r.name,
+                          );
+                          if (!next && dependents.length > 0) {
+                            setConfirm({
+                              title: `关闭 ${r.name} 将同时停用 skill`,
+                              text: `${dependents.map((s) => s.name).join('、')} 依赖该工具；关闭后它会一并停用。`,
+                              onYes: () => mutateAnalysis((a) => ({
+                                ...a,
+                                tools: { ...a.tools, [r.name]: false },
+                                skills: a.skills.map((s) => (
+                                  ANALYSIS_SKILL_REQUIRED_TOOLS[s.id] === r.name ? { ...s, enabled: false } : s
+                                )),
+                              })),
+                              anchor: e.currentTarget,
+                            });
+                            return;
+                          }
+                          mutateAnalysis((a) => ({ ...a, tools: { ...a.tools, [r.name]: next } }));
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </>
         )}
 
         {capability === 'find' && draft && data && (
@@ -1083,10 +1838,14 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
 
       {modalItem && modal && (
         <PromptConfigModal
-          mode={modal.kind === 'new-skill' ? 'new' : 'edit'}
+          mode={modal.kind === 'new-skill' || modal.kind === 'new-analysis-skill' ? 'new' : 'edit'}
           readOnly={readOnly}
           // 能力级提示词与「基础提示词」同档：不是可调用的 skill，没有描述字段
-          group={modal.kind === 'skill' || modal.kind === 'new-skill' ? 'skill' : 'prompt'}
+          group={
+            modal.kind === 'skill' || modal.kind === 'new-skill' || modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill'
+              ? 'skill'
+              : 'prompt'
+          }
           item={modalItem}
           maxChars={
             modal.kind === 'analysis'
@@ -1101,38 +1860,53 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
           descMaxChars={data!.limits.skillDescMaxChars}
           descSuggestedChars={data!.limits.skillDescSuggestedChars}
           // 内置条目不改名；能力级提示词同理（名称由界面固定，避免两处文案漂移）
-          canRename={modal.kind === 'skill' && !modalItem.builtin}
-          canReset={modal.kind !== 'new-skill' && modalItem.builtin}
-          canDelete={modal.kind === 'skill' && !modalItem.builtin}
-          checkName={(name) =>
+          canRename={(modal.kind === 'skill' || modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill') && !modalItem.builtin}
+          canReset={modal.kind !== 'new-skill' && modal.kind !== 'new-analysis-skill' && modalItem.builtin}
+          canDelete={(modal.kind === 'skill' || modal.kind === 'analysis-skill') && !modalItem.builtin}
+          checkName={(name) => {
+            const list = modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill'
+              ? analysisCfg.skills
+              : draft?.skills ?? [];
             // ★ 名称必须英文（2026-11-11 用户拍板）：与后端 `SKILL_NAME_RE` **手工同源**
             //   （服务端仍是最终闸门；这里只为省一次 400 往返，改动需两侧同步）
-            !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)
+            return !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)
               ? '名称须为英文：以字母开头，只能含字母、数字、下划线、连字符（不能有空格），例：knowledge-retrieval'
-              : draft && draft.skills.some((s) => s.id !== modalItem.id && s.name.toLowerCase() === name.toLowerCase())
+              : list.some((s) => s.id !== modalItem.id && s.name.toLowerCase() === name.toLowerCase())
                 ? '已有同名 skill，请换一个名字'
-                : null
-          }
+                : null;
+          }}
           onCancel={() => setModal(null)}
           onSubmit={({ name, content, description }) => {
-            // 模态里的「保存」= 该条目的提交动作：提交即落盘（层底栏不再有整体保存）
-            commit((d) => {
-              if (modal.kind === 'prompt') return { ...d, prompt: { ...d.prompt, content } };
-              // 能力级提示词（2026-11-15）：**只写配置，当前无消费方**（分析未接入 / 查找不调 LLM）
-              if (modal.kind === 'analysis') {
-                return { ...d, analysisPrompt: { content, at: new Date().toISOString() } };
-              }
-              if (modal.kind === 'find') {
-                return { ...d, findPrompt: { content, at: new Date().toISOString() } };
-              }
-              if (modal.kind === 'new-skill') {
-                return {
-                  ...d,
-                  skills: [...d.skills, { id: modalItem.id, name, description, content, builtin: false, enabled: true, at: new Date().toISOString() }],
-                };
-              }
-              return { ...d, skills: d.skills.map((s) => (s.id === modal.id ? { ...s, name, content, description } : s)) };
-            });
+            if (!modal.kind.includes('analysis')) {
+              commit((d) => {
+                if (modal.kind === 'prompt') return { ...d, prompt: { ...d.prompt, content } };
+                if (modal.kind === 'find') {
+                  return { ...d, findPrompt: { content, at: new Date().toISOString() } };
+                }
+                if (modal.kind === 'new-skill') {
+                  return {
+                    ...d,
+                    skills: [...d.skills, { id: modalItem.id, name, description, content, builtin: false, enabled: true, at: new Date().toISOString() }],
+                  };
+                }
+                return { ...d, skills: d.skills.map((s) => (s.id === modalItem.id ? { ...s, name, content, description } : s)) };
+              });
+              setModal(null);
+              return;
+            }
+            if (modal.kind === 'analysis') {
+              mutateAnalysis((a) => ({ ...a, prompt: { content, at: new Date().toISOString() } }));
+            } else if (modal.kind === 'new-analysis-skill') {
+              mutateAnalysis((a) => ({
+                ...a,
+                skills: [...a.skills, { id: modalItem.id, name, description, content, builtin: false, enabled: true, at: new Date().toISOString() }],
+              }));
+            } else if (modal.kind === 'analysis-skill') {
+              mutateAnalysis((a) => ({
+                ...a,
+                skills: a.skills.map((s) => (s.id === modal.id ? { ...s, name, content, description } : s)),
+              }));
+            }
             setModal(null);
           }}
           onReset={() => {
@@ -1141,12 +1915,26 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               setModal(null);
               return;
             }
-            if (modal.kind === 'analysis' || modal.kind === 'find') {
-              // 恢复默认 = 回填内置文案（与「基础提示词」同口径，不写死前端常量）
-              const def = modal.kind === 'analysis' ? data!.defaults.analysisPrompt : data!.defaults.findPrompt;
-              commit((d) => (modal.kind === 'analysis'
-                ? { ...d, analysisPrompt: { content: def?.content ?? '', at: new Date().toISOString() } }
-                : { ...d, findPrompt: { content: def?.content ?? '', at: new Date().toISOString() } }));
+            if (modal.kind === 'analysis') {
+              const def = data!.defaults.analysis?.prompt ?? data!.defaults.analysisPrompt;
+              mutateAnalysis((a) => ({ ...a, prompt: { content: def?.content ?? '', at: new Date().toISOString() } }));
+              setModal(null);
+              return;
+            }
+            if (modal.kind === 'analysis-skill') {
+              const def = data!.defaults.analysis?.skills.find((s) => s.id === modal.id);
+              mutateAnalysis((a) => ({
+                ...a,
+                skills: a.skills.map((s) => (
+                  s.id === modal.id ? { ...s, content: def?.content ?? '', description: def?.description ?? '' } : s
+                )),
+              }));
+              setModal(null);
+              return;
+            }
+            if (modal.kind === 'find') {
+              const def = data!.defaults.findPrompt;
+              commit((d) => ({ ...d, findPrompt: { content: def?.content ?? '', at: new Date().toISOString() } }));
               setModal(null);
               return;
             }
@@ -1159,12 +1947,15 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
             }
           }}
           onDelete={() => {
-            if (modal.kind !== 'skill') return;
+            if (modal.kind !== 'skill' && modal.kind !== 'analysis-skill') return;
             const id = modal.id;
+            const isAnalysis = modal.kind === 'analysis-skill';
             setConfirm({
               title: '删除 skill',
               text: '该 skill 将被移除，确认后立即生效、不可撤销。',
-              onYes: () => commit((d) => ({ ...d, skills: d.skills.filter((s) => s.id !== id) })),
+              onYes: () => (!isAnalysis
+                ? commit((d) => ({ ...d, skills: d.skills.filter((s) => s.id !== id) }))
+                : mutateAnalysis((a) => ({ ...a, skills: a.skills.filter((s) => s.id !== id) }))),
             });
             setModal(null);
           }}

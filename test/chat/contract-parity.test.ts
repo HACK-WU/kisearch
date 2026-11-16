@@ -131,6 +131,13 @@ describe('契约对齐 · 数据模型', () => {
       extractInterfaceFields(read(FRONT), 'CapabilityPrompt'),
       extractInterfaceFields(read(BACK_PROMPT_CONFIG), 'CapabilityPrompt'),
     );
+    for (const extra of ['AnalysisConfig', 'AnalysisTargetConfig']) {
+      assert.deepEqual(
+        extractInterfaceFields(read(FRONT), extra),
+        extractInterfaceFields(read(BACK_PROMPT_CONFIG), extra),
+        `${extra} 两侧不一致`,
+      );
+    }
   });
 
   it('CHAT_REF_* 上限常量两侧一致（REQ-20261009-002）', () => {

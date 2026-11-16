@@ -87,4 +87,31 @@ describe('clonePromptConfig · 白名单字段搬运', () => {
     assert.equal(src.skills[0].name, 'my-skill');
     assert.equal(src.tools.ki_search, true);
   });
+
+  it('analysis 独立配置域（targetDirs / prompt / skills / tools / 预算）深拷且不污染基线', () => {
+    const src = {
+      ...base(),
+      analysis: {
+        targetDirs: { defaultDir: '/root/ws', byScope: { mem: '/root/knowledge-indexer' } },
+        prompt: { content: 'p', at: 't' },
+        skills: [{ id: 'builtin-code-locate', name: 'code-locate', description: 'd', content: 'c', builtin: true, enabled: true, at: 't' }],
+        tools: { fs_read: true, fs_grep: true },
+        maxRounds: 8,
+        maxFiles: 10,
+        reasoningEffort: 'medium',
+      },
+    };
+    const draft = clonePromptConfig(src);
+    draft.analysis.targetDirs.byScope.mem = '/changed';
+    draft.analysis.prompt.content = 'changed';
+    draft.analysis.skills[0].enabled = false;
+    draft.analysis.tools.fs_read = false;
+    assert.equal(src.analysis.targetDirs.byScope.mem, '/root/knowledge-indexer');
+    assert.equal(src.analysis.prompt.content, 'p');
+    assert.equal(src.analysis.skills[0].enabled, true);
+    assert.equal(src.analysis.tools.fs_read, true);
+    assert.equal(draft.analysis.maxRounds, 8);
+    assert.equal(draft.analysis.maxFiles, 10);
+    assert.equal(draft.analysis.reasoningEffort, 'medium');
+  });
 });

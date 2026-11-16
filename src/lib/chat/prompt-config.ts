@@ -42,6 +42,12 @@ import {
   RETRIEVAL_SKILL_PROMPT,
   renderSkillCatalog,
 } from './retrieval/retrieval-skill.js';
+import {
+  CODE_LOCATE_SKILL_ID,
+  CODE_LOCATE_SKILL_DESCRIPTION,
+  CODE_LOCATE_REQUIRED_TOOL,
+  CODE_LOCATE_SKILL_PROMPT,
+} from './retrieval/code-locate-skill.js';
 import { CHAT_BUDGET, type PromptInjectionSnapshot } from './chat-contract.js';
 
 // ─── 上限（服务端强制；前端字数提示只是辅助）─────────────────
@@ -162,6 +168,59 @@ export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
 /** 全部合法工具名（校验用；顺序按分组展开） */
 export const MCP_TOOL_NAMES: readonly string[] = MCP_TOOL_GROUPS.flatMap((g) => [...g.names]);
 
+// ─── AI 分析专属配置常数与工具分组（REQ-20261113-003 · S-01）────────
+
+export const ANALYSIS_MAX_ROUNDS_DEFAULT = 6;
+export const ANALYSIS_MAX_ROUNDS_LIMIT = 12;
+export const ANALYSIS_MAX_FILES_DEFAULT = 8;
+export const ANALYSIS_MAX_FILES_LIMIT = 30;
+
+export interface AnalysisToolGroup {
+  key: 'code-read' | 'kb-read';
+  label: string;
+  names: readonly string[];
+  descs: Readonly<Record<string, string>>;
+}
+
+/**
+ * 「AI 分析」专属工具分组（全部只读、默认全开、不含任何写/删工具）。
+ *
+ * 🔴 `fs_*` 工具**仅限事件 AI 分析内部使用**，严禁登记进 `MCP_TOOL_GROUPS` / `CHAT_MCP_TOOLS`
+ *    或 `/mcp`（Q2 拍板：不做通用代码问答，也不破坏 `/mcp` scope 鉴权模型）。
+ */
+export const ANALYSIS_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
+  {
+    key: 'code-read',
+    label: '源码只读（AI 分析专属）',
+    names: ['fs_read', 'fs_grep', 'fs_find', 'fs_ls'],
+    descs: {
+      fs_read: '读取目标目录下代码片段（≤200 行 / 64 KB）',
+      fs_grep: '按正则关键词检索目标目录源码（≤60 条）',
+      fs_find: '按文件名 / 路径模式查找文件（≤80 条）',
+      fs_ls: '列出目录结构（≤200 项）',
+    },
+  },
+  {
+    key: 'kb-read',
+    label: '知识库只读（按需读取上下文关联 / 参考文档）',
+    names: ['ki_get_module_info', 'ki_search', 'ki_group_list', 'ki_tag_list'],
+    descs: {
+      ki_get_module_info: '按 group 与文档名读取知识库正文',
+      ki_search: '混合 / 全文检索知识库补充上下文',
+      ki_group_list: '查看 Group 树结构与文档清单',
+      ki_tag_list: '查看知识库标签',
+    },
+  },
+];
+
+export const ANALYSIS_TOOL_NAMES: readonly string[] = ANALYSIS_TOOL_GROUPS.flatMap((g) => [...g.names]);
+
+function defaultAnalysisTools(): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const name of ANALYSIS_TOOL_NAMES) out[name] = true;
+  return out;
+}
+
 /** 默认开关：只读全开，写入/删除全关（危险工具默认不可见） */
 function defaultTools(): Record<string, boolean> {
   const out: Record<string, boolean> = {};
@@ -256,6 +315,28 @@ export interface PromptConfig {
    *    因此这里**没有生效点**；只有将来引入「LLM 改写检索词」后才会被读取（检查点 F2）。
    */
   findPrompt?: CapabilityPrompt;
+  /**
+   * **AI 分析独立配置域**（REQ-20261113-003 · S-01）。
+   *
+   * 与「AI 对话」物理隔离：各自拥有独立的提示词、Skill、预算、思考级别与只读工具开关，
+   * 以及全局兜底 / 按 scope 映射的目标代码目录配置。
+   */
+  analysis?: AnalysisConfig;
+}
+
+export interface AnalysisTargetConfig {
+  defaultDir?: string;
+  byScope: Record<string, string>;
+}
+
+export interface AnalysisConfig {
+  targetDirs: AnalysisTargetConfig;
+  prompt: CapabilityPrompt;
+  skills: PromptSkill[];
+  tools: Record<string, boolean>;
+  maxRounds?: number;
+  maxFiles?: number;
+  reasoningEffort?: string;
 }
 
 /**
@@ -316,6 +397,40 @@ export const SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
   [DOC_EDITING_SKILL_ID]: DOC_EDITING_REQUIRED_TOOL,
 };
 
+/** AI 分析内置 skill 固定名称（与 `BUILTIN_SKILL_NAMES` 同一服务端强制模式） */
+export const BUILTIN_ANALYSIS_SKILL_NAMES: Readonly<Record<string, string>> = {
+  [CODE_LOCATE_SKILL_ID]: 'code-locate',
+};
+export const BUILTIN_ANALYSIS_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_ANALYSIS_SKILL_NAMES);
+
+export const ANALYSIS_SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
+  [CODE_LOCATE_SKILL_ID]: CODE_LOCATE_REQUIRED_TOOL,
+};
+
+const BUILTIN_ANALYSIS_SKILL_CONTENT: Readonly<Record<string, string>> = {
+  [CODE_LOCATE_SKILL_ID]: CODE_LOCATE_SKILL_PROMPT,
+};
+
+const BUILTIN_ANALYSIS_SKILL_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  [CODE_LOCATE_SKILL_ID]: CODE_LOCATE_SKILL_DESCRIPTION,
+};
+
+const BUILTIN_ANALYSIS_SKILL_ENABLED: Readonly<Record<string, boolean>> = {
+  [CODE_LOCATE_SKILL_ID]: true,
+};
+
+function builtinAnalysisSkill(id: string, at: string = BUILTIN_AT): PromptSkill {
+  return {
+    id,
+    name: BUILTIN_ANALYSIS_SKILL_NAMES[id]!,
+    description: BUILTIN_ANALYSIS_SKILL_DESCRIPTIONS[id] ?? '',
+    content: BUILTIN_ANALYSIS_SKILL_CONTENT[id] ?? '',
+    builtin: true,
+    enabled: BUILTIN_ANALYSIS_SKILL_ENABLED[id] ?? true,
+    at,
+  };
+}
+
 /** 内置 skill 的正文（「恢复默认」与默认配置共用；不在表内 = 没有内置内容） */
 const BUILTIN_SKILL_CONTENT: Readonly<Record<string, string>> = {
   'builtin-retrieval': RETRIEVAL_SKILL_PROMPT,
@@ -362,20 +477,21 @@ export const BUILTIN_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_SKILL_NA
 const BUILTIN_AT = '1970-01-01T00:00:00.000Z';
 
 /**
- * AI 分析的内置提示词（占位，功能未接入）。
+ * AI 分析的内置提示词（REQ-20261113-003）。
  *
- * 刻意**不写死工具名与输出格式的字段名**：接入方案（只读工具集 / 返回结构）未定，
- * 写死会让用户按"已定方案"去调，接入时又要集体返工。
+ * 与当前 `EventRecord` 对齐：包含标题、可选描述、当前阶段进度与关联/参考文档清单
+ * （仅 `group` 路径与文档名，不含正文），引导模型按需用 `ki_get_module_info` 读正文，
+ * 再用 `fs_*` 在目标目录中定位真实代码位置。
  */
-const DEFAULT_ANALYSIS_PROMPT = `你是代码定位助手。基于事件标题、描述与关联文档，在 Git 仓库里定位相关代码。
+const DEFAULT_ANALYSIS_PROMPT = `你是代码定位助手。基于事件标题、可选描述、当前阶段进度以及关联/参考文档清单，在目标代码目录里定位相关代码。
 
 步骤：
-1. 从事件里提取技术线索（错误信息、组件名、接口名、关键路径）。
-2. 用只读文件检索能力在仓库里定位候选文件与行号区间。
-3. 读关键片段确认因果，不要凭文件名猜测。
-4. 输出「候选位置 + 判断依据 + 置信度」，全部标为待确认。
+1. 查看上下文里的事件信息、阶段进度与文档清单（清单仅含 group 路径与文档名）；如需阅读文档细节，先调用 ki_get_module_info 读取相关文档正文。
+2. 从事件与文档中提炼技术线索（报错原文、接口名、组件名、函数/类名、关键路径）。
+3. 使用只读文件工具（fs_find / fs_grep / fs_ls / fs_read）在目标目录中定位并精读关键片段，确认因果关系。
+4. 只输出经精读证实的候选位置与判断依据；无法确认的部分如实写入未确认点，禁止猜测或臆造文件路径与行号。
 
-约束：只读。不修改文件，不执行命令，不臆造未在事件或代码中出现的信息。`;
+约束：只读。不修改文件，不执行命令，不臆造未在事件、文档或源码中出现的信息。`;
 
 /** AI 查找的内置提示词（占位；当前 AI 查找是确定性检索，本提示词无生效点）。 */
 const DEFAULT_FIND_PROMPT = `把「事件标题 + 关联文档名」改写成 3-8 个用于知识库检索的关键词。
@@ -385,6 +501,15 @@ const DEFAULT_FIND_PROMPT = `把「事件标题 + 关联文档名」改写成 3-
 2. 去掉「排查 / 问题 / 记录」这类无区分度的词。
 3. 不要臆造事件里没有出现的词。
 4. 只输出关键词，空格分隔，不作解释。`;
+
+export function defaultAnalysisConfig(): AnalysisConfig {
+  return {
+    targetDirs: { byScope: {} },
+    prompt: { content: DEFAULT_ANALYSIS_PROMPT, at: BUILTIN_AT },
+    skills: BUILTIN_ANALYSIS_SKILL_IDS.map((id) => builtinAnalysisSkill(id)),
+    tools: defaultAnalysisTools(),
+  };
+}
 
 export function defaultPromptConfig(): PromptConfig {
   return {
@@ -396,17 +521,29 @@ export function defaultPromptConfig(): PromptConfig {
     // 能力级提示词：默认即"内置文案"，因此读取后恒有值（界面据此判断"默认 / 已修改"）
     analysisPrompt: { content: DEFAULT_ANALYSIS_PROMPT, at: BUILTIN_AT },
     findPrompt: { content: DEFAULT_FIND_PROMPT, at: BUILTIN_AT },
+    analysis: defaultAnalysisConfig(),
   };
+}
+
+/** 按 scope 解析分析目标目录（scope 精确映射优先，其次全局 defaultDir） */
+export function resolveAnalysisTargetDir(targetDirs: AnalysisTargetConfig | undefined, scope: string): string | null {
+  if (!targetDirs) return null;
+  const scoped = Object.prototype.hasOwnProperty.call(targetDirs.byScope, scope)
+    ? targetDirs.byScope[scope]?.trim()
+    : '';
+  if (scoped) return scoped;
+  const def = targetDirs.defaultDir?.trim() ?? '';
+  return def || null;
 }
 
 /** 内置 skill 的默认内容（供「恢复默认」使用） */
 export function builtinSkillDefaultContent(id: string): string | null {
-  return BUILTIN_SKILL_CONTENT[id] ?? null;
+  return BUILTIN_SKILL_CONTENT[id] ?? BUILTIN_ANALYSIS_SKILL_CONTENT[id] ?? null;
 }
 
 /** 内置 skill 的默认描述（供「恢复默认」使用；与 `defaultPromptConfig` 同源） */
 export function builtinSkillDefaultDescription(id: string): string | null {
-  return BUILTIN_SKILL_DESCRIPTIONS[id] ?? null;
+  return BUILTIN_SKILL_DESCRIPTIONS[id] ?? BUILTIN_ANALYSIS_SKILL_DESCRIPTIONS[id] ?? null;
 }
 
 // ─── 路径 ─────────────────────────────────────────────
@@ -457,6 +594,7 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
     skillNameSoft: true,
     skillDependencySoft: true,
     capabilityPromptSoft: true,
+    analysisSoft: true,
   });
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
@@ -515,6 +653,296 @@ export interface NormalizePromptConfigOptions {
    * 保存路径（缺省）保持严格 —— 400 + 字段级 details，且**不落盘**（不会写坏文件）。
    */
   capabilityPromptSoft?: boolean;
+  /**
+   * `true` = **读取路径**：`analysis` 独立配置域内字段非法时只忽略/回退对应项并写 `softNotes`，
+   * 绝不连累对话配置整份回退默认。
+   */
+  analysisSoft?: boolean;
+  /** 磁盘上既有的分析 skill 名称集合（保存路径传入，放行未改名的旧名称） */
+  existingAnalysisSkillNames?: ReadonlySet<string>;
+  /** 磁盘上既有的分析思考级别覆盖值 */
+  existingAnalysisEffort?: string;
+}
+
+const FORBIDDEN_TARGET_ROOTS = new Set(['/', '/proc', '/sys', '/dev']);
+const FORBIDDEN_RECORD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function validateTargetDirString(raw: unknown): { ok: true; value: string } | { ok: false; message: string } {
+  if (typeof raw !== 'string') return { ok: false, message: '目录路径应为字符串' };
+  const value = raw.trim();
+  if (!value) return { ok: true, value: '' };
+  if (value.includes('\0')) return { ok: false, message: '目录路径不能包含空字符' };
+  if (!path.isAbsolute(value)) return { ok: false, message: '目录路径必须是绝对路径（例如 /root/project）' };
+  const resolved = path.resolve(value);
+  if (
+    FORBIDDEN_TARGET_ROOTS.has(resolved)
+    || resolved.startsWith('/proc/')
+    || resolved.startsWith('/sys/')
+    || resolved.startsWith('/dev/')
+  ) {
+    return { ok: false, message: `不允许将系统路径（${resolved}）设为分析目标目录` };
+  }
+  return { ok: true, value: resolved };
+}
+
+function normalizeAnalysisSection(
+  raw: unknown,
+  issues: PromptConfigIssue[],
+  opts?: NormalizePromptConfigOptions,
+): AnalysisConfig {
+  const out = defaultAnalysisConfig();
+  const soft = opts?.analysisSoft === true;
+  const failField = (fieldPath: string, message: string): void => {
+    if (soft) {
+      opts?.softNotes?.push(`${fieldPath}：${message}（已忽略该项，其余配置照常读取）`);
+      return;
+    }
+    issues.push({ path: fieldPath, message });
+  };
+
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    failField('analysis', '应为对象');
+    return out;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  // targetDirs
+  if (obj.targetDirs !== undefined) {
+    const td = obj.targetDirs;
+    if (td === null || typeof td !== 'object' || Array.isArray(td)) {
+      failField('analysis.targetDirs', '应为对象 { defaultDir?, byScope }');
+    } else {
+      const tdObj = td as Record<string, unknown>;
+      const nextTarget: AnalysisTargetConfig = { byScope: {} };
+      if (tdObj.defaultDir !== undefined) {
+        const checked = validateTargetDirString(tdObj.defaultDir);
+        if (!checked.ok) {
+          failField('analysis.targetDirs.defaultDir', checked.message);
+        } else if (checked.value) {
+          nextTarget.defaultDir = checked.value;
+        }
+      }
+      if (tdObj.byScope !== undefined) {
+        if (tdObj.byScope === null || typeof tdObj.byScope !== 'object' || Array.isArray(tdObj.byScope)) {
+          failField('analysis.targetDirs.byScope', '应为对象 { scope: 目录路径 }');
+        } else {
+          for (const [scopeKey, dirVal] of Object.entries(tdObj.byScope as Record<string, unknown>)) {
+            const key = scopeKey.trim();
+            if (!key || FORBIDDEN_RECORD_KEYS.has(key)) {
+              failField(`analysis.targetDirs.byScope.${scopeKey}`, 'scope 名称非法');
+              continue;
+            }
+            const checked = validateTargetDirString(dirVal);
+            if (!checked.ok) {
+              failField(`analysis.targetDirs.byScope.${key}`, checked.message);
+              continue;
+            }
+            if (checked.value) nextTarget.byScope[key] = checked.value;
+          }
+        }
+      }
+      out.targetDirs = nextTarget;
+    }
+  }
+
+  // prompt
+  if (obj.prompt !== undefined) {
+    const p = obj.prompt;
+    if (p === null || typeof p !== 'object' || Array.isArray(p)) {
+      failField('analysis.prompt', '应为对象 { content }');
+    } else {
+      const content = (p as Record<string, unknown>).content;
+      if (typeof content !== 'string') {
+        failField('analysis.prompt.content', '应为字符串');
+      } else if (content.length > CAPABILITY_PROMPT_MAX_CHARS) {
+        failField('analysis.prompt.content', `不得超过 ${CAPABILITY_PROMPT_MAX_CHARS} 字，实际 ${content.length}`);
+      } else {
+        out.prompt = {
+          content,
+          at: typeof (p as Record<string, unknown>).at === 'string' ? String((p as Record<string, unknown>).at) : BUILTIN_AT,
+        };
+      }
+    }
+  }
+
+  // tools（放在 skills 之前，方便后置校验 skill ↔ tool 依赖）
+  if (obj.tools !== undefined) {
+    const t = obj.tools;
+    if (t === null || typeof t !== 'object' || Array.isArray(t)) {
+      failField('analysis.tools', '应为对象 { 工具名: 布尔值 }');
+    } else {
+      const tools: Record<string, boolean> = defaultAnalysisTools();
+      for (const [name, value] of Object.entries(t as Record<string, unknown>)) {
+        if (!ANALYSIS_TOOL_NAMES.includes(name)) {
+          failField(`analysis.tools.${name}`, `未知分析工具名（可用：${ANALYSIS_TOOL_NAMES.join(' | ')}）`);
+          continue;
+        }
+        if (typeof value !== 'boolean') {
+          failField(`analysis.tools.${name}`, '应为布尔值');
+          continue;
+        }
+        tools[name] = value;
+      }
+      out.tools = tools;
+    }
+  }
+
+  // skills
+  if (obj.skills !== undefined) {
+    const list = obj.skills;
+    if (!Array.isArray(list)) {
+      failField('analysis.skills', '应为数组');
+    } else if (list.length > MAX_SKILLS) {
+      failField('analysis.skills', `最多 ${MAX_SKILLS} 条，实际 ${list.length}`);
+    } else {
+      const seenIds = new Set<string>();
+      const seenNames = new Set<string>();
+      const skills: PromptSkill[] = [];
+      let skillFailed = false;
+      list.forEach((item, i) => {
+        const at = `analysis.skills[${i}]`;
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          failField(at, '应为对象');
+          skillFailed = true;
+          return;
+        }
+        const it = item as Record<string, unknown>;
+        const id = typeof it.id === 'string' ? it.id : '';
+        if (!SKILL_ID_RE.test(id)) {
+          failField(`${at}.id`, 'id 需为小写字母/数字开头、可含连字符（≤64 字符）');
+          skillFailed = true;
+          return;
+        }
+        if (seenIds.has(id)) {
+          failField(`${at}.id`, `id 重复：${id}`);
+          skillFailed = true;
+          return;
+        }
+        seenIds.add(id);
+        const builtinName = BUILTIN_ANALYSIS_SKILL_NAMES[id];
+        const name = builtinName ?? (typeof it.name === 'string' ? it.name.trim() : '');
+        if (!name) {
+          failField(`${at}.name`, '名称不能为空');
+          skillFailed = true;
+        } else if (name.length > SKILL_NAME_MAX_CHARS) {
+          failField(`${at}.name`, `名称不得超过 ${SKILL_NAME_MAX_CHARS} 字`);
+          skillFailed = true;
+        } else {
+          const exempt = builtinName !== undefined
+            || opts?.skillNameSoft === true
+            || opts?.existingAnalysisSkillNames?.has(name) === true;
+          if (!exempt && !SKILL_NAME_RE.test(name)) {
+            failField(`${at}.name`, `名称须为英文：${SKILL_NAME_RULE_HINT}（例：code-locate）`);
+            skillFailed = true;
+          } else if (seenNames.has(name.toLowerCase())) {
+            failField(`${at}.name`, `名称重复：${name}`);
+            skillFailed = true;
+          }
+        }
+        seenNames.add(name.toLowerCase());
+        const description = typeof it.description === 'string' ? it.description.trim() : '';
+        if (description.length > SKILL_DESC_MAX_CHARS) {
+          failField(`${at}.description`, `描述不得超过 ${SKILL_DESC_MAX_CHARS} 字，实际 ${description.length}`);
+          skillFailed = true;
+        }
+        const content = typeof it.content === 'string' ? it.content : '';
+        if (content.length > SKILL_MAX_CHARS) {
+          failField(`${at}.content`, `不得超过 ${SKILL_MAX_CHARS} 字，实际 ${content.length}`);
+          skillFailed = true;
+        }
+        skills.push({
+          id,
+          name,
+          description,
+          content,
+          builtin: BUILTIN_ANALYSIS_SKILL_IDS.includes(id),
+          enabled: it.enabled !== false,
+          at: typeof it.at === 'string' ? it.at : BUILTIN_AT,
+        });
+      });
+      if (!skillFailed) {
+        for (const builtinId of BUILTIN_ANALYSIS_SKILL_IDS) {
+          if (!skills.some((s) => s.id === builtinId)) skills.push(builtinAnalysisSkill(builtinId));
+        }
+        out.skills = skills;
+      }
+    }
+  }
+
+  // maxRounds
+  if (obj.maxRounds !== undefined) {
+    const v = obj.maxRounds;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > ANALYSIS_MAX_ROUNDS_LIMIT) {
+      failField('analysis.maxRounds', `应为 1–${ANALYSIS_MAX_ROUNDS_LIMIT} 的整数（轮）`);
+    } else {
+      out.maxRounds = v;
+    }
+  }
+
+  // maxFiles
+  if (obj.maxFiles !== undefined) {
+    const v = obj.maxFiles;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > ANALYSIS_MAX_FILES_LIMIT) {
+      failField('analysis.maxFiles', `应为 1–${ANALYSIS_MAX_FILES_LIMIT} 的整数（个）`);
+    } else {
+      out.maxFiles = v;
+    }
+  }
+
+  // reasoningEffort
+  if (obj.reasoningEffort !== undefined) {
+    const v = obj.reasoningEffort;
+    const effortSoft = opts?.effortSoft === true;
+    const rejectEffort = (msg: string, dropField: boolean): void => {
+      if (!effortSoft && !soft) {
+        issues.push({ path: 'analysis.reasoningEffort', message: msg });
+        return;
+      }
+      opts?.softNotes?.push(
+        `AI 分析思考级别：${msg}（${dropField ? '已忽略该字段' : '仍会按此值发送，可在设置页点「恢复默认」'}，其余配置照常读取）`,
+      );
+      if (!dropField && typeof v === 'string' && v.trim() !== '') out.reasoningEffort = v;
+    };
+    const options = opts?.effortOptions;
+    const known = typeof v === 'string' && v === opts?.existingAnalysisEffort;
+    if (typeof v !== 'string') {
+      rejectEffort('应为字符串', true);
+    } else if (!v.trim() || v.length > REASONING_EFFORT_MAX_CHARS) {
+      rejectEffort(`应为 1–${REASONING_EFFORT_MAX_CHARS} 字符的非空字符串`, true);
+    } else if (v === REASONING_EFFORT_RESERVED) {
+      rejectEffort(`"${REASONING_EFFORT_RESERVED}" 是内部保留值，不应提交`, true);
+    } else if (!known && options === undefined) {
+      rejectEffort('未配置可选档位清单（config.yaml 的 llm.reasoningEfforts）', false);
+    } else if (!known && !(options as readonly string[]).includes(v)) {
+      rejectEffort(`不在可选档位清单内（可用：${(options as readonly string[]).join(' | ') || '（清单为空）'}）`, false);
+    } else {
+      out.reasoningEffort = v;
+    }
+  }
+
+  // skill ↔ tool 前置依赖
+  const blocked = out.skills.filter((s) => {
+    const need = ANALYSIS_SKILL_REQUIRED_TOOLS[s.id];
+    return need !== undefined && s.enabled && out.tools[need] !== true;
+  });
+  if (blocked.length > 0) {
+    if (opts?.skillDependencySoft === true) {
+      for (const s of blocked) s.enabled = false;
+      for (const s of blocked) {
+        const need = ANALYSIS_SKILL_REQUIRED_TOOLS[s.id]!;
+        opts.softNotes?.push(`AI 分析 skill「${s.name}」依赖的工具 ${need} 未启用，已自动停用该 skill`);
+      }
+    } else {
+      for (const s of blocked) {
+        issues.push({
+          path: 'analysis.skills',
+          message: `AI 分析 skill「${s.name}」需要先启用工具 ${ANALYSIS_SKILL_REQUIRED_TOOLS[s.id]}，否则它无法工作`,
+        });
+      }
+    }
+  }
+
+  return out;
 }
 
 export function normalizePromptConfig(
@@ -809,6 +1237,14 @@ export function normalizePromptConfig(
     }
   }
 
+  // analysis 独立配置域（REQ-20261113-003 · S-01）
+  if (obj.analysis !== undefined) {
+    out.analysis = normalizeAnalysisSection(obj.analysis, issues, opts);
+  } else if (obj.analysisPrompt !== undefined && out.analysisPrompt) {
+    // 老配置仅有顶层 analysisPrompt：平滑承接为 analysis.prompt
+    out.analysis = { ...defaultAnalysisConfig(), prompt: { ...out.analysisPrompt } };
+  }
+
   return out;
 }
 
@@ -827,6 +1263,8 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
     existingEffort: existing.reasoningEffort,
     // 同理（2026-11-11 名称英文口径）：升级前建的中文名 skill 是既有值，如实提交（未改名）时放行
     existingSkillNames: new Set(existing.skills.map((s) => s.name)),
+    existingAnalysisSkillNames: new Set((existing.analysis?.skills ?? []).map((s) => s.name)),
+    existingAnalysisEffort: existing.analysis?.reasoningEffort,
     effortOptions: config.llm?.reasoningEfforts,
   });
   if (issues.length > 0) throw new PromptConfigError(issues);
@@ -848,6 +1286,12 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
   if (rawInput.findPrompt === undefined && existing.findPrompt) {
     next.findPrompt = existing.findPrompt;
   }
+  if (rawInput.analysis === undefined && existing.analysis) {
+    next.analysis = {
+      ...existing.analysis,
+      ...(rawInput.analysisPrompt !== undefined && next.analysisPrompt ? { prompt: { ...next.analysisPrompt } } : {}),
+    };
+  }
   const now = new Date().toISOString();
   // 时间戳由服务端打（客户端时间不可信）
   next.prompt.at = now;
@@ -856,6 +1300,14 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
   for (const key of CAPABILITY_PROMPT_KEYS) {
     const p = next[key];
     if (p) p.at = now;
+  }
+  if (next.analysis) {
+    next.analysis.prompt = { ...next.analysis.prompt, at: now };
+    next.analysis.skills = next.analysis.skills.map((s) => ({ ...s, at: now }));
+    // 新版 analysis 提交而未单独提交 analysisPrompt 时，双写同步旧字段便于旧消费方兼容
+    if (rawInput.analysis !== undefined && rawInput.analysisPrompt === undefined) {
+      next.analysisPrompt = { ...next.analysis.prompt };
+    }
   }
   const file = promptConfigPath(config);
   fs.mkdirSync(path.dirname(file), { recursive: true });

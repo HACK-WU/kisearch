@@ -632,3 +632,89 @@ describe('能力级提示词（analysisPrompt / findPrompt）', () => {
     assert.equal(saved.prompt.content, '只改基础提示词', '其它字段仍按提交覆盖');
   });
 });
+
+describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
+  it('默认配置带独立 analysis 域：8 个只读工具全开、含 builtin-code-locate skill', () => {
+    const base = defaultPromptConfig();
+    assert.ok(base.analysis, '应包含 analysis 域');
+    assert.equal(base.analysis!.skills.length, 1);
+    assert.equal(base.analysis!.skills[0]!.id, 'builtin-code-locate');
+    assert.equal(base.analysis!.skills[0]!.name, 'code-locate');
+    assert.equal(base.analysis!.skills[0]!.enabled, true);
+    for (const tool of ['fs_read', 'fs_grep', 'fs_find', 'fs_ls', 'ki_get_module_info', 'ki_search', 'ki_group_list', 'ki_tag_list']) {
+      assert.equal(base.analysis!.tools[tool], true, `${tool} 默认应开启`);
+    }
+    assert.equal(base.tools['fs_read'], undefined, '对话 tools 不得混入 fs_read');
+  });
+
+  it('targetDirs 支持 defaultDir + byScope 映射，拒绝相对路径与系统敏感路径', () => {
+    const saved = savePromptConfig(cfg, {
+      analysis: {
+        targetDirs: { defaultDir: '/tmp/default-repo', byScope: { mem: '/root/knowledge-indexer' } },
+        prompt: { content: '自定义分析提示' },
+        skills: [{ id: 'builtin-code-locate', name: 'code-locate', description: 'd', content: 'c', enabled: true }],
+        tools: { fs_read: true, fs_grep: true },
+        maxRounds: 8,
+        maxFiles: 12,
+      },
+    });
+    assert.equal(saved.analysis!.targetDirs.defaultDir, '/tmp/default-repo');
+    assert.equal(saved.analysis!.targetDirs.byScope.mem, '/root/knowledge-indexer');
+    assert.equal(saved.analysis!.maxRounds, 8);
+    assert.equal(saved.analysis!.maxFiles, 12);
+
+    assert.throws(
+      () => savePromptConfig(cfg, { analysis: { targetDirs: { defaultDir: 'relative/path', byScope: {} } } }),
+      (err: unknown) => err instanceof PromptConfigError && err.issues.some((i) => i.path === 'analysis.targetDirs.defaultDir'),
+    );
+    assert.throws(
+      () => savePromptConfig(cfg, { analysis: { targetDirs: { byScope: { mem: '/proc/1' } } } }),
+      (err: unknown) => err instanceof PromptConfigError && err.issues.some((i) => i.path === 'analysis.targetDirs.byScope.mem'),
+    );
+  });
+
+  it('读取老配置（仅 analysisPrompt 无 analysis）平滑承接；analysis 字段损坏只降级对应项', () => {
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({
+      prompt: { content: '老对话提示词' },
+      analysisPrompt: { content: '老用户预设分析提示词' },
+    }), 'utf-8');
+    const r1 = readPromptConfig(cfg);
+    assert.equal(r1.issue, null);
+    assert.equal(r1.config.analysis!.prompt.content, '老用户预设分析提示词');
+
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({
+      prompt: { content: '我的对话提示词' },
+      analysis: { targetDirs: { defaultDir: 'bad-rel', byScope: {} }, maxRounds: 999 },
+    }), 'utf-8');
+    const r2 = readPromptConfig(cfg);
+    assert.equal(r2.config.prompt.content, '我的对话提示词', 'analysis 非法不得连累对话配置');
+    assert.ok(r2.issue && r2.issue.includes('analysis.targetDirs.defaultDir'));
+  });
+
+  it('关闭 fs_read 同时启用 builtin-code-locate → 保存 400 / 读取软停用', () => {
+    assert.throws(
+      () => savePromptConfig(cfg, {
+        analysis: {
+          targetDirs: { byScope: {} },
+          prompt: { content: 'ok' },
+          skills: [{ id: 'builtin-code-locate', name: 'code-locate', description: 'd', content: 'c', enabled: true }],
+          tools: { fs_read: false },
+        },
+      }),
+      (err: unknown) => err instanceof PromptConfigError && err.issues.some((i) => i.path === 'analysis.skills'),
+    );
+
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({
+      prompt: { content: '对话提示' },
+      analysis: {
+        targetDirs: { byScope: {} },
+        prompt: { content: '分析提示' },
+        skills: [{ id: 'builtin-code-locate', name: 'code-locate', description: 'd', content: 'c', enabled: true }],
+        tools: { fs_read: false },
+      },
+    }), 'utf-8');
+    const r = readPromptConfig(cfg);
+    assert.equal(r.config.analysis!.skills[0]!.enabled, false);
+    assert.ok(r.issue && r.issue.includes('fs_read'));
+  });
+});
