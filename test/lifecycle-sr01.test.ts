@@ -238,14 +238,30 @@ describe('⑥ applyLifecyclePlan 落字段', () => {
 describe('⑦ 防线源码断言（防后续被删）', () => {
   const root = process.cwd();
 
-  it('导入链路的 upsertRelation 会清空生命周期字段', () => {
+  it('导入链路的 upsertRelation 覆盖时**保留**生命周期字段（REQ-20261116-006 反转旧 R4）', () => {
     const src = fs.readFileSync(path.join(root, 'src/lib/import.ts'), 'utf8');
     const start = src.indexOf('function upsertRelation');
     assert.ok(start > 0, 'upsertRelation 不存在');
     const body = src.slice(start, start + 3000);
-    for (const field of ['lifecycle', 'expiresAt', 'eventId', 'ttlDays']) {
-      assert.ok(body.includes(`delete rel.${field}`), `upsertRelation 未清理 ${field}`);
-    }
+
+    // 数据源覆盖分支必须走「保留 + 成组自洽校验」的 helper，而不是无条件清空
+    const branchStart = body.indexOf('} else if (datasource) {');
+    assert.ok(branchStart >= 0, '未找到 datasource 覆盖分支');
+    const branchEnd = body.indexOf('\n  }', branchStart);
+    const branch = body.slice(branchStart, branchEnd > 0 ? branchEnd : undefined);
+    assert.ok(branch.includes('preserveLifecycleOnOverwrite('), '覆盖分支必须调用保留 helper');
+    assert.ok(!branch.includes('delete rel.'), '覆盖分支不得再无条件删除分类字段');
+
+    /**
+     * 旧防线是「四处 delete 必须在 upsertRelation 里」；2026-11-17 需求反转后
+     * 清理动作**只允许**出现在 helper 的「降级 wiki」路径：全文件 `delete rel.lifecycle`
+     * 有且只有一处，且位于 helper 内部 —— 两处以上说明有人又在别处静默清分类。
+     */
+    const deletes = [...src.matchAll(/delete rel\.lifecycle/g)];
+    assert.equal(deletes.length, 1, `delete rel.lifecycle 只应出现在降级路径，实际 ${deletes.length} 处`);
+    const helperStart = src.indexOf('function preserveLifecycleOnOverwrite');
+    assert.ok(helperStart > 0, '降级路径的 helper 不得被删（否则不自洽数据无人处理）');
+    assert.ok(deletes[0].index! > helperStart, 'delete rel.lifecycle 必须在 helper 内部');
   });
 
   it('MCP 写入工具暴露了三个分类参数', () => {

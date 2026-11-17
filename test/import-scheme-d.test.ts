@@ -383,17 +383,28 @@ describe('方案 D 导入：local KB 原文保留 + 格式限制（--no-vector �
     assert.ok(Array.isArray(rel.memoryIds) && rel.memoryIds.length === 0, '--no-vector 时仍无 memoryIds');
   });
 
-  it('--tags：不带 --tags 重导会清除已有标签（导入为覆盖语义）', () => {
+  it('--tags：不带 --tags 重导**保留**已有标签；显式传空串才清除（REQ-20261116-006 R9）', () => {
     const src = mkSource({ 't2.md': '# T2\n内容' });
     const r1 = runImport(['--scope', scope, '--source', src, '--group', 'tagkb-b', '--no-vector', '--tags', 'x']);
     assert.strictEqual(r1.ok, true);
-    // 不带 --tags 重导同文件 → 标签被清除（覆盖语义，区别于重建的只增不减）
+
+    /**
+     * R9（2026-11-17 用户拍板）：同步是「只更新内容与索引」，不得顺手抹掉用户设置。
+     * 旧语义「不带 --tags 即清空」与分类被抹掉是同一类问题，故一并反转：
+     *   - 未传 `--tags`（undefined）= 本次不管 tag，保留原值；
+     *   - 显式传 `--tags ''`     = 明确要清空。
+     */
     const r2 = runImport(['--scope', scope, '--source', src, '--group', 'tagkb-b', '--no-vector']);
     assert.strictEqual(r2.ok, true);
 
     const { readAllGroupCaches } = require('../src/lib/group-cache.js');
-    const rel = readAllGroupCaches(scope).get('tagkb-b')!.hot_relations.find((x: any) => x.text === 't2');
-    assert.strictEqual(rel.tags, undefined, '不带 --tags 重导应清除已有标签');
+    const keep = readAllGroupCaches(scope).get('tagkb-b')!.hot_relations.find((x: any) => x.text === 't2');
+    assert.deepStrictEqual(keep.tags, ['x'], '不带 --tags 重导不得清除已有标签');
+
+    const r3 = runImport(['--scope', scope, '--source', src, '--group', 'tagkb-b', '--no-vector', '--tags', '']);
+    assert.strictEqual(r3.ok, true, JSON.stringify(r3));
+    const cleared = readAllGroupCaches(scope).get('tagkb-b')!.hot_relations.find((x: any) => x.text === 't2');
+    assert.strictEqual(cleared.tags, undefined, '显式传空串 --tags "" 才清除标签');
   });
 
   it('--tags 全为保留标签：不打标 + stderr 警告（fail-loud 提示，不静默）', () => {

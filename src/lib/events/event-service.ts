@@ -533,14 +533,38 @@ function applyTerminalAction(
     const names = new Set(groupMembers.map((m) => m.name));
 
     if (type.terminalAction === 'trash') {
+      /**
+       * REQ-20261116-006（R8）：**数据源成员不搬回收站，改为 wiki**。
+       * 它的正文由源侧文件托管：搬走后源文件还在，下次同步会重新导入，
+       * 形成「回收站里有条目 + 检索又能命中」并存，比不清理更糟。
+       * 与 `deleteEvent` 的同名分支必须保持同一口径（两处是终态动作仅有的出口）。
+       */
       for (const m of groupMembers) {
+        if (m.relation.isImported === true) continue;
         const moved = moveToTrash({
           scope, group, relation: m.name, reason: 'event-closed', now, relationSnapshot: m.relation,
         });
         if (moved.ok) done += 1;
         else failed += 1;
       }
-      doc.hot_relations = doc.hot_relations.filter((r) => !(names.has(r.text) && r.eventId === event.id));
+      for (const rel of doc.hot_relations) {
+        if (!names.has(rel.text) || rel.eventId !== event.id || rel.isImported !== true) continue;
+        // 数据源成员：清掉分类即回 wiki，正文与索引都不动
+        delete rel.lifecycle;
+        delete rel.eventId;
+        delete rel.expiresAt;
+        delete rel.ttlDays;
+        done += 1;
+      }
+      /**
+       * 摘除口径**保持原样**（成员一律脱离该事件），只对 R8 的数据源成员开例外。
+       * 刻意不改成「只摘真正进站的那些」：那会让 moveToTrash 失败（如读不到正文）的普通成员
+       * 留在已收口事件上，挂着指向收口事件的悬空 `eventId`，还可能被终态阶段的档位判成
+       * hidden —— 文档从"库里没有"变成"在库里但看不见"，更难排查。
+       */
+      doc.hot_relations = doc.hot_relations.filter(
+        (r) => !(names.has(r.text) && r.eventId === event.id && r.isImported !== true),
+      );
     } else {
       for (const rel of doc.hot_relations) {
         if (rel.eventId !== event.id) continue;
@@ -605,12 +629,28 @@ export async function deleteEvent(scope: string, input: DeleteEventInput): Promi
       if (!doc) continue;
       const names = new Set(groupMembers.map((m) => m.name));
       if (input.docAction === 'trash') {
+        /**
+         * REQ-20261116-006（R8）：与 `applyTerminalAction` 同一口径 ——
+         * 数据源成员不搬回收站（源文件仍在，下次同步必复活），改为清空分类回 wiki。
+         */
         for (const m of groupMembers) {
+          if (m.relation.isImported === true) continue;
           const moved = moveToTrash({ scope, group, relation: m.name, reason: 'event-closed', now, relationSnapshot: m.relation });
           if (moved.ok) done += 1;
           else failed += 1;
         }
-        doc.hot_relations = doc.hot_relations.filter((r) => !(names.has(r.text) && r.eventId === event.id));
+        for (const rel of doc.hot_relations) {
+          if (!names.has(rel.text) || rel.eventId !== event.id || rel.isImported !== true) continue;
+          delete rel.lifecycle;
+          delete rel.eventId;
+          delete rel.expiresAt;
+          delete rel.ttlDays;
+          done += 1;
+        }
+        // 摘除口径与 `applyTerminalAction` 同源：成员一律脱离该事件，只给数据源成员开例外
+        doc.hot_relations = doc.hot_relations.filter(
+          (r) => !(names.has(r.text) && r.eventId === event.id && r.isImported !== true),
+        );
       } else {
         for (const rel of doc.hot_relations) {
           if (rel.eventId !== event.id) continue;

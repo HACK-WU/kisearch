@@ -394,6 +394,18 @@ export function LifecyclePage(): JSX.Element {
                     <span className="gov-term">
                       <span className={remainClass(doc.remainDays)}>剩 {doc.remainDays ?? 0} 天</span>
                       <span className="gov-days gov-days--calm">· {formatMonthDay(doc.expiresAt)} 到期</span>
+                      {doc.imported ? (
+                        /**
+                         * REQ-20261116-006（Q6）：数据源文档的 `temp` 只是保留用户设置，
+                         * 扫描侧豁免它（不会被自动清理）。不写这一句，用户会等一个永不到来的清理。
+                         */
+                        <span
+                          className="gov-days gov-days--calm"
+                          title="数据源文档的临时期限不生效：正文由源侧文件托管，不会被自动清理"
+                        >
+                          · 期限不生效
+                        </span>
+                      ) : null}
                     </span>
                   ) : doc.lifecycle === 'event' ? (
                     <span className="gov-term">
@@ -411,7 +423,12 @@ export function LifecyclePage(): JSX.Element {
                   <button
                     className="gov-btn gov-btn--ghost gov-btn--sm"
                     disabled={doc.imported || !canWrite}
-                    title={!canWrite ? readOnlyHint : doc.imported ? '数据源文档固定长期保留' : '改分类'}
+                    title={!canWrite
+                      ? readOnlyHint
+                      : doc.imported
+                        /* 保留分类后「固定 wiki」不再成立：数据源文档也可能是 temp / event */
+                        ? '数据源文档的分类由同步保留，不能在这里修改'
+                        : '改分类'}
                     onClick={() => setEditing({
                       group: doc.group,
                       name: doc.name,
@@ -421,7 +438,7 @@ export function LifecyclePage(): JSX.Element {
                       imported: doc.imported,
                     })}
                   >
-                    {doc.imported ? '固定' : '改'}
+                    {doc.imported ? '锁定' : '改'}
                   </button>
                 </td>
               </tr>
@@ -538,7 +555,9 @@ export function LifecyclePage(): JSX.Element {
                   <span className="gov-hint">绑定后文档可见性由该事件当前阶段决定（隐藏阶段会立刻搜不到）</span>
                 </label>
               ) : null}
-              {editing.imported ? <span className="gov-error">数据源文档固定 wiki，不允许改分类</span> : null}
+              {editing.imported ? (
+                <span className="gov-error">数据源文档的分类由同步保留，不能在此修改</span>
+              ) : null}
             </div>
             <div className="gov-modal__foot">
               <button className="gov-btn gov-btn--sm" onClick={() => setEditing(null)}>取消</button>

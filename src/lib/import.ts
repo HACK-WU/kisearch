@@ -2187,7 +2187,8 @@ async function handleDirectImportUnlocked(
   // 方案 D 回填：按文件聚合全部 chunk memoryId → 写入文件级 relation 的 memoryIds 多值；
   // 自定义 tag 无论是否向量化都持久化到 relation.tags（与 sync-relation 一致，供后续重建恢复）
   const mergedMap = activeMergedMap;
-  if (mergedMap.size > 0 || tagMemoryMap.size > 0 || customTags.length > 0) {
+  // `args.tags !== undefined` 覆盖「显式传空串 = 清空 tag」这条路径（R9）
+  if (mergedMap.size > 0 || tagMemoryMap.size > 0 || customTags.length > 0 || args.tags !== undefined) {
     for (const rec of activeFileRecords) {
       // 该文件全部 chunk 的 memoryId（按 sourcePath 文件#N 匹配）
       const ids = rec.entries
@@ -2203,8 +2204,14 @@ async function handleDirectImportUnlocked(
           rel.memoryIds = allIds;
           rel.memoryId = allIds[0]; // 兼容单值消费方
         }
-        // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
-        rel.tags = customTags.length > 0 ? customTags : undefined;
+        /**
+         * 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量。
+         * REQ-20261116-006（R9）：只有**显式指定** `--tags` 才改 tag ——
+         * `args.tags === undefined` 表示本次不管 tag（保留用户手工加的），
+         * `args.tags === ''`（显式传空串）表示清空。
+         */
+        if (customTags.length > 0) rel.tags = customTags;
+        else if (args.tags !== undefined) rel.tags = undefined;
       }
     }
   }
@@ -2536,6 +2543,35 @@ function generateNextId(cache: RelationsCache): string {
 }
 
 /**
+ * REQ-20261116-006（R1/R2/N4）：数据源同步覆盖已存在文档时，分类与事件绑定**原样保留**。
+ *
+ * 旧实现（REQ-20261113-004 R4）在这里连删 `lifecycle`/`expiresAt`/`eventId`/`ttlDays`，
+ * 理由是防 `isImported=true` + `lifecycle=temp` 的矛盾态被回收站扫描当临时文档删掉。
+ * 代价是用户设的「临时 30 天」与事件归属被一次普通同步静默抹掉——页面无提示、无法察觉。
+ * 该风险改由扫描侧豁免数据源文档兜住（`findExpiredTemp`，R7），不必在覆盖时破坏用户设置。
+ *
+ * 保留的前提是**成组自洽**（与读侧 `resolveLifecycle` 的 `inconsistent` 判据同构）：
+ * `temp` 必须有 `expiresAt`、`event` 必须有 `eventId`；不自洽就降级 wiki 并告警。
+ * 静默修数据会让问题在别处以更难看的方式暴露，静默留坏数据又会让诊断一直亮红灯，两条都不取。
+ */
+function preserveLifecycleOnOverwrite(rel: Relation, where: string): void {
+  const kind = rel.lifecycle;
+  if (kind === 'temp' && typeof rel.expiresAt === 'number' && Number.isFinite(rel.expiresAt)) return;
+  if (kind === 'event' && rel.eventId) return;
+  if (kind === 'temp' || kind === 'event') {
+    const missing = kind === 'temp' ? 'expiresAt' : 'eventId';
+    logWarn(`同步保留了分类但字段不自洽（${kind} 缺少 ${missing}），已降级 wiki：${where}`);
+  } else if (kind !== undefined && kind !== 'wiki') {
+    logWarn(`文档分类值「${String(kind)}」无法识别，已降级 wiki：${where}`);
+  }
+  // wiki / 未设分类 / 上述不自洽：清掉可能残留的配套字段
+  delete rel.lifecycle;
+  delete rel.expiresAt;
+  delete rel.eventId;
+  delete rel.ttlDays;
+}
+
+/**
  * upsert：以 (groupPath + relationText) 为主键
  * REQ-05（批次 3）：不再写入 keywords / isFullText（旧数据字段只读兼容）
  * 方案 D（REQ-20260807-001）：文件级 relation 挂 memoryIds 多值
@@ -2569,15 +2605,10 @@ function upsertRelation(
     // 已存在：刷新为导入态，不做评分回退（与 import-kb 行为一致）
     rel.isImported = true;
     /**
-     * REQ-20261113-004（R4）：数据源文档强制 wiki。
-     * 不清会让一次「导入覆盖」把手动建的生命周期带进数据源文档，
-     * 形成 `isImported=true` + `lifecycle=temp` 的矛盾态，随后被回收站扫描当临时文档删掉。
-     * 这是「数据源豁免」的最后一道防线：UI 与 MCP 层都拦不住导入链路。
+     * REQ-20261116-006（R1/R2）：覆盖只更新内容与索引，**不动分类与事件绑定**。
+     * 旧 R4「数据源文档强制 wiki」的四连 delete 已废止，判据与原因见上方 helper 注释。
      */
-    delete rel.lifecycle;
-    delete rel.expiresAt;
-    delete rel.eventId;
-    delete rel.ttlDays;
+    preserveLifecycleOnOverwrite(rel, `${groupPath}/${relationText}`);
   }
   /**
    * 上传通道覆盖已有文档（`datasource === false`）时**什么都不改**：
@@ -2593,9 +2624,12 @@ function upsertRelation(
     else delete rel.memoryId;
   }
   if (sourcePath) rel.sourcePath = sourcePath;
-  // 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量
+  /**
+   * 持久化自定义 tag 到 KB 层（relation.tags），供 rebuild-vector/restore 恢复 tag 向量。
+   * REQ-20261116-006（R9）：`tags` 缺省 = 本次不改 tag —— 用户手工加的 tag 不能被一次裸同步清掉。
+   * 显式清空由 `handleDirectImport` 按 `args.tags !== undefined` 单独处理。
+   */
   if (tags && tags.length > 0) rel.tags = tags;
-  else rel.tags = undefined; // 清空已删除的 tag（无 tag 时不留字段）
 }
 
 // ─── local KB 操作 ───────────────────────────────────────

@@ -209,9 +209,24 @@ export function validateLifecycleInput(input: LifecycleInput, now: number): Life
   return { ok: true, specified: true, kind: 'event', eventId };
 }
 
+/**
+ * `findExpiredTemp` 需要的字段：除分类字段外还要认出「数据源文档」（REQ-20261116-006 R7）。
+ * 单独开子类型而不是往 `LifecycleFields` 里加，是为了不扩大读侧校验契约的语义面。
+ */
+export interface ExpiredScanFields extends LifecycleFields {
+  isImported?: boolean;
+}
+
 /** 已过期 temp 文档（S-04 的惰性扫描入口之一；本函数不做 I/O） */
-export function findExpiredTemp<T extends LifecycleFields>(relations: readonly T[], now: number): T[] {
+export function findExpiredTemp<T extends ExpiredScanFields>(relations: readonly T[], now: number): T[] {
   return relations.filter((rel) => {
+    /**
+     * REQ-20261116-006（R7）：数据源文档不从「临时到期」这条路径消失。
+     * 它的正文由源侧文件托管 —— 判过期搬进回收站后源文件仍在，下次同步会重新导入，
+     * 结果是「回收站里有一条 + 检索又能命中」并存，比不清理更糟。
+     * 因此数据源文档保留的 `temp` 只是不丢用户设置，期限对其**不生效**（页面需明示）。
+     */
+    if (rel.isImported === true) return false;
     if (rel.lifecycle !== 'temp') return false;
     return typeof rel.expiresAt === 'number' && Number.isFinite(rel.expiresAt) && rel.expiresAt <= now;
   });
