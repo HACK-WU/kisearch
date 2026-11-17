@@ -136,6 +136,13 @@ export const GOVERNANCE_CODE_NUMBERS = {
 export type GovernanceErrorCode = keyof typeof GOVERNANCE_CODE_NUMBERS;
 
 /** 该类错误默认的 HTTP 状态码（4xx 一律可对外暴露；5xx 需上层决定是否脱敏） */
+/**
+ * 错误码 → HTTP 状态（**唯一一张表**）。
+ *
+ * 历史坑（2026-11-17 真机发现）：`governance-http` 曾另有一份本地 `STATUS_BY_CODE`，
+ * 新增错误码时只改这边，接口实际仍返回 400（契约写 409）。两表合并后，
+ * 新增码只需改这里。
+ */
 const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   FORBIDDEN_SCOPE: 403,
   DOC_NOT_FOUND: 404,
@@ -157,11 +164,14 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   FIND_TIMEOUT: 504,
   FIND_CANCELED: 499,
   FIND_QUEUE_TIMEOUT: 429,
-  REVISION_CONFLICT: 409,
+  // ── 治理域历史码（原先只在 governance-http 的本地表里，2026-11-17 合并至此单表）──
   RESTORE_NAME_CONFLICT: 409,
-  REF_LIMIT_EXCEEDED: 409,
-  DOC_BOUND_TO_OTHER_EVENT: 409,
-  EVENT_MEMBER_LIMIT_EXCEEDED: 409,
+  REVISION_CONFLICT: 409,
+  TYPE_IN_USE: 409,
+  TYPE_BUILTIN: 409,
+  EVENT_CLOSED: 409,
+  EVENT_NOT_CLOSED: 409,
+  DATASOURCE_LIFECYCLE_LOCKED: 403,
   ANALYSIS_ALREADY_RUNNING: 409,
   ANALYSIS_TARGET_SYNCING: 409,
   ANALYSIS_DISCLOSURE_REQUIRED: 403,
@@ -169,6 +179,9 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   ANALYSIS_LOCATION_NOT_FOUND: 404,
   ANALYSIS_RATE_LIMITED: 429,
   ANALYSIS_LLM_UNAVAILABLE: 503,
+  REF_LIMIT_EXCEEDED: 409,
+  DOC_BOUND_TO_OTHER_EVENT: 409,
+  EVENT_MEMBER_LIMIT_EXCEEDED: 409,
   SEARCH_UNAVAILABLE: 503,
   TRASH_WRITE_FAILED: 500,
 };
@@ -179,6 +192,11 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
  * `message` 必须自解释（MCP 客户端只看到这段文本），`details` 放可机器消费的引导，
  * 例如 `EVENT_NOT_FOUND` 附 `available: [{id, shortId, title}]`，让 AI 能自我纠正而不是重试。
  */
+/** 取某错误码对应的 HTTP 状态（未列入的按 400 契约错误） */
+export function httpStatusFor(code: string): number {
+  return (HTTP_STATUS as Record<string, number | undefined>)[code] ?? 400;
+}
+
 export class GovernanceError extends Error {
   readonly code: GovernanceErrorCode;
   readonly status: number;

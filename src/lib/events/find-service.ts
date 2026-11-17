@@ -66,8 +66,10 @@ export async function runDeepFindAsSearchResult(
     return c;
   };
   // 去重后再统计：重复 target 会把同一库算两遍，`total` 随之偏大（HTTP 层已去重，这里兜底）
-  const totalByScope = countDocsByTargets([...new Set(deps.targets)], { viewMembers: viewMembersOf, cachesOf });
-  const total = totalByScope.reduce((sum, x) => sum + x.docs, 0);
+  const { rows: totalByScope, total } = countDocsByTargets([...new Set(deps.targets)], {
+    viewMembers: viewMembersOf,
+    cachesOf,
+  });
 
   // `excluded` 对外只暴露**文档名**（与快速通道同口径，前端拿它做"已排除"提示）
   const members = collectMembers(scope, event.id).map((m) => m.name);

@@ -96,9 +96,15 @@ export interface RefSearchResult {
   candidates: RefCandidate[];
   steps: RefSearchStep[];
   excluded: { associated: string[]; added: string[] };
-  /** 各 target 的文档数之和（多库时语义从"这个库有多少篇"变为"参与检索的库共多少篇"） */
+  /**
+   * 参与检索的**不同物理库**的文档数之和（视图按成员库展开，重叠不重复计）。
+   * ⚠️ 不等于 `totalByScope` 各行相加：事件库常常同时是某个视图的成员。
+   */
   total: number;
-  /** 按库的文档数（多库时由面板展示"共 N 篇（M 个库）"） */
+  /**
+   * 按 target 的文档数（视图显示成员库之和）。
+   * ⚠️ 各行相加**不等于** `total` —— 视图成员与事件库重叠时会被算两遍。
+   */
   totalByScope?: Array<{ scope: string; docs: number }>;
   /** 本次实际参与检索的单元（库名或视图名），顺序 = [事件库, ...extraScopes] */
   targets?: string[];
@@ -297,11 +303,10 @@ export async function searchRefCandidates(
     return view && Array.isArray(view.members) ? view.members : null;
   };
   // 成员库的 caches 顺带进缓存：后面的候选可见性 / 源库 lookup 直接复用
-  const totalByScope = countDocsByTargets(targets, {
+  const { rows: totalByScope, total } = countDocsByTargets(targets, {
     viewMembers: viewMembersOf,
     cachesOf: (s) => cachesOf(s) as unknown as Map<string, { hot_relations: unknown[] }>,
   });
-  const total = totalByScope.reduce((sum, x) => sum + x.docs, 0);
 
   // ② 提取线索（类型名不进 query，理由见 extractKeywords 注释）
   const step2Start = Date.now();

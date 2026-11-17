@@ -43,6 +43,8 @@ export interface AiProcessPanelProps {
   unconfirmedCount?: number;
   /** 深度通道：模型输出是否可解析（false = 模型没给出结果，不是"没有相关文档"） */
   parsed?: boolean;
+  /** 深度通道：被剔除的明细（可折叠，供排障） */
+  unconfirmed?: Array<{ group: string; name: string; sourceScope?: string; reason: string }>;
   context: AiProcessContext;
 }
 
@@ -58,6 +60,15 @@ const STEP_TITLES: Record<RefSearchStep['name'], string> = {
 };
 
 /** 范围剔除原因 → 人话（不要给用户看 `forbidden` 这种机器码） */
+/** 校验剔除原因 → 人话（机器码不直接给用户看） */
+const UNCONFIRMED_TEXT: Record<string, string> = {
+  'out-of-scope': '不在检索范围',
+  'not-found': '文档不存在',
+  'already-used': '已关联或已加入',
+  malformed: '格式不合法',
+  truncated: '超出候选上限',
+};
+
 const SKIP_TEXT: Record<'forbidden' | 'missing' | 'view-members-changed', string> = {
   forbidden: '无访问权限',
   missing: '库已不存在',
@@ -85,8 +96,12 @@ function detailText(value: unknown): string {
 /** 把一步的 metrics 翻成一句人话（数字全部取自 metrics，不臆造） */
 function stepSentence(step: RefSearchStep, ctx: AiProcessContext, keywordCount: number): string {
   switch (step.name) {
-    case 'understand':
-      return `理解事件：#${ctx.shortId ?? '—'} ${ctx.title}${ctx.typeName ? ` · ${ctx.typeName}` : ''} · 当前「${ctx.stageName}」`;
+    case 'understand': {
+      // 深度通道可能有排队等待：把它单独说出来，避免用户把"排队"误当成"检索慢"
+      const queuedMs = numOf(step.metrics.queuedMs);
+      const queuedText = queuedMs > 0 ? ` · 排队等待 ${(queuedMs / 1000).toFixed(1)}s` : '';
+      return `理解事件：#${ctx.shortId ?? '—'} ${ctx.title}${ctx.typeName ? ` · ${ctx.typeName}` : ''} · 当前「${ctx.stageName}」${queuedText}`;
+    }
     case 'extract':
       return `从标题与 ${numOf(step.metrics.sources)} 篇关联文档提取线索 ${numOf(step.metrics.keywords)} 个`;
     case 'search':
@@ -201,6 +216,19 @@ export function AiProcessPanel(args: AiProcessPanelProps): JSX.Element {
       ) : null}
       {args.parsed === false && (args.unconfirmedCount ?? 0) === 0 ? (
         <p className="gov-ai-proc__degraded">模型没有给出可解析的候选数组；可重试，或改用快速查找。</p>
+      ) : null}
+      {args.unconfirmed !== undefined && args.unconfirmed.length > 0 ? (
+        <details className="gov-ai-proc__unconfirmed">
+          <summary>查看被剔除的 {args.unconfirmed.length} 条（供排障）</summary>
+          <ul>
+            {args.unconfirmed.map((u, i) => (
+              <li key={`${u.sourceScope ?? ''}-${u.group}-${u.name}-${i}`}>
+                {u.sourceScope ? `${u.sourceScope} · ` : ''}
+                {u.group}/{u.name} —— {UNCONFIRMED_TEXT[u.reason] ?? u.reason}
+              </li>
+            ))}
+          </ul>
+        </details>
       ) : null}
 
       {open && args.steps.length > 0 ? (

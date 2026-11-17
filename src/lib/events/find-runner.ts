@@ -144,14 +144,15 @@ function pumpFindQueue(): void {
  *
  * @param signal 前端断开时出队并中止，避免"用户早关页面了还在排"
  */
-async function acquireFindSlot(key: string, signal?: AbortSignal): Promise<void> {
+async function acquireFindSlot(key: string, signal?: AbortSignal): Promise<number> {
   if (signal?.aborted) throw new GovernanceError('FIND_CANCELED', '查找已被中止');
   // 有空位且没有同 key 在跑/在等 → 直接跑，不进队列（省掉一次微任务与定时器）
   if (!runningKeys.has(key) && !findWaiters.some((w) => w.key === key) && activeFindRuns < findLimits.maxConcurrent) {
     activeFindRuns += 1;
     runningKeys.add(key);
-    return;
+    return 0;
   }
+  const enqueuedAt = Date.now();
   if (findWaiters.length >= findLimits.queueMax) {
     throw new GovernanceError(
       'FIND_BUSY',
@@ -192,6 +193,8 @@ async function acquireFindSlot(key: string, signal?: AbortSignal): Promise<void>
     findWaiters.push(waiter);
     pumpFindQueue();
   });
+  // 同步请求没法中途告知"排在第几位"，只能事后把等了多久如实告诉面板
+  return Date.now() - enqueuedAt;
 }
 
 function releaseFindSlot(key: string): void {
@@ -418,7 +421,7 @@ export async function runDeepFind(
    * `deps.limits` 仅供单测把上限收窄到可测规模，生产永远不传。
    */
   if (deps.limits) Object.assign(findLimits, deps.limits);
-  await acquireFindSlot(key, deps.signal);
+  const queuedMs = await acquireFindSlot(key, deps.signal);
 
   const controller = new AbortController();
   const onOuterAbort = (): void => controller.abort();
@@ -462,6 +465,21 @@ export async function runDeepFind(
       return v && Array.isArray(v.members) ? v.members : null;
     };
 
+    /**
+     * 允许出现的**物理库**集合：targets 里若是视图，其成员库同样在范围内。
+     *
+     * 为什么不能用 `targets.includes(src)`：视图在 targets 里是**视图名**，
+     * 而模型拿到的指令是「视图要写它的成员库」——直接比对会把成员库判成越界
+     * （2026-11-17 真机：`b5-view` 的成员 `b5-beta` 两条候选全被误杀）。
+     * 视图名本身仍保留在集合里（模型可能直接引用 target 名），但读正文时另行纠错。
+     */
+    const allowedScopes = new Set<string>();
+    for (const t of targets) {
+      allowedScopes.add(t);
+      const members = viewOf(t);
+      if (members !== null) for (const m of members) allowedScopes.add(m);
+    }
+
     // ── ② 组装上下文 ──
     const eventType = getType(scope, event.typeId);
     const members = collectMembers(scope, event.id).map((m) => ({ group: m.group, name: m.name }));
@@ -486,6 +504,7 @@ export async function runDeepFind(
         refs: refs.length,
         maxRounds: budget.maxRounds,
         timeoutMs: budget.timeoutMs,
+        ...(queuedMs > 0 ? { queuedMs } : {}),
       },
       detail: {
         targets,
@@ -508,8 +527,8 @@ export async function runDeepFind(
     const resolveToolScope = (raw: unknown): { scope: string } | { error: string } => {
       const wanted = typeof raw === 'string' ? raw.trim() : '';
       if (!wanted) return { scope: targets[0]! };
-      if (!targets.includes(wanted)) {
-        return { error: `scope「${wanted}」不在本次检索范围内，可用：${targets.join(' / ')}` };
+      if (!allowedScopes.has(wanted)) {
+        return { error: `scope「${wanted}」不在本次检索范围内，可用：${[...allowedScopes].join(' / ')}` };
       }
       const membersOfView = viewOf(wanted);
       if (membersOfView) {
@@ -908,7 +927,7 @@ export async function runDeepFind(
     for (const item of parsed ?? []) {
       // ① 范围（视图名不是库，同样算越界）
       const src = item.sourceScope || scope;
-      if (!targets.includes(src) || viewOf(src) !== null) {
+      if (!allowedScopes.has(src) || viewOf(src) !== null) {
         unconfirmed.push({ group: item.group, name: item.name, sourceScope: item.sourceScope, reason: 'out-of-scope' });
         continue;
       }

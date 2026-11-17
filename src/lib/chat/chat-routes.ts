@@ -777,6 +777,7 @@ export async function handlePromptConfigPut(
         .map((n) => n.trim());
       if (extra.length > 0) {
         const SKIP_TEXT: Record<SkippedTargetReason, string> = {
+          // forbidden 当前不可达（见下方注释），文案保留给"放宽门禁"后的场景
           forbidden: '无权访问该库 / 视图',
           missing: '这个名称不存在（既不是库也不是视图）',
           'view-members-changed': '视图没有成员或成员已变更',
@@ -786,12 +787,20 @@ export async function handlePromptConfigPut(
           // 用请求级配置读 views.json：与本次请求的 dataDir 同源，避免拿旧视图表判新配置
           config: cfg,
         });
-        if (skipped.length > 0) {
+        /*
+         * 只拦**可达**的两类：名字不存在、视图无成员。
+         * `forbidden` 在这里恒不成立 —— 能走到本函数要求 all-scope token
+         * （`requireGlobalConfigWrite`），而 all-scope 会让 `isScopeAccessAllowed` 恒真。
+         * 授权问题留给运行期：`resolveFindTargets` 剔除并在 `skippedTargets` 里如实告知。
+         * ⚠️ 将来若放宽"按库管理员也能改全局配置"，必须把 forbidden 重新纳入这里。
+         */
+        const hard = skipped.filter((s) => s.reason !== 'forbidden');
+        if (hard.length > 0) {
           throw new ChatApiError(
             400,
             PROMPT_CONFIG_INVALID,
-            `检索范围不可用：${skipped.map((s) => `${s.name}（${SKIP_TEXT[s.reason]}）`).join('、')}`,
-            skipped.map((s) => ({
+            `检索范围不可用：${hard.map((s) => `${s.name}（${SKIP_TEXT[s.reason]}）`).join('、')}`,
+            hard.map((s) => ({
               field: `find.ranges.extraScopes.${s.name}`,
               message: SKIP_TEXT[s.reason],
             })),

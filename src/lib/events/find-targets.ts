@@ -48,16 +48,30 @@ export function countDocsByTargets(
     viewMembers: (name: string) => string[] | null;
     cachesOf: (scope: string) => Map<string, { hot_relations: unknown[] }>;
   },
-): Array<{ scope: string; docs: number }> {
+): { rows: Array<{ scope: string; docs: number }>; total: number } {
   const count = (s: string): number => {
     let n = 0;
     for (const [, doc] of deps.cachesOf(s)) n += doc.hot_relations.length;
     return n;
   };
-  return targets.map((t) => {
+  const rows = targets.map((t) => {
     const members = deps.viewMembers(t);
     return { scope: t, docs: members === null ? count(t) : members.reduce((sum, m) => sum + count(m), 0) };
   });
+  /*
+   * ★ `total` 必须按**去重后的物理库**求和，不能把 rows 简单相加：
+   *   事件库常常同时是某个视图的成员，rows 相加会把同一批文档算两遍
+   *   （2026-11-17 真机：2 篇文档的两个库，`total` 报成 6）。
+   */
+  const expanded = new Set<string>();
+  for (const t of targets) {
+    const members = deps.viewMembers(t);
+    if (members === null) expanded.add(t);
+    else for (const m of members) expanded.add(m);
+  }
+  let total = 0;
+  for (const s of expanded) total += count(s);
+  return { rows, total };
 }
 
 export interface FindTargetDeps {

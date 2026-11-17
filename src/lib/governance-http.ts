@@ -15,7 +15,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'http';
 import { readJson } from './store.js';
-import { GovernanceError } from './governance-errors.js';
+import { GovernanceError, httpStatusFor } from './governance-errors.js';
 import {
   readGovernance, writeGovernance, validateTrashSettings, validatePresetKind, BUILTIN_PRESETS, TRASH_KEEP_DAYS,
   type GovernanceConfig, type LifecyclePreset,
@@ -98,35 +98,6 @@ export interface GovernanceRouteContext {
   authScopes: string[] | null;
 }
 
-/** 错误码 → HTTP 状态。未列入的按 400（契约错误） */
-const STATUS_BY_CODE: Record<string, number> = {
-  EVENT_NOT_FOUND: 404,
-  TYPE_NOT_FOUND: 404,
-  TRASH_NOT_FOUND: 404,
-  REF_NOT_FOUND: 404,
-  RESTORE_NAME_CONFLICT: 409,
-  REVISION_CONFLICT: 409,
-  TYPE_IN_USE: 409,
-  TYPE_BUILTIN: 409,
-  REF_ALREADY_ASSOCIATED: 409,
-  REF_LIMIT_EXCEEDED: 409,
-  EVENT_CLOSED: 409,
-  EVENT_NOT_CLOSED: 409,
-  DATASOURCE_LIFECYCLE_LOCKED: 403,
-  FORBIDDEN_SCOPE: 403,
-  DOC_NOT_FOUND: 404,
-  // 向量服务不可用是"暂时性外部故障"，不能伪装成 400 契约错误（前端据此给"改用手动添加"）
-  SEARCH_UNAVAILABLE: 503,
-  // ── 事件源码分析（REQ-20261113-003）──
-  ANALYSIS_ALREADY_RUNNING: 409,
-  ANALYSIS_TARGET_SYNCING: 409,
-  ANALYSIS_DISCLOSURE_REQUIRED: 403,
-  ANALYSIS_DRAFT_NOT_FOUND: 404,
-  ANALYSIS_LOCATION_NOT_FOUND: 404,
-  ANALYSIS_RATE_LIMITED: 429,
-  ANALYSIS_LLM_UNAVAILABLE: 503,
-};
-
 /**
  * 检索实现按需加载。
  *
@@ -184,7 +155,7 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 
 function fail(res: ServerResponse, err: unknown): void {
   if (err instanceof GovernanceError) {
-    sendJson(res, STATUS_BY_CODE[err.code] ?? 400, {
+    sendJson(res, httpStatusFor(err.code), {
       ok: false,
       code: err.code,
       error: err.message,
@@ -280,7 +251,7 @@ export async function handleGovernanceRoutes(
           eventId: str(pick(b, 'eventId', 'event')),
         });
         if (!result.ok) {
-          return sendJson(res, STATUS_BY_CODE[result.code] ?? 400, {
+          return sendJson(res, httpStatusFor(result.code), {
             ok: false,
             code: result.code,
             // 契约字段是 `error`：直接透出内部 `message` 会让前端拿到 undefined
@@ -718,7 +689,23 @@ export async function handleGovernanceRoutes(
              * `close` 在正常响应完成后也会触发，故用 `writableEnded` 区分「提前断开」。
              */
             const abortCtl = new AbortController();
-            const onClose = (): void => { if (!res.writableEnded) abortCtl.abort(); };
+            const deepStartedAt = Date.now();
+            /*
+             * 客户端在响应写完前断开 = 要么用户关了弹窗，要么**网关先把这条长请求掐了**。
+             * 两者从服务端看一模一样，所以这里记一条日志（含已耗时）：真实部署里
+             * "深度查找总在 N 秒后失败但服务端没有错误"时，先看这条。
+             */
+            const onClose = (): void => {
+              if (res.writableEnded) return;
+              const elapsed = Date.now() - deepStartedAt;
+              // 1s 内的断开基本是用户点了取消（没有诊断价值），只在"跑了一会儿才断"时记，避免刷屏
+              if (elapsed > 1_000) {
+                console.error(
+                  `[governance/find] 响应前断开（用户取消或网关超时）：scope=${scope} event=${id} elapsed=${elapsed}ms`,
+                );
+              }
+              abortCtl.abort();
+            };
             req.once('close', onClose);
             try {
               const deepResult = await runDeepFindAsSearchResult(scope, id, {
@@ -887,7 +874,7 @@ export async function handleGovernanceRoutes(
         });
         return outcome.ok
           ? sendJson(res, 200, { ...outcome, scope })
-          : sendJson(res, STATUS_BY_CODE[outcome.code] ?? 400, { ok: false, scope, code: outcome.code, error: outcome.error });
+          : sendJson(res, httpStatusFor(outcome.code), { ok: false, scope, code: outcome.code, error: outcome.error });
       }
 
       if (segs[1] === 'purge' && method === 'POST') {

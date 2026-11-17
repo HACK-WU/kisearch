@@ -36,6 +36,9 @@ import { GovernanceError } from '../../src/lib/governance-errors.js';
 import type { ChatTurn, LlmStatus, StreamPart } from '../../src/lib/chat/llm-client.js';
 
 const scope = `find-run-${Date.now()}`;
+/** 第二个库：只作为「视图成员」出现，不进 targets —— 用于回归「视图成员被判越界」 */
+const scopeB = `${scope}-b`;
+const ART_C = '视图成员文档';
 const GROUP = '部署运维';
 const ART_A = '发布与回滚手册';
 const ART_B = '值班检查清单';
@@ -58,7 +61,7 @@ function okStatus(): LlmStatus {
   };
 }
 
-function seed(name: string): void {
+function seedIn(s: string, name: string): void {
   const rel: Relation = {
     id: `rel_${name.length}_${name.replace(/\W/g, '')}`,
     text: name,
@@ -67,10 +70,14 @@ function seed(name: string): void {
     lastUsedTime: null,
     isImported: false,
   };
-  const doc = loadGroupCache(scope, GROUP) ?? { version: 1, scope, hot_relations: [], keywords: [], updatedAt: null };
+  const doc = loadGroupCache(s, GROUP) ?? { version: 1, scope: s, hot_relations: [], keywords: [], updatedAt: null };
   doc.hot_relations = doc.hot_relations.filter((r) => r.text !== name);
   doc.hot_relations.push(rel);
-  writeGroupCache(scope, GROUP, doc);
+  writeGroupCache(s, GROUP, doc);
+}
+
+function seed(name: string): void {
+  seedIn(scope, name);
 }
 
 /** 一轮只回工具调用；最后一轮回候选 JSON */
@@ -116,8 +123,11 @@ beforeEach(() => {
 before(() => {
   registerTestScope(scope);
   initScope(scope);
+  registerTestScope(scopeB);
+  initScope(scopeB);
   seed(ART_A);
   seed(ART_B);
+  seedIn(scopeB, ART_C);
   cfg = {
     dataDir: path.dirname(getKbDir(scope)),
     chatDir: path.join(path.dirname(getKbDir(scope)), 'chat'),
@@ -128,8 +138,10 @@ before(() => {
 
 after(() => {
   resetFindConcurrencyForTest();
-  const kbDir = getKbDir(scope);
-  if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+  for (const s of [scope, scopeB]) {
+    const kbDir = getKbDir(s);
+    if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+  }
   cleanupTestConfig();
 });
 
@@ -181,6 +193,11 @@ describe('① 门禁', () => {
     const [r1, r2] = await Promise.all([first, second]);
     assert.equal(r1.candidates.length, 0);
     assert.equal(r2.candidates.length, 0, '排队后应正常执行并返回，而不是 409');
+    const understand2 = r2.steps.find((x) => x.name === 'understand')!;
+    assert.ok(
+      Number(understand2.metrics.queuedMs ?? 0) > 0,
+      '排队耗时必须如实透出（否则用户会以为检索本身慢）',
+    );
   });
 
   it('队列满 → FIND_BUSY；排队超时 → FIND_QUEUE_TIMEOUT', async () => {
@@ -224,6 +241,26 @@ describe('① 门禁', () => {
     );
     release2();
     await third;
+  });
+});
+
+describe('①a 视图成员库不算越界（真机缺陷回归）', () => {
+  it('targets 只写了视图名时，模型给的成员库候选应通过校验', async () => {
+    const ev = await createEvent(scope, { title: '视图成员候选', typeId: 'et_1' });
+    const script = scriptedStream([{
+      text: JSON.stringify([{ sourceScope: scopeB, group: GROUP, name: ART_C, reason: '视图成员的正文' }]),
+    }]);
+    const r = await runDeepFind(scope, ev.id, {
+      targets: [scope, 'v-test'],
+      config: baseConfig(),
+      kiConfig: cfg,
+      llm: { stream: script.fn, status: () => okStatus() },
+      // 视图 v-test 的唯一成员就是 scopeB
+      viewMembers: (n) => (n === 'v-test' ? [scopeB] : null),
+    });
+    assert.equal(r.candidates.length, 1, '视图成员库的候选不得被判 out-of-scope');
+    assert.equal(r.candidates[0]?.scope, scopeB);
+    assert.equal(r.unconfirmed.some((u) => u.reason === 'out-of-scope'), false);
   });
 });
 
@@ -284,6 +321,28 @@ describe('①c 跨事件并发闸门', () => {
     releaseA();
     await Promise.all([a, b]);
     assert.equal(bStarted, true, 'A 结束后 B 应被放行');
+  });
+});
+
+describe('①d 工具执行失败不中断', () => {
+  it('工具抛错 → 以错误串回填给模型（不向用户抛），后续轮次继续', async () => {
+    const ev = await createEvent(scope, { title: '工具失败验证', typeId: 'et_1' });
+    const script = scriptedStream([
+      { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
+      { text: JSON.stringify([{ sourceScope: scope, group: GROUP, name: ART_B, reason: '凭清单判断' }]) },
+    ]);
+    const r = await runDeepFind(scope, ev.id, deps({
+      stream: { stream: script.fn, status: () => okStatus() },
+      search: async () => { throw new Error('向量引擎暂不可用'); },
+    }));
+    const toolMsgs = script.seen[1]!.filter((m) => m.role === 'tool').map((m) => String(m.content));
+    assert.ok(
+      toolMsgs.some((t) => t.includes('向量引擎暂不可用')),
+      `失败原因要回给模型让它换策略：${toolMsgs.join(' | ')}`,
+    );
+    assert.equal(r.candidates.length, 1, '单次工具失败不得让整次查找失败');
+    const toolStep = r.steps.find((x) => x.name === 'tools')!;
+    assert.equal(toolStep.calls?.[0]?.name, 'ki_search', '失败调用也要留在过程记录里（可观测）');
   });
 });
 

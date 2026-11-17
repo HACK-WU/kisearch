@@ -124,6 +124,8 @@ describe('④ 二期双通道 UI 标记（REQ-20261116-005 · B8）', () => {
     assert.ok(s.includes("case 'verify'"));
     assert.ok(s.includes('partial.usedRounds'));
     assert.ok(s.includes('unconfirmedCount'));
+    assert.ok(s.includes('gov-ai-proc__unconfirmed'), '被剔除的明细要可折叠展示（供排障）');
+    assert.ok(s.includes('queuedMs'), '排队耗时要说出来，别让用户误以为检索慢');
   });
 
   it('查找 skill 卡片可点进正文编辑（一期遗留偏差已补）', () => {

@@ -268,6 +268,7 @@ export function FindRefModal(args: FindRefModalProps): JSX.Element {
               {...(result?.partial ? { partial: result.partial } : {})}
               {...(result?.unconfirmedCount !== undefined ? { unconfirmedCount: result.unconfirmedCount } : {})}
               {...(result?.parsed !== undefined ? { parsed: result.parsed } : {})}
+              {...(result?.unconfirmed ? { unconfirmed: result.unconfirmed } : {})}
               context={args.context}
             />
           )}

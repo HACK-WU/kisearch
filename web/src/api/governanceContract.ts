@@ -278,6 +278,11 @@ export interface RefSearchResultDto {
   /** 深度通道：模型给出但未通过校验的项数 */
   unconfirmedCount?: number;
   /**
+   * 深度通道：被校验剔除的**明细**（`unconfirmedCount` 的数量来源）。
+   * `reason` 是机器码，前端翻人话展示（`out-of-scope` / `not-found` / `already-used` / `malformed` / `truncated`）。
+   */
+  unconfirmed?: Array<{ group: string; name: string; sourceScope?: string; reason: string }>;
+  /**
    * 深度通道：模型输出是否为可解析的候选数组。
    * `false` 表示"模型没给出结果"，前端文案要与"确实没有相关文档"区分。
    */
