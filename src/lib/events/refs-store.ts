@@ -39,6 +39,19 @@ function writeRefs(scope: string, eventId: string, refs: EventRefDoc[], now: num
   return refs;
 }
 
+/**
+ * 引用去重 / 定位的键：**必须含源库**（REQ-20261116-005）。
+ *
+ * 为什么不能只用 `group\0name`：跨库后两个库可以有同名同 group 的文档，
+ * 用旧键会把第二篇判成"已存在"而**静默跳过**；删除时则会删错库那一条。
+ *
+ * 老数据没有 `sourceScope` → 用 `scope`（事件库）归一，与改造前的键完全等价，
+ * 因此不需要任何迁移脚本。
+ */
+export function refKey(r: { scope?: string; sourceScope?: string; group: string; name: string }): string {
+  return `${r.sourceScope ?? r.scope ?? ''}\u0000${r.group}\u0000${r.name}`;
+}
+
 export function addRefDocs(
   scope: string,
   eventId: string,
@@ -46,29 +59,45 @@ export function addRefDocs(
   now: number,
 ): { added: EventRefDoc[]; skipped: EventRefDoc[] } {
   const current = readRefs(scope, eventId);
-  const key = (r: { group: string; name: string }) => `${r.group}\u0000${r.name}`;
-  const existing = new Set(current.map(key));
+  const existing = new Set(current.map(refKey));
   const added: EventRefDoc[] = [];
   const skipped: EventRefDoc[] = [];
   const next = [...current];
 
   for (const ref of incoming) {
-    if (existing.has(key(ref))) {
-      skipped.push(ref);
+    // 入参缺 sourceScope 时按事件库归一，才能与磁盘上的老记录对上
+    const normalized: EventRefDoc = ref.sourceScope === undefined && ref.scope === undefined
+      ? { ...ref, scope }
+      : ref.sourceScope === undefined
+        ? { ...ref, sourceScope: ref.scope }
+        : ref;
+    if (existing.has(refKey(normalized))) {
+      skipped.push(normalized);
       continue;
     }
-    existing.add(key(ref));
-    next.push(ref);
-    added.push(ref);
+    existing.add(refKey(normalized));
+    next.push(normalized);
+    added.push(normalized);
   }
 
   if (added.length > 0) writeRefs(scope, eventId, next, now);
   return { added, skipped };
 }
 
-export function removeRefDoc(scope: string, eventId: string, group: string, name: string, now: number): boolean {
+/**
+ * 删除一条引用。
+ *
+ * @param target.sourceScope 缺省 = 事件库（兼容老前端与老数据）
+ */
+export function removeRefDoc(
+  scope: string,
+  eventId: string,
+  target: { sourceScope?: string; group: string; name: string },
+  now: number,
+): boolean {
   const current = readRefs(scope, eventId);
-  const next = current.filter((r) => !(r.group === group && r.name === name));
+  const wanted = refKey({ scope, sourceScope: target.sourceScope, group: target.group, name: target.name });
+  const next = current.filter((r) => refKey(r) !== wanted);
   if (next.length === current.length) return false;
   writeRefs(scope, eventId, next, now);
   return true;

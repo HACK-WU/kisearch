@@ -24,6 +24,8 @@ import type { KiConfig } from '../../src/lib/config.js';
 import { savePromptConfig } from '../../src/lib/chat/prompt-config.js';
 import { createEvent, transitionEvent } from '../../src/lib/events/event-service.js';
 import { addRefs } from '../../src/lib/events/refs-service.js';
+import { writeGroupCache } from '../../src/lib/group-cache.js';
+import type { Relation } from '../../src/lib/scoring.js';
 import { GovernanceError } from '../../src/lib/governance-errors.js';
 import {
   cancelEventAnalysis,
@@ -54,6 +56,30 @@ function okLlmStatus() {
     askMaxRounds: 6,
     askSessionTtlMs: 600_000,
   };
+}
+
+/**
+ * 造一篇真实存在的文档。
+ *
+ * `addRefs` 会校验被引文档在源库的存在性（`REF_DOC_NOT_FOUND`，防伪造路径写进
+ * `refs.json` 变成永远解析不到的脏引用），因此不能只往 refs 里塞个名字。
+ */
+function seedDoc(group: string, name: string): void {
+  const rel: Relation = {
+    id: `rel_${name}`,
+    text: name,
+    score: 0,
+    useCount: 0,
+    lastUsedTime: null,
+    isImported: false,
+  };
+  writeGroupCache(scope, group, {
+    version: 1,
+    scope,
+    hot_relations: [rel],
+    keywords: [],
+    updatedAt: null,
+  });
 }
 
 async function waitDone(s: string, eventId: string, timeoutMs = 4000) {
@@ -150,6 +176,7 @@ describe('S-04 异步分析 Pipeline', () => {
       description: '移动端登录后偶发报错',
       typeId: 'et_1',
     });
+    seedDoc('排查记录', '登录故障笔记');
     addRefs(scope, ev.id, { docs: [{ group: '排查记录', name: '登录故障笔记' }], addedBy: 'manual' });
     // 收口后仍应允许分析（Q4 拍板）
     await transitionEvent(scope, { event: ev.id, stage: '已关闭' });

@@ -28,7 +28,9 @@ import '@/styles/ai-settings.css';
 const CAPABILITIES: ReadonlyArray<{ key: CapabilitySection; label: string; state: string; icon: string }> = [
   { key: 'chat', label: 'AI 对话', state: '提示词 · Skill · 工具', icon: 'chat' },
   { key: 'analysis', label: 'AI 分析', state: '目录 · 提示词 · Skill · 工具', icon: 'spark' },
-  { key: 'find', label: 'AI 查找', state: '确定性检索 · 未接入', icon: 'search' },
+  // 2026-11-16（REQ-20261116-005）：检索范围已真实生效，"未接入"不再成立；
+  // 深度通道未上线时由配置层内的横幅说明"哪些块暂不生效"
+  { key: 'find', label: 'AI 查找', state: '范围 · 提示词 · Skill · 工具', icon: 'search' },
 ];
 
 /**

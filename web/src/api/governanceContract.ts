@@ -194,24 +194,38 @@ export interface RestoreResult {
 export interface RefDocDto {
   group: string;
   name: string;
+  /** 文档实际所在库；缺省 = 事件所在库（老数据） */
+  sourceScope?: string;
   addedBy: 'ai' | 'manual';
   addedAt: number;
   /** 被引文档已不存在（N10：保留并标失效，不静默消失） */
   stale: boolean;
+  /** stale 的原因：doc-deleted = 文档被删；scope-missing = 源库已不存在或无权限 */
+  staleReason?: 'doc-deleted' | 'scope-missing';
   visibility: VisibilityDto;
 }
 
 export interface RefCandidateDto {
+  /** 通道来源：fast = 确定性五步，deep = LLM 深度查找；决定前端默认勾选策略 */
+  origin: 'fast' | 'deep';
+  /** 候选文档所在库（视图检索时是成员库）；单库时等于请求 scope */
+  scope: string;
   group: string;
   name: string;
-  /** 同批次 min-max 归一化后的相对分（0~1），不是绝对相似度 */
+  /** fast：同批次 min-max 相对分；deep：源库内最后一次命中分（0 = 未检索到，不代表无关） */
   score: number;
+  /** 源库内分数名次（1 = 库内最高）；deep 通道无检索分时省略 */
+  rankInScope?: number;
+  /** 原始检索分（跨库不可比，仅供排障） */
+  rawScore?: number;
   why: string;
   matchedKeywords: string[];
-  /** score < 0.6：默认不勾，但保留给人判断 */
+  /** score < 0.6：默认不勾，但保留给人判断（deep 通道默认勾选不按此判定） */
   weak: boolean;
   /** 该文档**自身**的检索可见性（不是事件阶段档位）；候选行直接展示它 */
   visibility: VisibilityDto;
+  /** visibility='hidden' 时给出原因与来源事件（前端据此禁用勾选或强提示） */
+  visibilityReason?: { kind: 'event-open' | 'event-closed'; eventId: string; shortId: number; title: string };
   /** 去重前的 chunk 命中数（>1 表示多个正文片段命中同一篇） */
   chunkHits: number;
 }
@@ -228,7 +242,12 @@ export interface RefSearchCallDto {
 }
 
 export interface RefSearchStepDto {
-  name: 'understand' | 'extract' | 'search' | 'exclude' | 'rank';
+  /**
+   * `tools` / `verify` 是深度通道（REQ-20261116-005）新增的两步：
+   * 前者每轮一条（带真实工具调用行），后者是"模型输出 → 三重校验"。
+   * 快速通道仍然只有前五个，前端据此渲染同一套面板。
+   */
+  name: 'understand' | 'extract' | 'search' | 'exclude' | 'rank' | 'tools' | 'verify';
   ms: number;
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
@@ -248,6 +267,23 @@ export interface RefSearchResultDto {
   durationMs: number;
   /** 实际发给检索的 query（过程面板展示用，不让前端自己拼） */
   query: string;
+  /** 本次实际参与检索的单元（库名或视图名），顺序 = [事件库, ...extraScopes] */
+  targets?: string[];
+  /** 配置里存在但本次被剔除的项（无权限 / 已不存在 / 视图无成员） */
+  skippedTargets?: Array<{ name: string; reason: 'forbidden' | 'missing' | 'view-members-changed' }>;
+  /** 部分 target 检索失败（其余结果仍有效；全部失败才是 503） */
+  targetErrors?: Array<{ name: string; error: string }>;
+  /** 多库时按库的文档数（total 为各库之和，单库时省略） */
+  totalByScope?: Array<{ scope: string; docs: number }>;
+  /** 深度通道：模型给出但未通过校验的项数 */
+  unconfirmedCount?: number;
+  /**
+   * 深度通道：模型输出是否为可解析的候选数组。
+   * `false` 表示"模型没给出结果"，前端文案要与"确实没有相关文档"区分。
+   */
+  parsed?: boolean;
+  /** 提前结束（轮次用尽 / 超时），结果不完整 */
+  partial?: { reason: 'rounds' | 'timeout'; usedRounds: number };
   /** 0 候选的原因；有候选时省略。前端据此区分空态文案 */
   reason?: 'no-keywords' | 'empty-scope' | 'no-hits' | 'all-excluded';
   /** 实际检索模式：fulltext = 语义侧不可用已降级，面板必须如实显示 */

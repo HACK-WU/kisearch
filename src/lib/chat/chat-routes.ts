@@ -97,6 +97,16 @@ import {
   ANALYSIS_TOOL_GROUPS,
   CAPABILITY_PROMPT_MAX_CHARS,
   CONTEXT_CHARS_MAX,
+  FIND_MAX_CANDIDATES_DEFAULT,
+  FIND_MAX_CANDIDATES_LIMIT,
+  FIND_MAX_ROUNDS_DEFAULT,
+  FIND_MAX_ROUNDS_LIMIT,
+  FIND_MAX_TARGETS,
+  FIND_SKILL_REQUIRED_TOOLS,
+  FIND_TIMEOUT_DEFAULT_MS,
+  FIND_TIMEOUT_MAX_MS,
+  FIND_TIMEOUT_MIN_MS,
+  FIND_TOOL_GROUPS,
   MAX_SKILLS,
   MCP_TOOL_GROUPS,
   PROMPT_MAX_CHARS,
@@ -207,6 +217,9 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
 // ─────────────────────────────────────────────────────────────
 // 鉴权与 scope 校验（★ P1/P2/P3/P7 的实现处）
 // ─────────────────────────────────────────────────────────────
+
+import { isScopeAccessAllowed } from '../scope-access.js';
+import { resolveFindTargets, type SkippedTargetReason } from '../events/find-targets.js';
 
 /** scope 是否在授权集合内（'all' 通配；authScopes=null = 鉴权未启用，全放行） */
 function scopeAllowed(authScopes: string[] | null, scope: string): boolean {
@@ -660,6 +673,15 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       analysisMaxRoundsMax: ANALYSIS_MAX_ROUNDS_LIMIT,
       analysisMaxFilesDefault: ANALYSIS_MAX_FILES_DEFAULT,
       analysisMaxFilesMax: ANALYSIS_MAX_FILES_LIMIT,
+      // ── AI 查找（REQ-20261116-005）：范围上限与预算上下界，前端一律读这里 ──
+      findMaxTargets: FIND_MAX_TARGETS,
+      findMaxRoundsDefault: FIND_MAX_ROUNDS_DEFAULT,
+      findMaxRoundsMax: FIND_MAX_ROUNDS_LIMIT,
+      findMaxCandidatesDefault: FIND_MAX_CANDIDATES_DEFAULT,
+      findMaxCandidatesMax: FIND_MAX_CANDIDATES_LIMIT,
+      findTimeoutDefaultMs: FIND_TIMEOUT_DEFAULT_MS,
+      findTimeoutMinMs: FIND_TIMEOUT_MIN_MS,
+      findTimeoutMaxMs: FIND_TIMEOUT_MAX_MS,
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,
@@ -678,6 +700,17 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
     analysisToolGroups: ANALYSIS_TOOL_GROUPS,
     analysisReasoningEffort: config.analysis?.reasoningEffort ?? cfg.llm?.reasoningEffort,
     analysisReasoningEffortOverridden: config.analysis?.reasoningEffort !== undefined,
+    // ── AI 查找专属：工具分组 / skill↔tool 依赖 / 思考级别（REQ-20261116-005）──
+    // 依赖表必须由服务端下发：前端自己抄一份会随内置 skill 增减而漂移
+    findToolGroups: FIND_TOOL_GROUPS,
+    findSkillRequiredTools: FIND_SKILL_REQUIRED_TOOLS,
+    findReasoningEffort: config.find?.reasoningEffort ?? cfg.llm?.reasoningEffort,
+    findReasoningEffortOverridden: config.find?.reasoningEffort !== undefined,
+    /**
+     * **能力标记**（不是可写配置）：深度通道已上线（`find-runner`），故为 true。
+     * 前端据此隐藏「深度查找上线后生效」横幅并放开模式切换 —— 不让前端按版本号猜。
+     */
+    capabilities: { findDeep: true },
     datasourceDirs: collectAuthorizedDatasourceDirs(cfg, ctx.authScopes),
     issue,
   });
@@ -718,6 +751,55 @@ export async function handlePromptConfigPut(
   if (!requireGlobalConfigWrite(res, ctx)) return;
   const cfg = snapshotConfig(ctx);
   const body = await readJsonBody(req);
+  /**
+   * 检索范围预检（REQ-20261116-005 · S-01 D-01-7）。
+   *
+   * 为什么在路由层而不是 `savePromptConfig` 内部：那里拿不到本次请求的授权集合。
+   * 为什么是 **400** 而不是 403：403 会被前端解读成"你不能改配置"，
+   * 而这里的事实是"这个值不可选"—— 用户需要改的是值，不是来要权限。
+   *
+   * ★ **直接复用运行期的 `resolveFindTargets`**：手写一份判定必然与运行期漂移，
+   *   而这里要回答的正是"这些名字在查找时会不会被剔除"—— `skipped` 就是答案。
+   *
+   * ★ 可达性（别误以为已覆盖授权）：能改全局配置的 token 必然是 all-scope
+   *   （见 `requireGlobalConfigWrite`），而 all-scope 会让 `isScopeAccessAllowed` 恒真，
+   *   所以实际拦下的是**名字不存在 / 视图无成员**这两类。授权分支保留是为了将来放宽
+   *   "按库管理员改全局配置"时不漏判。
+   */
+  if (ctx.authScopes !== null) {
+    const findRaw = (body as { find?: unknown }).find;
+    const extraRaw = findRaw && typeof findRaw === 'object' && !Array.isArray(findRaw)
+      ? (findRaw as { ranges?: { extraScopes?: unknown } }).ranges?.extraScopes
+      : undefined;
+    if (Array.isArray(extraRaw)) {
+      const extra = extraRaw
+        .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
+        .map((n) => n.trim());
+      if (extra.length > 0) {
+        const SKIP_TEXT: Record<SkippedTargetReason, string> = {
+          forbidden: '无权访问该库 / 视图',
+          missing: '这个名称不存在（既不是库也不是视图）',
+          'view-members-changed': '视图没有成员或成员已变更',
+        };
+        const { skipped } = resolveFindTargets('', { ranges: { extraScopes: extra } }, {
+          tokenScopes: ctx.authScopes,
+          // 用请求级配置读 views.json：与本次请求的 dataDir 同源，避免拿旧视图表判新配置
+          config: cfg,
+        });
+        if (skipped.length > 0) {
+          throw new ChatApiError(
+            400,
+            PROMPT_CONFIG_INVALID,
+            `检索范围不可用：${skipped.map((s) => `${s.name}（${SKIP_TEXT[s.reason]}）`).join('、')}`,
+            skipped.map((s) => ({
+              field: `find.ranges.extraScopes.${s.name}`,
+              message: SKIP_TEXT[s.reason],
+            })),
+          );
+        }
+      }
+    }
+  }
   let saved: ReturnType<typeof savePromptConfig>;
   try {
     saved = savePromptConfig(cfg, body);

@@ -458,10 +458,17 @@ export interface PromptConfig {
    * 缺省 = 未覆盖 → 用 `defaults.analysisPrompt.content`（服务端已填内置文案）。
    */
   analysisPrompt?: CapabilityPrompt;
-  /** **能力级提示词 · AI 查找**。现有「AI 查找」是确定性检索（不调 LLM），同样无生效点（检查点 F2）。 */
+  /** **能力级提示词 · AI 查找**（@deprecated：2026-11-16 起由 `find.prompt` 取代，仅作读取兼容与镜像）。 */
   findPrompt?: CapabilityPrompt;
   /** **AI 分析独立配置域**（REQ-20261113-003 · S-01） */
   analysis?: AnalysisConfig;
+  /**
+   * **AI 查找独立配置域**（REQ-20261116-005）。
+   *
+   * ⚠️ 生效范围：`ranges` 对快速通道立即生效；其余字段只在**深度通道**读取。
+   * 一期后端 `capabilities.findDeep=false` 时，设置页据此把后者标为「深度查找上线后生效」。
+   */
+  find?: FindConfig;
 }
 
 export interface AnalysisTargetConfig {
@@ -491,6 +498,33 @@ export interface AnalysisToolGroup {
 export interface CapabilityPrompt {
   content: string;
   at: string;
+}
+
+/** AI 查找 · 检索范围（`extraScopes` 不含"当前事件所在库"，它恒定在范围内） */
+export interface FindRangeConfig {
+  /** 额外放开的检索单元（scope 名或视图名）；上限读 `limits.findMaxTargets` */
+  extraScopes: string[];
+  /** 预留（本期不实现、界面不暴露、校验时忽略）：按事件所在库覆盖 `extraScopes` */
+  byScope?: Record<string, string[]>;
+}
+
+/** AI 查找独立配置域（与后端 `FindConfig` 同形状） */
+export interface FindConfig {
+  ranges: FindRangeConfig;
+  /** 检索定位提示词（深度通道注入；快速通道不读） */
+  prompt: CapabilityPrompt;
+  /** AI 查找专属 skill（与对话 / 分析的 skill 互相独立） */
+  skills: PromptSkill[];
+  /** 工具名 → 是否暴露；键必须是 `findToolGroups` 展开后的名字 */
+  tools: Record<string, boolean>;
+  /** 深度通道最大工具轮次（缺省读 `limits.findMaxRoundsDefault`） */
+  maxRounds?: number;
+  /** 单次查找候选上限（缺省读 `limits.findMaxCandidatesDefault`） */
+  maxCandidates?: number;
+  /** 深度通道硬超时（ms，缺省读 `limits.findTimeoutDefaultMs`） */
+  timeoutMs?: number;
+  /** 思考级别（缺省 = 跟随部署默认） */
+  reasoningEffort?: string;
 }
 
 export interface PromptConfigLimits {
@@ -529,6 +563,15 @@ export interface PromptConfigLimits {
   analysisMaxRoundsMax?: number;
   analysisMaxFilesDefault?: number;
   analysisMaxFilesMax?: number;
+  /** AI 查找（REQ-20261116-005）：范围上限与预算上下界；缺失 = 旧版 daemon */
+  findMaxTargets?: number;
+  findMaxRoundsDefault?: number;
+  findMaxRoundsMax?: number;
+  findMaxCandidatesDefault?: number;
+  findMaxCandidatesMax?: number;
+  findTimeoutDefaultMs?: number;
+  findTimeoutMinMs?: number;
+  findTimeoutMaxMs?: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
@@ -571,6 +614,18 @@ export interface PromptConfigOk {
   analysisReasoningEffort?: string;
   analysisReasoningEffortOverridden?: boolean;
   datasourceDirs?: Record<string, { type: 'directory' | 'git'; dir: string }>;
+  // ── AI 查找（REQ-20261116-005）：全部可选，旧版 daemon 不返回 ──
+  /** 查找专属工具分组（只有知识库只读四件套，不含 fs_*） */
+  findToolGroups?: AnalysisToolGroup[];
+  /** 查找 skill ↔ 工具依赖（`skillId → 工具名`）；由服务端下发，前端不抄一份 */
+  findSkillRequiredTools?: Record<string, string>;
+  findReasoningEffort?: string;
+  findReasoningEffortOverridden?: boolean;
+  /**
+   * 能力标记（不是可写配置）：`findDeep=false` 表示服务端尚无深度通道，
+   * 设置页据此显示「深度查找上线后生效」横幅并禁用模式切换。
+   */
+  capabilities?: { findDeep: boolean };
   /** 非 null = 配置文件有问题且**已回退默认**（必须可见，不得静默） */
   issue: string | null;
 }

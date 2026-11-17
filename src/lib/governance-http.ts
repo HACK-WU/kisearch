@@ -33,6 +33,11 @@ import { bindMembers, unbindMember, type BindMembersOutcome } from './events/mem
 import { listRefs, addRefs, removeRef, searchRefCandidates, searchDocsForAdd } from './events/refs-service.js';
 import { createSearchAdapter, type RefSearchFn } from './events/refs-search.js';
 import { readAllEvents, findEventIn } from './events/store.js';
+import { resolveFindTargets } from './events/find-targets.js';
+import { defaultFindConfig, readPromptConfig } from './chat/prompt-config.js';
+import { runDeepFindAsSearchResult } from './events/find-service.js';
+import { loadConfig } from './config.js';
+import { ALL_SCOPES } from './mcp-token.js';
 import { readStageLogs } from './events/stage-log.js';
 import {
   confirmDraftLocations,
@@ -687,28 +692,90 @@ export async function handleGovernanceRoutes(
               { hint: '/governance/docs/search' },
             );
           }
+          /**
+           * **通道分派**（REQ-20261116-005 二期）：`fast` = 确定性五步，`deep` = LLM 工具循环。
+           *
+           * 两条通道共用同一份 `targets` 与响应形状（`origin` 区分），前端才不必维护两套渲染。
+           * 未知模式显式 1411 拒绝，不猜。
+           */
+          const mode = str(b.mode) ?? 'fast';
+          if (mode !== 'fast' && mode !== 'deep') {
+            throw new GovernanceError('FIND_MODE_INVALID', `未知查找模式：${mode}（可选 fast / deep）`);
+          }
+          /**
+           * 检索范围：**[事件库] ∪ 配置里放开的额外库**，由服务端解析。
+           * 前端不得传 targets —— 那等于把越权入口开放给浏览器（且它拿不到完整授权集）。
+           */
+          const kiCfg = loadConfig();
+          const promptCfg = readPromptConfig(kiCfg).config;
+          const { targets, skipped } = resolveFindTargets(scope, promptCfg.find, {
+            tokenScopes: ctx.authScopes ?? [ALL_SCOPES],
+            config: kiCfg,
+          });
+          if (mode === 'deep') {
+            /**
+             * 前端关闭弹窗时中止上游请求（一次深度查找可能跑几十秒，白跑既费额度也占并发）。
+             * `close` 在正常响应完成后也会触发，故用 `writableEnded` 区分「提前断开」。
+             */
+            const abortCtl = new AbortController();
+            const onClose = (): void => { if (!res.writableEnded) abortCtl.abort(); };
+            req.once('close', onClose);
+            try {
+              const deepResult = await runDeepFindAsSearchResult(scope, id, {
+                targets,
+                config: promptCfg.find ?? defaultFindConfig(),
+                kiConfig: kiCfg,
+                signal: abortCtl.signal,
+              });
+              return sendJson(res, 200, {
+                ok: true,
+                scope,
+                ...deepResult,
+                ...(skipped.length > 0 ? { skippedTargets: skipped } : {}),
+              });
+            } finally {
+              req.removeListener('close', onClose);
+            }
+          }
           const result = await searchRefCandidates(
             scope,
             id,
             { search: searchAdapter },
             {
+              targets,
               ...(num(b.topK) !== undefined ? { topK: num(b.topK) as number } : {}),
               ...(num(b.limit) !== undefined ? { limit: num(b.limit) as number } : {}),
               ...(num(b.threshold) !== undefined ? { threshold: num(b.threshold) as number } : {}),
             },
           );
-          return sendJson(res, 200, { ok: true, scope, ...result });
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            ...result,
+            ...(skipped.length > 0 ? { skippedTargets: skipped } : {}),
+          });
         }
         if (method === 'POST' && !segs[3]) {
           const b = await body();
           const scope = scopeFromBody(b);
-          const docs = Array.isArray(b.docs) ? (b.docs as Array<{ group: string; name: string; score?: number }>) : [{ group: String(b.group ?? ''), name: String(b.name ?? '') }];
-          const result = addRefs(scope, id, { docs, addedBy: (str(b.addedBy) as 'ai' | 'manual') ?? 'manual' });
+          const docs = Array.isArray(b.docs)
+            ? (b.docs as Array<{ sourceScope?: string; group: string; name: string; score?: number }>)
+            : [{ group: String(b.group ?? ''), name: String(b.name ?? '') }];
+          const result = addRefs(scope, id, {
+            docs,
+            addedBy: (str(b.addedBy) as 'ai' | 'manual') ?? 'manual',
+            // 跨库引用必须逐库鉴权（缺省不传 = 只允许事件库，由 addRefs 内部按 scope 归一）
+            ...(ctx.authScopes ? { tokenScopes: ctx.authScopes } : {}),
+          });
           return sendJson(res, 200, { ok: true, scope, ...result });
         }
         if (method === 'DELETE') {
           const scope = scopeFromQuery();
-          removeRef(scope, id, str(q.get('group')) ?? '', str(q.get('name')) ?? '');
+          removeRef(scope, id, {
+            ...(str(q.get('sourceScope')) ? { sourceScope: str(q.get('sourceScope'))! } : {}),
+            group: str(q.get('group')) ?? '',
+            name: str(q.get('name')) ?? '',
+          });
           return sendJson(res, 200, { ok: true, scope, removed: true });
         }
       }

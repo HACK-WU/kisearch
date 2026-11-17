@@ -96,6 +96,14 @@ export interface EventsMeta {
  */
 export interface EventRefDoc {
   scope: string;
+  /**
+   * 文档**实际所在库**（REQ-20261116-005 跨库引用）。
+   *
+   * 缺省 = `scope`（事件所在库），因此 2026-11-16 之前写下的 `refs.json`
+   * 无需迁移；读写两侧统一用 `sourceScope ?? scope` 归一。
+   * 去重与删除的 key 必须含本字段，否则跨库同名文档会被静默跳过或删错。
+   */
+  sourceScope?: string;
   group: string;
   name: string;
   addedBy: 'ai' | 'manual';

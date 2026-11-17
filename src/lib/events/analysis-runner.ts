@@ -445,7 +445,18 @@ function dayKey(now: number): string {
   return `${y}-${m}-${day}`;
 }
 
-async function consumeDailyQuota(scope: string, limit: number, now: number): Promise<void> {
+/**
+ * 消耗当日 AI 额度（与「AI 查找」共用同一份计数与 `llm.analysisDailyLimit`）。
+ *
+ * 导出给 `find-runner` 复用：两条链路吃的是同一份额度，各记一份会让用户
+ * 看到"分析还没用完、查找却停了"的两种口径。错误码可覆盖（查找侧用 `FIND_QUOTA_EXCEEDED`）。
+ */
+export async function consumeDailyQuota(
+  scope: string,
+  limit: number,
+  now: number,
+  onExceeded?: () => GovernanceError,
+): Promise<void> {
   const hash = crypto.createHash('sha256').update(scope).digest('hex').slice(0, 24);
   await withScopeWriteLock(`\u0000analysis-usage:${hash}`, 'analysis-quota', async () => {
     const dir = getEventsDir(scope);
@@ -459,7 +470,7 @@ async function consumeDailyQuota(scope: string, limit: number, now: number): Pro
       }
     } catch { /* missing or corrupt -> reset today */ }
     if (data.count >= limit) {
-      throw new GovernanceError(
+      throw onExceeded?.() ?? new GovernanceError(
         'ANALYSIS_RATE_LIMITED',
         `今日 AI 分析次数已达上限（${limit} 次/日），请明日再试或调整 llm.analysisDailyLimit`,
         { limit, date: today },

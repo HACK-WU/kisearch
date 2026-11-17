@@ -17,12 +17,17 @@
 
 import { GovernanceError } from '../governance-errors.js';
 
-/** 适配器需要的最小结果形状（`SearchHit` 结构化兼容，只用到这三项） */
+/** 适配器需要的最小结果形状（`SearchHit` 结构化兼容） */
 export interface AdapterHit {
   group?: string;
   /** relations-cache 反查出的文件级 relation 名，= refs.json 的 `name` */
   relation?: string;
   score: number;
+  /**
+   * 命中所属库（REQ-20261116-005）：多库 / 视图检索时 `executeSearch` 用它标注来源。
+   * **必须保留** —— 丢掉它，跨库候选就无法回指源库（排序、可见性、引用写入全都会错）。
+   */
+  scope?: string;
 }
 
 export type AdapterSearchResult =
@@ -72,7 +77,13 @@ export function createSearchAdapter(exec: ExecuteSearchLike): RefSearchFn {
     return {
       hits: result.results
         .filter((h) => h.group !== undefined && h.relation !== undefined)
-        .map((h) => ({ group: h.group as string, name: h.relation as string, score: h.score })),
+        .map((h) => ({
+          group: h.group as string,
+          name: h.relation as string,
+          score: h.score,
+          // 视图检索时是成员库；单库时不带该字段（由调用方按 target 归一）
+          ...(h.scope !== undefined ? { scope: h.scope } : {}),
+        })),
       // mode / degraded 原样透出：面板据此显示"语义+全文 / 仅全文（已降级）"
       mode: result.mode ?? 'hybrid',
       ...(result.degraded ? { degraded: true } : {}),

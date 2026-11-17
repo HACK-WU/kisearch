@@ -48,4 +48,25 @@ export const clonePromptConfig = (c: PromptConfig): PromptConfig => ({
         },
       }
     : {}),
+  /**
+   * AI 查找域（REQ-20261116-005）：漏搬任何一项都会在「改别的配置保存」时被静默清空。
+   * `ranges.byScope` 是预留字段 —— 即使本期不渲染也必须搬，否则手工改过的文件会被清掉。
+   */
+  ...(c.find !== undefined
+    ? {
+        find: {
+          ranges: {
+            extraScopes: [...c.find.ranges.extraScopes],
+            ...(c.find.ranges.byScope !== undefined ? { byScope: { ...c.find.ranges.byScope } } : {}),
+          },
+          prompt: { ...c.find.prompt },
+          skills: c.find.skills.map((s) => ({ ...s })),
+          tools: { ...c.find.tools },
+          ...(c.find.maxRounds !== undefined ? { maxRounds: c.find.maxRounds } : {}),
+          ...(c.find.maxCandidates !== undefined ? { maxCandidates: c.find.maxCandidates } : {}),
+          ...(c.find.timeoutMs !== undefined ? { timeoutMs: c.find.timeoutMs } : {}),
+          ...(c.find.reasoningEffort !== undefined ? { reasoningEffort: c.find.reasoningEffort } : {}),
+        },
+      }
+    : {}),
 });

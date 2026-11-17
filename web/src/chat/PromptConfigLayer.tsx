@@ -22,9 +22,11 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
+  type ReactNode,
 } from 'react';
 
-import type { AnalysisConfig, PromptConfig, PromptSkill } from '@/api/chatContract';
+import type { AnalysisConfig, FindConfig, PromptConfig, PromptSkill } from '@/api/chatContract';
+import type { ScopeInfo } from '@/api/mcpClient';
 import { PromptConfigModal, type PromptEditDraft } from '@/chat/PromptConfigModal';
 import { clonePromptConfig } from '@/chat/promptConfigClone';
 import { usePromptConfig } from '@/chat/usePromptConfig';
@@ -117,7 +119,9 @@ type ModalState =
   | { kind: 'analysis' }
   | { kind: 'new-analysis-skill' }
   | { kind: 'analysis-skill'; id: string }
-  | { kind: 'find' };
+  | { kind: 'find' }
+  /** AI 查找专属 skill 的正文编辑（二期补齐：一期只做了启停） */
+  | { kind: 'find-skill'; id: string };
 
 /** 条目类型图标（与 demo 同一套，纯装饰） */
 const ITEM_IC: Record<'prompt' | 'skill', ReactElement> = {
@@ -146,6 +150,14 @@ const ANALYSIS_SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
 
 const EMPTY_ANALYSIS_CONFIG: AnalysisConfig = {
   targetDirs: { byScope: {} },
+  prompt: { content: '', at: '' },
+  skills: [],
+  tools: {},
+};
+
+/** `find` 缺失时的兜底（旧后端不返回 find 域时，界面不能崩） */
+const EMPTY_FIND_CONFIG: FindConfig = {
+  ranges: { extraScopes: [] },
   prompt: { content: '', at: '' },
   skills: [],
   tools: {},
@@ -504,6 +516,88 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
         analysisPrompt: nextAnalysis.prompt,
       };
     });
+  };
+
+  // ── AI 查找范围 / 工具（REQ-20261116-005 · S-01）──
+  const findCfg: FindConfig = draft?.find ?? data?.defaults.find ?? EMPTY_FIND_CONFIG;
+  const findMaxTargets = data?.limits.findMaxTargets ?? 5;
+  /**
+   * 可选库 = 库 + 视图。
+   *
+   * 视图不是物理库，`ScopeMultiPicker` 只认 `ScopeInfo`，这里补一份最小载体：
+   * 仅用于选择与展示（`optionMeta` 会标出「视图 · N 成员」），不参与任何计数逻辑。
+   */
+  const findViewMap = useMemo(
+    () => new Map((scopeListData?.views ?? []).map((v) => [v.view, v])),
+    [scopeListData?.views],
+  );
+  const findScopeOptions: ScopeInfo[] = useMemo(() => [
+    ...(scopeListData?.scopes ?? []),
+    ...(scopeListData?.views ?? []).map((v) => ({
+      scope: v.view,
+      kb: true,
+      vector: true,
+      registered: true,
+      wikiCount: v.members.length,
+      ftsOnlyDocCount: 0,
+    })),
+  ], [scopeListData]);
+  const findScopeMeta = (info: ScopeInfo): ReactNode => {
+    const view = findViewMap.get(info.scope);
+    return view ? `视图 · ${view.members.length} 成员` : undefined;
+  };
+
+  const mutateFind = (mutate: (f: FindConfig, root: PromptConfig) => FindConfig, debounced = false): void => {
+    const fn = debounced ? commitDebounced : commit;
+    fn((d) => {
+      const base = d.find ?? data?.defaults.find ?? EMPTY_FIND_CONFIG;
+      const nextFind = mutate(base, d);
+      return { ...d, find: nextFind, findPrompt: nextFind.prompt };
+    });
+  };
+
+  // ── AI 查找预算 / 思考级别 ──
+  const findRoundsDefault = data?.limits.findMaxRoundsDefault ?? 4;
+  const findRoundsMax = data?.limits.findMaxRoundsMax ?? 8;
+  const findCandDefault = data?.limits.findMaxCandidatesDefault ?? 12;
+  const findCandMax = data?.limits.findMaxCandidatesMax ?? 20;
+  const findTimeoutDefault = (data?.limits.findTimeoutDefaultMs ?? 45000) / 1000;
+  const findTimeoutMin = (data?.limits.findTimeoutMinMs ?? 10000) / 1000;
+  const findTimeoutMax = (data?.limits.findTimeoutMaxMs ?? 60000) / 1000;
+  const findEffortCurrent = findCfg.reasoningEffort ?? data?.reasoningEffortDefault;
+  const findEffortOptions = useMemo(
+    () => buildEffortOptions(data?.reasoningEffortOptions, findEffortCurrent),
+    [data?.reasoningEffortOptions, findEffortCurrent],
+  );
+  const findEffortView = resolveEffortView({
+    options: data?.reasoningEffortOptions,
+    def: data?.reasoningEffortDefault,
+    current: findEffortCurrent,
+    overridden: findCfg.reasoningEffort !== undefined,
+  });
+
+  /**
+   * 启停查找 skill：依赖工具没开时**不放行**，改为指路（与对话 / 分析同一守卫）。
+   * 停用方向永远放行（关掉不需要任何前置条件）。
+   */
+  const toggleFindSkill = (id: string, anchor?: HTMLElement): void => {
+    const target = findCfg.skills.find((s) => s.id === id);
+    const need = data?.findSkillRequiredTools?.[id];
+    if (target && !target.enabled && need && findCfg.tools[need] !== true) {
+      setConfirm({
+        title: `需先启用 ${need} 工具`,
+        text: '请先开启这个只读工具，再回来启用该 skill。',
+        yesLabel: '去启用',
+        yesDanger: false,
+        onYes: () => revealTool(need),
+        ...(anchor ? { anchor } : {}),
+      });
+      return;
+    }
+    mutateFind((f) => ({
+      ...f,
+      skills: f.skills.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)),
+    }));
   };
 
   const handleAnalysisRoundsInput = (v: string): void => {
@@ -1038,13 +1132,18 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
       return s ? { id: s.id, name: s.name, description: s.description, content: s.content, builtin: s.builtin } : null;
     }
     if (modal.kind === 'find') {
+      // 2026-11-16 起唯一权威是 `find.prompt`；`findPrompt` 只是镜像（老配置读取兼容）
       return {
         id: 'find-prompt',
-        name: '检索词改写提示词',
+        name: '检索定位提示词',
         description: '',
-        content: draft.findPrompt?.content ?? data?.defaults.findPrompt?.content ?? '',
+        content: draft.find?.prompt.content ?? draft.findPrompt?.content ?? data?.defaults.find?.prompt.content ?? '',
         builtin: true,
       };
+    }
+    if (modal.kind === 'find-skill') {
+      const s = findCfg.skills.find((x) => x.id === modal.id);
+      return s ? { id: s.id, name: s.name, description: s.description, content: s.content, builtin: s.builtin } : null;
     }
     const s = draft.skills.find((x) => x.id === modal.id);
     return s ? { id: s.id, name: s.name, description: s.description, content: s.content, builtin: s.builtin } : null;
@@ -1796,17 +1895,306 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
         )}
 
         {capability === 'find' && draft && data && (
-          <CapabilityPromptPanel
-            title="检索词改写提示词"
-            name="检索词改写提示词"
-            intro="「AI 查找」当前是确定性检索：从事件标题与关联文档名提取线索词直接走 ki_search，同一输入永远得到同一批候选（可复现、可断言），因此这里暂时没有生效点。是否引入「LLM 改写检索词」需先拍板。"
-            hint="若将来引入 LLM 改写，这段就是它的指令；关闭时仍走现有确定性路径。"
-            prompt={draft.findPrompt ?? data.defaults.findPrompt}
-            defaultContent={data.defaults.findPrompt?.content ?? ''}
-            {...(data.limits.findPromptMaxChars !== undefined ? { maxChars: data.limits.findPromptMaxChars } : {})}
-            readOnly={readOnly}
-            onEdit={() => { if (!readOnly) setModal({ kind: 'find' }); }}
-          />
+          <>
+            {/* 一期（无深度通道）：四块配置暂不生效，必须如实说 —— 不能把"改了没反应"换个位置 */}
+            {data.capabilities?.findDeep !== true && (
+              <p className="ki-chat-cfg__warn">
+                深度查找上线后生效：当前「AI 查找」走确定性快速检索，不使用提示词 / Skill / 预算；
+                <b>检索范围对快速查找立即生效</b>。
+              </p>
+            )}
+
+            {/* 1. 检索范围 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                检索范围
+                <em className="ki-chat-cfg__badge">
+                  {findCfg.ranges.extraScopes.length > 0
+                    ? `当前库 + ${findCfg.ranges.extraScopes.length} 个额外库`
+                    : '仅当前库'}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                当前事件所在库<b>恒定在范围内</b>，无需添加；这里只配额外要查的库（最多 {findMaxTargets} 个）。
+                只能选你有权访问的库；视图需其全部成员都已授权。
+              </p>
+              {findCfg.ranges.extraScopes.length > 0 && (
+                <div className="ki-chat-cfg__list">
+                  {findCfg.ranges.extraScopes.map((name) => (
+                    <div className="ki-chat-cfg__dirrow" key={name}>
+                      <span className="ki-chat-cfg__tool-name" title={name}>{name}</span>
+                      {findViewMap.has(name) ? <span className="ki-chat-cfg__tool-desc">视图</span> : null}
+                      <span className="ki-chat-cfg__tool-sp" />
+                      <button
+                        type="button"
+                        className="ki-chat-btn ki-chat-btn--ghost"
+                        disabled={readOnly}
+                        aria-label={`移除 ${name}`}
+                        onClick={() => mutateFind((f) => ({
+                          ...f,
+                          ranges: { ...f.ranges, extraScopes: f.ranges.extraScopes.filter((x) => x !== name) },
+                        }))}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {readOnly ? null : (
+                <div className="ki-chat-cfg__dirrow ki-chat-cfg__dirrow--picker">
+                  <ScopeMultiPicker
+                    scopes={findScopeOptions.filter((s) => !findCfg.ranges.extraScopes.includes(s.scope))}
+                    value={[]}
+                    maxWidth={320}
+                    placeholder="搜索并添加额外检索库…"
+                    emptyHint="当前只查事件所在库"
+                    optionMeta={findScopeMeta}
+                    onChange={(next) => {
+                      const name = next[0];
+                      if (!name) return;
+                      if (findCfg.ranges.extraScopes.includes(name)) return;
+                      if (findCfg.ranges.extraScopes.length >= findMaxTargets) return;
+                      mutateFind((f) => ({
+                        ...f,
+                        ranges: { ...f.ranges, extraScopes: [...f.ranges.extraScopes, name] },
+                      }));
+                    }}
+                  />
+                </div>
+              )}
+              {findCfg.ranges.extraScopes.length >= findMaxTargets ? (
+                <p className="ki-chat-cfg__warn">已达上限 {findMaxTargets} 个；如需更多请先移除。</p>
+              ) : null}
+            </div>
+
+            {/* 2. 基础提示词 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                基础提示词
+                <em className="ki-chat-cfg__badge">
+                  {data.capabilities?.findDeep === true ? '恒定生效' : '深度查找生效'}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                深度查找时注入（与事件标题、描述、阶段进度及文档路径清单组合下发；正文由 AI 按需读取）。
+              </p>
+              <div className="ki-chat-cfg__list">
+                <ItemCard
+                  group="prompt"
+                  name="检索定位提示词"
+                  content={findCfg.prompt.content}
+                  isDefault={findCfg.prompt.content === (data.defaults.find?.prompt.content ?? '')}
+                  onClick={() => { if (!readOnly) setModal({ kind: 'find' }); }}
+                />
+              </div>
+            </div>
+
+            {/* 3. Skill（AI 查找专属） */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                Skill
+                <em className="ki-chat-cfg__badge">
+                  {findCfg.skills.filter((s) => s.enabled).length} / {data.limits.maxSkills} 可调用
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                仅作用于「AI 查找」，与「AI 对话」「AI 分析」的 Skill 互相独立；正文由 AI 按需加载，
+                点卡片可查看与编辑（内置条目可恢复默认）。
+              </p>
+              <div className="ki-chat-cfg__list">
+                {findCfg.skills.map((s) => {
+                  const need = data.findSkillRequiredTools?.[s.id];
+                  const defContent = data.defaults.find?.skills.find((d) => d.id === s.id)?.content ?? '';
+                  return (
+                    <ItemCard
+                      key={s.id}
+                      group="skill"
+                      name={s.name}
+                      description={s.description}
+                      content={s.content}
+                      isDefault={s.content === defContent}
+                      disabled={!s.enabled}
+                      {...(need && findCfg.tools[need] !== true ? { note: `需先启用 ${need} 工具` } : {})}
+                      {...(need ? { onNoteClick: () => revealTool(need!) } : {})}
+                      onClick={() => { if (!readOnly) setModal({ kind: 'find-skill', id: s.id }); }}
+                      onToggleEnabled={(e) => toggleFindSkill(s.id, e.currentTarget)}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 4. 检索预算 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                检索预算
+                <em className="ki-chat-cfg__badge">
+                  {findCfg.maxRounds !== undefined || findCfg.maxCandidates !== undefined || findCfg.timeoutMs !== undefined
+                    ? '自定义'
+                    : `默认 ${findRoundsDefault} 轮 / ${findCandDefault} 候选 / ${findTimeoutDefault} 秒`}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                仅作用于深度查找：轮次防模型空转、候选防列表过长、超时防久等。清空 = 跟随默认。
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <span className="ki-chat-cfg__sublabel">最大轮次</span>
+                <input
+                  type="text"
+                  className="ki-chat-cfg__dirinput"
+                  aria-label="AI 查找最大轮次"
+                  placeholder={String(findRoundsDefault)}
+                  disabled={readOnly}
+                  value={findCfg.maxRounds ?? ''}
+                  onChange={(e) => {
+                    const v = parseStrictInt(e.target.value);
+                    mutateFind(
+                      (f) => ({ ...f, maxRounds: v !== null && v >= 1 && v <= findRoundsMax ? v : undefined }),
+                      true,
+                    );
+                  }}
+                />
+                <span className="ki-chat-cfg__ctxsp" />
+                <span className="ki-chat-cfg__sublabel">候选上限</span>
+                <input
+                  type="text"
+                  className="ki-chat-cfg__dirinput"
+                  aria-label="AI 查找候选上限"
+                  placeholder={String(findCandDefault)}
+                  disabled={readOnly}
+                  value={findCfg.maxCandidates ?? ''}
+                  onChange={(e) => {
+                    const v = parseStrictInt(e.target.value);
+                    mutateFind(
+                      (f) => ({ ...f, maxCandidates: v !== null && v >= 1 && v <= findCandMax ? v : undefined }),
+                      true,
+                    );
+                  }}
+                />
+                <span className="ki-chat-cfg__ctxsp" />
+                <span className="ki-chat-cfg__sublabel">超时（秒）</span>
+                <input
+                  type="text"
+                  className="ki-chat-cfg__dirinput"
+                  aria-label="AI 查找超时（秒）"
+                  placeholder={String(findTimeoutDefault)}
+                  disabled={readOnly}
+                  value={findCfg.timeoutMs !== undefined ? findCfg.timeoutMs / 1000 : ''}
+                  onChange={(e) => {
+                    const v = parseStrictInt(e.target.value);
+                    mutateFind(
+                      (f) => ({
+                        ...f,
+                        timeoutMs: v !== null && v >= findTimeoutMin && v <= findTimeoutMax ? v * 1000 : undefined,
+                      }),
+                      true,
+                    );
+                  }}
+                />
+              </div>
+              <button
+                type="button"
+                className="ki-chat-btn ki-chat-btn--ghost"
+                disabled={readOnly || (findCfg.maxRounds === undefined && findCfg.maxCandidates === undefined && findCfg.timeoutMs === undefined)}
+                onClick={() => mutateFind((f) => {
+                  const n = { ...f };
+                  delete n.maxRounds;
+                  delete n.maxCandidates;
+                  delete n.timeoutMs;
+                  return n;
+                })}
+              >
+                恢复默认
+              </button>
+            </div>
+
+            {/* 5. 思考级别 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                思考级别
+                <em className="ki-chat-cfg__badge">{findEffortView.badge}</em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                档位由 config.yaml 的 llm.reasoningEfforts 提供，仅作用于「AI 查找」请求。
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <select
+                  className="ki-chat-cfg__select"
+                  aria-label="AI 查找思考级别"
+                  disabled={readOnly || !findEffortView.editable}
+                  value={findEffortView.selectValue}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    mutateFind((f) => {
+                      const n = { ...f };
+                      if (v) n.reasoningEffort = v;
+                      else delete n.reasoningEffort;
+                      return n;
+                    });
+                  }}
+                >
+                  {findEffortOptions.map((o) => (
+                    <option key={o.value} value={o.value}>{o.label}</option>
+                  ))}
+                </select>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || findCfg.reasoningEffort === undefined}
+                  onClick={() => mutateFind((f) => {
+                    const n = { ...f };
+                    delete n.reasoningEffort;
+                    return n;
+                  })}
+                >
+                  恢复默认
+                </button>
+              </div>
+              {findEffortView.warn !== null && <p className="ki-chat-cfg__warn">{findEffortView.warn}</p>}
+            </div>
+
+            {/* 6. 工具与权限 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                工具与权限
+                <em className="ki-chat-cfg__badge">
+                  {Object.values(findCfg.tools).filter(Boolean).length} / {Object.keys(findCfg.tools).length} 已开
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                全部为只读工具；文件工具（fs_*）属「AI 分析」专属，不在此提供。
+              </p>
+              {(data.findToolGroups ?? []).map((g) => (
+                <div key={g.key}>
+                  <p className="ki-chat-cfg__group">
+                    <span className="ki-chat-cfg__group-dot" aria-hidden="true" />
+                    {g.label}
+                    <span className="ki-chat-cfg__group-n">{g.names.length} 个 · 默认开</span>
+                  </p>
+                  {g.names.map((name) => (
+                    <div className="ki-chat-cfg__tool" key={name} data-tool={name}>
+                      <span className="ki-chat-cfg__tool-main">
+                        <span className="ki-chat-cfg__tool-name" title={name}>{name}</span>
+                        {g.descs?.[name] ? <span className="ki-chat-cfg__tool-desc">{g.descs[name]}</span> : null}
+                      </span>
+                      <span className="ki-chat-cfg__tool-sp" />
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={findCfg.tools[name] === true}
+                        aria-label={name}
+                        disabled={readOnly}
+                        className="ki-chat-cfg__sw"
+                        onClick={() => mutateFind((f) => ({ ...f, tools: { ...f.tools, [name]: f.tools[name] !== true } }))}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </>
         )}
       </div>
 
@@ -1842,7 +2230,8 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
           readOnly={readOnly}
           // 能力级提示词与「基础提示词」同档：不是可调用的 skill，没有描述字段
           group={
-            modal.kind === 'skill' || modal.kind === 'new-skill' || modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill'
+            modal.kind === 'skill' || modal.kind === 'new-skill' || modal.kind === 'analysis-skill'
+              || modal.kind === 'new-analysis-skill' || modal.kind === 'find-skill'
               ? 'skill'
               : 'prompt'
           }
@@ -1860,13 +2249,15 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
           descMaxChars={data!.limits.skillDescMaxChars}
           descSuggestedChars={data!.limits.skillDescSuggestedChars}
           // 内置条目不改名；能力级提示词同理（名称由界面固定，避免两处文案漂移）
-          canRename={(modal.kind === 'skill' || modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill') && !modalItem.builtin}
+          canRename={(modal.kind === 'skill' || modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill' || modal.kind === 'find-skill') && !modalItem.builtin}
           canReset={modal.kind !== 'new-skill' && modal.kind !== 'new-analysis-skill' && modalItem.builtin}
           canDelete={(modal.kind === 'skill' || modal.kind === 'analysis-skill') && !modalItem.builtin}
           checkName={(name) => {
             const list = modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill'
               ? analysisCfg.skills
-              : draft?.skills ?? [];
+              : modal.kind === 'find-skill'
+                ? findCfg.skills
+                : draft?.skills ?? [];
             // ★ 名称必须英文（2026-11-11 用户拍板）：与后端 `SKILL_NAME_RE` **手工同源**
             //   （服务端仍是最终闸门；这里只为省一次 400 往返，改动需两侧同步）
             return !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name)
@@ -1882,6 +2273,21 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                 if (modal.kind === 'prompt') return { ...d, prompt: { ...d.prompt, content } };
                 if (modal.kind === 'find') {
                   return { ...d, findPrompt: { content, at: new Date().toISOString() } };
+                }
+                if (modal.kind === 'find-skill') {
+                  // 查找 skill 独立于对话 / 分析：只改 `find.skills`，不碰其它域的 skill 列表
+                  const next = {
+                    ...(d.find ?? data?.defaults.find ?? EMPTY_FIND_CONFIG),
+                  };
+                  return {
+                    ...d,
+                    find: {
+                      ...next,
+                      skills: next.skills.map((sk) => (
+                        sk.id === modalItem.id ? { ...sk, name, content, description } : sk
+                      )),
+                    },
+                  };
                 }
                 if (modal.kind === 'new-skill') {
                   return {
@@ -1935,6 +2341,18 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
             if (modal.kind === 'find') {
               const def = data!.defaults.findPrompt;
               commit((d) => ({ ...d, findPrompt: { content: def?.content ?? '', at: new Date().toISOString() } }));
+              setModal(null);
+              return;
+            }
+            if (modal.kind === 'find-skill') {
+              // 与对话 / 分析的 skill 同口径：正文与描述一起恢复（描述决定 AI 选不选它）
+              const def = data!.defaults.find?.skills.find((s) => s.id === modal.id);
+              mutateFind((f) => ({
+                ...f,
+                skills: f.skills.map((s) => (
+                  s.id === modal.id ? { ...s, content: def?.content ?? '', description: def?.description ?? '' } : s
+                )),
+              }));
               setModal(null);
               return;
             }
@@ -2011,7 +2429,13 @@ function ItemCard(props: {
   onToggleEnabled?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
   /** note 的点击动作（依赖未满足时直接跳到目标工具行 —— 只写一句话不给路，等于没写） */
   onNoteClick?: () => void;
-  onClick: () => void;
+  /**
+   * 点卡片进入编辑。
+   *
+   * 可选：2026-11-16 起「AI 查找」的 skill 卡片只做启停（正文编辑随深度通道上线），
+   * 不传即**不可点** —— 不给一个点了没反应的入口。
+   */
+  onClick?: () => void;
 }) {
   const { group, name, description, content, isDefault, disabled, note, onToggleEnabled, onNoteClick, onClick } = props;
   const mod = !isDefault;
@@ -2091,7 +2515,7 @@ function ItemCard(props: {
  * 「当前都没有生效点，但允许提前设计」。因此「未接入」徽标与说明是组件内置的，
  * 不允许调用方传个开关把它关掉（检查点 F1/F2：不得让配置看起来已生效）。
  */
-function CapabilityPromptPanel(props: {
+export function CapabilityPromptPanel(props: {
   title: string;
   /** 条目名（弹窗标题与卡片名共用） */
   name: string;

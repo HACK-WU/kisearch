@@ -48,6 +48,12 @@ import {
   CODE_LOCATE_REQUIRED_TOOL,
   CODE_LOCATE_SKILL_PROMPT,
 } from './retrieval/code-locate-skill.js';
+import {
+  REFS_LOCATE_SKILL_ID,
+  REFS_LOCATE_SKILL_DESCRIPTION,
+  REFS_LOCATE_REQUIRED_TOOL,
+  REFS_LOCATE_SKILL_PROMPT,
+} from './retrieval/refs-locate-skill.js';
 import { CHAT_BUDGET, type PromptInjectionSnapshot } from './chat-contract.js';
 
 // ─── 上限（服务端强制；前端字数提示只是辅助）─────────────────
@@ -221,6 +227,44 @@ function defaultAnalysisTools(): Record<string, boolean> {
   return out;
 }
 
+// ─── AI 查找专属配置常数与工具分组（REQ-20261116-005）──────────────
+
+export const FIND_MAX_ROUNDS_DEFAULT = 4;
+export const FIND_MAX_ROUNDS_LIMIT = 8;
+export const FIND_MAX_CANDIDATES_DEFAULT = 12;
+export const FIND_MAX_CANDIDATES_LIMIT = 20;
+export const FIND_TIMEOUT_DEFAULT_MS = 45_000;
+export const FIND_TIMEOUT_MIN_MS = 10_000;
+export const FIND_TIMEOUT_MAX_MS = 60_000;
+
+/**
+ * 「AI 查找」专属工具分组：只有知识库只读四件套。
+ *
+ * 🔴 刻意**不含** `fs_*`：文件工具属「AI 分析」专属，2026-11-16 需求明确本期不做。
+ *    把 `fs_*` 放进查找面 = 给"检索候选文档"这个场景开一个读任意目录的口子。
+ */
+export const FIND_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
+  {
+    key: 'kb-read',
+    label: '知识库只读',
+    names: ['ki_search', 'ki_get_module_info', 'ki_group_list', 'ki_tag_list'],
+    descs: {
+      ki_search: '混合 / 全文检索知识库',
+      ki_get_module_info: '按 group 与文档名读取正文',
+      ki_group_list: '查看 Group 树结构与文档清单',
+      ki_tag_list: '查看知识库标签',
+    },
+  },
+];
+
+export const FIND_TOOL_NAMES: readonly string[] = FIND_TOOL_GROUPS.flatMap((g) => [...g.names]);
+
+function defaultFindTools(): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  for (const name of FIND_TOOL_NAMES) out[name] = true;
+  return out;
+}
+
 /** 默认开关：只读全开，写入/删除全关（危险工具默认不可见） */
 function defaultTools(): Record<string, boolean> {
   const out: Record<string, boolean> = {};
@@ -311,8 +355,9 @@ export interface PromptConfig {
   /**
    * **能力级提示词 · AI 查找**（2026-11-15）。
    *
-   * ⚠️ 同上：现有「AI 查找」是**确定性检索**（`events/refs-service.ts` 明确不调 LLM），
-   *    因此这里**没有生效点**；只有将来引入「LLM 改写检索词」后才会被读取（检查点 F2）。
+   * @deprecated 2026-11-16（REQ-20261116-005）起由 `find.prompt` 取代。
+   *   保留仅为**读取兼容**：老配置只有本字段时，读取路径把它迁移为 `find.prompt` 并写 `softNotes`；
+   *   写入路径不再产出本字段（统一写 `find`），避免双写漂移。
    */
   findPrompt?: CapabilityPrompt;
   /**
@@ -322,6 +367,18 @@ export interface PromptConfig {
    * 以及全局兜底 / 按 scope 映射的目标代码目录配置。
    */
   analysis?: AnalysisConfig;
+  /**
+   * **AI 查找独立配置域**（REQ-20261116-005）。
+   *
+   * 缺失时的口径：读取路径从 `defaultPromptConfig()` 出发归一化（`normalizePromptConfig`
+   * 的 `out` 初值即默认配置），因此 **GET 恒有本字段** —— 磁盘没有该域时它就是
+   * `defaultFindConfig()` 的内容，**不报 issue**（报 issue 会触发「任一字段非法 → 整份
+   * 回退默认」，把对话提示词 / skill / 工具一起显示成默认值）。
+   *
+   * 域**内**字段非法时同理：只忽略该项并写 `softNotes`（`findSoft`），其余照常读取。
+   * 老字段 `findPrompt` 存在时承接为 `find.prompt`，优先级低于 `find`。
+   */
+  find?: FindConfig;
 }
 
 export interface AnalysisTargetConfig {
@@ -336,6 +393,50 @@ export interface AnalysisConfig {
   tools: Record<string, boolean>;
   maxRounds?: number;
   maxFiles?: number;
+  reasoningEffort?: string;
+}
+
+/**
+ * **AI 查找 · 检索范围**（REQ-20261116-005）。
+ *
+ * 语义："当前事件所在库恒定在范围内"+ 本表列出的额外单元；当前库**不写入**本表，
+ * 否则"默认当前库"就要在每个库各配一次。
+ */
+export interface FindRangeConfig {
+  /** 额外放开的检索单元（scope 名或视图名） */
+  extraScopes: string[];
+  /**
+   * **预留（本期不实现、界面不暴露、校验时忽略）**：按事件所在库覆盖 `extraScopes`。
+   *
+   * 存在理由：`extraScopes` 是全局一份，而事件分散在不同库 —— 给 A 库事件配的
+   * "可查 B 库"会同样作用于 C 库事件。将来要差异化时，有这个字段只是"放开 UI +
+   * 解析取覆盖值"，没有它则要改结构 + 迁移配置。
+   */
+  byScope?: Record<string, string[]>;
+}
+
+/**
+ * **AI 查找独立配置域**（REQ-20261116-005），与 `analysis` 同级、物理独立。
+ *
+ * ⚠️ 生效范围：`ranges` 对**快速通道**（确定性五步）立即生效；其余字段只在
+ *    **深度通道**（LLM 工具循环）读取。一期未上线深度通道时，后端 `capabilities.findDeep=false`，
+ *    设置页据此把这些字段标为"深度查找上线后生效"。
+ */
+export interface FindConfig {
+  ranges: FindRangeConfig;
+  /** 检索定位提示词（深度通道注入；快速通道不读） */
+  prompt: CapabilityPrompt;
+  /** AI 查找专属 skill（与对话 / 分析的 skill 互相独立） */
+  skills: PromptSkill[];
+  /** 工具名 → 是否暴露；键必须是 `FIND_TOOL_GROUPS` 展开后的名字 */
+  tools: Record<string, boolean>;
+  /** 深度通道最大工具轮次（缺省 = FIND_MAX_ROUNDS_DEFAULT） */
+  maxRounds?: number;
+  /** 单次查找候选上限（缺省 = FIND_MAX_CANDIDATES_DEFAULT） */
+  maxCandidates?: number;
+  /** 深度通道硬超时（ms，缺省 = FIND_TIMEOUT_DEFAULT_MS） */
+  timeoutMs?: number;
+  /** 思考级别（三级链同 analysis） */
   reasoningEffort?: string;
 }
 
@@ -431,6 +532,46 @@ function builtinAnalysisSkill(id: string, at: string = BUILTIN_AT): PromptSkill 
   };
 }
 
+// ─── AI 查找内置 skill（REQ-20261116-005 · S-01）────────────────────
+
+/** AI 查找内置 skill 固定名称（与 `BUILTIN_SKILL_NAMES` 同一服务端强制模式） */
+export const BUILTIN_FIND_SKILL_NAMES: Readonly<Record<string, string>> = {
+  [REFS_LOCATE_SKILL_ID]: 'refs-locate',
+};
+export const BUILTIN_FIND_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_FIND_SKILL_NAMES);
+
+export const FIND_SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
+  [REFS_LOCATE_SKILL_ID]: REFS_LOCATE_REQUIRED_TOOL,
+};
+
+const BUILTIN_FIND_SKILL_CONTENT: Readonly<Record<string, string>> = {
+  [REFS_LOCATE_SKILL_ID]: REFS_LOCATE_SKILL_PROMPT,
+};
+
+const BUILTIN_FIND_SKILL_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  [REFS_LOCATE_SKILL_ID]: REFS_LOCATE_SKILL_DESCRIPTION,
+};
+
+/**
+ * 默认启用（S-01 D-01-6）：本 skill 只读、且是深度通道发挥作用的前提；
+ * 与 `doc-editing`（默认停用，因它会写库且依赖默认关闭的写工具）刻意不同。
+ */
+const BUILTIN_FIND_SKILL_ENABLED: Readonly<Record<string, boolean>> = {
+  [REFS_LOCATE_SKILL_ID]: true,
+};
+
+function builtinFindSkill(id: string, at: string = BUILTIN_AT): PromptSkill {
+  return {
+    id,
+    name: BUILTIN_FIND_SKILL_NAMES[id]!,
+    description: BUILTIN_FIND_SKILL_DESCRIPTIONS[id] ?? '',
+    content: BUILTIN_FIND_SKILL_CONTENT[id] ?? '',
+    builtin: true,
+    enabled: BUILTIN_FIND_SKILL_ENABLED[id] ?? true,
+    at,
+  };
+}
+
 /** 内置 skill 的正文（「恢复默认」与默认配置共用；不在表内 = 没有内置内容） */
 const BUILTIN_SKILL_CONTENT: Readonly<Record<string, string>> = {
   'builtin-retrieval': RETRIEVAL_SKILL_PROMPT,
@@ -493,14 +634,21 @@ const DEFAULT_ANALYSIS_PROMPT = `你是代码定位助手。基于事件标题�
 
 约束：只读。不修改文件，不执行命令，不臆造未在事件、文档或源码中出现的信息。`;
 
-/** AI 查找的内置提示词（占位；当前 AI 查找是确定性检索，本提示词无生效点）。 */
-const DEFAULT_FIND_PROMPT = `把「事件标题 + 关联文档名」改写成 3-8 个用于知识库检索的关键词。
+/**
+ * AI 查找的内置提示词（检索定位）。
+ *
+ * 只写"任务与判定口径"，不写工具调用协议 —— 工具步骤在 `refs-locate` skill 正文里，
+ * 硬规则与输出格式由代码追加（S-03 D-03-4）。这样用户改本字段不会把工具协议一起改坏。
+ */
+const DEFAULT_FIND_PROMPT = `为当前事件找出值得加入参考文档的知识库文档。
 
-规则：
-1. 保留专有名词、错误码、组件名、接口名。
-2. 去掉「排查 / 问题 / 记录」这类无区分度的词。
-3. 不要臆造事件里没有出现的词。
-4. 只输出关键词，空格分隔，不作解释。`;
+步骤：
+1. 读事件信息、阶段进度与已有的关联 / 参考文档清单（清单只有 group 路径与文档名）。
+2. 提炼有区分度的线索（报错原文、错误码、接口名、组件名、关键路径、专有名词），去掉「排查 / 问题 / 记录」这类几乎每个事件都有的词。
+3. 在运行环境给定的检索范围内检索；命中不足时换 2-3 组同义表达，不要重复同一 query。确认相关性时可读取正文。
+4. 按相关性从高到低给出候选，每条附一句话理由（含具体证据）；无法确认时如实标注「仅语义相近」。
+
+约束：只读，不修改任何文档；不臆造事件或检索结果里未出现的 group 与文档名。`;
 
 export function defaultAnalysisConfig(): AnalysisConfig {
   return {
@@ -508,6 +656,18 @@ export function defaultAnalysisConfig(): AnalysisConfig {
     prompt: { content: DEFAULT_ANALYSIS_PROMPT, at: BUILTIN_AT },
     skills: BUILTIN_ANALYSIS_SKILL_IDS.map((id) => builtinAnalysisSkill(id)),
     tools: defaultAnalysisTools(),
+  };
+}
+
+/** AI 查找的默认配置（`find` 缺失时的补齐来源；读取路径用它，不报 issue） */
+export function defaultFindConfig(): FindConfig {
+  return {
+    // 默认不放开任何额外库：与"只查当前事件所在库"的历史行为一致
+    ranges: { extraScopes: [] },
+    prompt: { content: DEFAULT_FIND_PROMPT, at: BUILTIN_AT },
+    skills: BUILTIN_FIND_SKILL_IDS.map((id) => builtinFindSkill(id)),
+    tools: defaultFindTools(),
+    // 三个预算字段缺省 = 未覆盖（"恢复默认" = 删字段，与 contextChars / effort 同语义）
   };
 }
 
@@ -520,8 +680,10 @@ export function defaultPromptConfig(): PromptConfig {
     tools: defaultTools(),
     // 能力级提示词：默认即"内置文案"，因此读取后恒有值（界面据此判断"默认 / 已修改"）
     analysisPrompt: { content: DEFAULT_ANALYSIS_PROMPT, at: BUILTIN_AT },
+    // @deprecated 字段：仅为兼容老配置读取，默认配置仍带上它（老前端读 defaults.findPrompt 不炸）
     findPrompt: { content: DEFAULT_FIND_PROMPT, at: BUILTIN_AT },
     analysis: defaultAnalysisConfig(),
+    find: defaultFindConfig(),
   };
 }
 
@@ -595,6 +757,7 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
     skillDependencySoft: true,
     capabilityPromptSoft: true,
     analysisSoft: true,
+    findSoft: true,
   });
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
@@ -662,6 +825,24 @@ export interface NormalizePromptConfigOptions {
   existingAnalysisSkillNames?: ReadonlySet<string>;
   /** 磁盘上既有的分析思考级别覆盖值 */
   existingAnalysisEffort?: string;
+  /**
+   * `true` = **读取路径**：`find` 独立配置域内字段非法时只忽略/回退对应项并写 `softNotes`。
+   *
+   * 与 `analysisSoft` 同一动机：`find` 是 2026-11-16 新增域，老配置里根本没有它；
+   * 若读取路径报 issue，会触发「整份回退默认」，把用户的对话提示词 / skill / 工具一起显示成默认值。
+   */
+  findSoft?: boolean;
+  /** 磁盘上既有的查找 skill 名称集合（保存路径传入，放行未改名的旧名称） */
+  existingFindSkillNames?: ReadonlySet<string>;
+  /** 磁盘上既有的查找思考级别覆盖值 */
+  existingFindEffort?: string;
+  /**
+   * 磁盘上既有的 `find` 域（保存路径传入）：作为归一化基底，实现**字段级增量**。
+   *
+   * 不传它时从 `defaultFindConfig()` 出发 —— 那会让"本次只提交 find.prompt"把
+   * 用户先前关掉的工具开关悄悄打开（工具默认全开），属静默丢失（S-01 D-01-5）。
+   */
+  existingFind?: FindConfig;
 }
 
 const FORBIDDEN_TARGET_ROOTS = new Set(['/', '/proc', '/sys', '/dev']);
@@ -683,6 +864,277 @@ function validateTargetDirString(raw: unknown): { ok: true; value: string } | { 
     return { ok: false, message: `不允许将系统路径（${resolved}）设为分析目标目录` };
   }
   return { ok: true, value: resolved };
+}
+
+/** 额外放开的检索单元上限（含视图；当前事件所在库不计入，故上限比较宽松） */
+export const FIND_MAX_TARGETS = 5;
+
+/**
+ * `find` 独立配置域的归一化（REQ-20261116-005）。
+ *
+ * 与 `normalizeAnalysisSection` 同一范式：
+ *   · **读取路径**（`findSoft`）→ 非法项只忽略并写 `softNotes`，绝不整份回退默认
+ *     （回退会把对话提示词 / skill / 工具一起显示成默认值，磁盘其实没变）；
+ *   · **保存路径**（缺省）→ 进 `issues`（400 且不落盘）。
+ *
+ * `ranges.byScope` 本期**忽略**（预留字段，S-01 D-01-8）：传了不报错、也不写入 ——
+ * 静默接受但不生效会给用户"已经按库差异化"的错觉，故在校验注释与界面文案里都说明"未启用"。
+ */
+function normalizeFindSection(
+  raw: unknown,
+  issues: PromptConfigIssue[],
+  opts?: NormalizePromptConfigOptions,
+): FindConfig {
+  // 保存路径：以磁盘既有值为基底（字段级增量，未提交的子字段沿用旧值）；
+  // 读取路径不传 existingFind，从内置默认出发（文件里缺的字段按默认补齐）。
+  const out: FindConfig = opts?.existingFind
+    ? {
+      ...opts.existingFind,
+      ranges: { ...opts.existingFind.ranges, extraScopes: [...opts.existingFind.ranges.extraScopes] },
+      skills: opts.existingFind.skills.map((s) => ({ ...s })),
+      tools: { ...opts.existingFind.tools },
+    }
+    : defaultFindConfig();
+  const soft = opts?.findSoft === true;
+  const failField = (fieldPath: string, message: string): void => {
+    if (soft) {
+      opts?.softNotes?.push(`${fieldPath}：${message}（已忽略该项，其余配置照常读取）`);
+      return;
+    }
+    issues.push({ path: fieldPath, message });
+  };
+
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    failField('find', '应为对象');
+    return out;
+  }
+  const obj = raw as Record<string, unknown>;
+
+  // ── ranges.extraScopes ──
+  if (obj.ranges !== undefined) {
+    const r = obj.ranges;
+    if (r === null || typeof r !== 'object' || Array.isArray(r)) {
+      failField('find.ranges', '应为对象 { extraScopes }');
+    } else {
+      const rObj = r as Record<string, unknown>;
+      const rawScopes = rObj.extraScopes;
+      if (rawScopes !== undefined) {
+        if (!Array.isArray(rawScopes)) {
+          failField('find.ranges.extraScopes', '应为字符串数组');
+        } else if (rawScopes.length > FIND_MAX_TARGETS) {
+          failField('find.ranges.extraScopes', `最多 ${FIND_MAX_TARGETS} 项，实际 ${rawScopes.length}`);
+        } else {
+          const next: string[] = [];
+          for (const item of rawScopes) {
+            if (typeof item !== 'string') {
+              failField('find.ranges.extraScopes', '应为字符串数组');
+              continue;
+            }
+            const name = item.trim();
+            if (!name) {
+              // 空串不静默跳过：保存路径若接受它，界面会显示"配了 1 项"但实际没生效
+              failField('find.ranges.extraScopes', '库名不能为空');
+              continue;
+            }
+            if (FORBIDDEN_RECORD_KEYS.has(name)) {
+              failField(`find.ranges.extraScopes.${name}`, '库名称非法');
+              continue;
+            }
+            if (!next.includes(name)) next.push(name);
+          }
+          out.ranges = { extraScopes: next };
+        }
+      }
+    }
+  }
+
+  // ── prompt ──
+  if (obj.prompt !== undefined) {
+    const p = obj.prompt;
+    if (p === null || typeof p !== 'object' || Array.isArray(p)) {
+      failField('find.prompt', '应为对象 { content }');
+    } else {
+      const pObj = p as Record<string, unknown>;
+      const content = pObj.content;
+      if (typeof content !== 'string') {
+        failField('find.prompt.content', 'content 应为字符串');
+      } else if (content.length > CAPABILITY_PROMPT_MAX_CHARS) {
+        failField('find.prompt.content', `不得超过 ${CAPABILITY_PROMPT_MAX_CHARS} 字，实际 ${content.length}`);
+      } else {
+        out.prompt = {
+          content,
+          at: typeof pObj.at === 'string' ? String(pObj.at) : BUILTIN_AT,
+        };
+      }
+    }
+  }
+
+  // ── tools（白名单；未知键必须报错，静默丢弃会让拼错的开关"看起来生效了"）──
+  if (obj.tools !== undefined) {
+    const t = obj.tools;
+    if (t === null || typeof t !== 'object' || Array.isArray(t)) {
+      failField('find.tools', '应为对象 { 工具名: 布尔值 }');
+    } else {
+      // 基底用 out.tools（可能来自磁盘既有值）而非 defaultFindTools()：
+      // 否则"只提交 ki_search:false"会把其它被关掉的开关按默认（全开）打开
+      const tools: Record<string, boolean> = { ...out.tools };
+      for (const [name, value] of Object.entries(t as Record<string, unknown>)) {
+        if (!FIND_TOOL_NAMES.includes(name)) {
+          failField(`find.tools.${name}`, `未知查找工具名（可用：${FIND_TOOL_NAMES.join(' | ')}）`);
+          continue;
+        }
+        if (typeof value !== 'boolean') {
+          failField(`find.tools.${name}`, '应为布尔值');
+          continue;
+        }
+        tools[name] = value;
+      }
+      out.tools = tools;
+    }
+  }
+
+  // ── skills ──
+  if (obj.skills !== undefined) {
+    const list = obj.skills;
+    if (!Array.isArray(list)) {
+      failField('find.skills', '应为数组');
+    } else if (list.length > MAX_SKILLS) {
+      failField('find.skills', `最多 ${MAX_SKILLS} 条，实际 ${list.length}`);
+    } else {
+      const seenIds = new Set<string>();
+      const seenNames = new Set<string>();
+      const skills: PromptSkill[] = [];
+      let skillFailed = false;
+      list.forEach((item, i) => {
+        const at = `find.skills[${i}]`;
+        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+          failField(at, '应为对象');
+          skillFailed = true;
+          return;
+        }
+        const it = item as Record<string, unknown>;
+        const id = typeof it.id === 'string' ? it.id : '';
+        if (!SKILL_ID_RE.test(id)) {
+          failField(`${at}.id`, 'id 需为小写字母/数字开头、可含连字符（≤64 字符）');
+          skillFailed = true;
+          return;
+        }
+        if (seenIds.has(id)) {
+          failField(`${at}.id`, `id 重复：${id}`);
+          skillFailed = true;
+          return;
+        }
+        seenIds.add(id);
+        const builtinName = BUILTIN_FIND_SKILL_NAMES[id];
+        const name = builtinName ?? (typeof it.name === 'string' ? it.name.trim() : '');
+        if (!name) {
+          failField(`${at}.name`, '名称不能为空');
+          skillFailed = true;
+        } else if (name.length > SKILL_NAME_MAX_CHARS) {
+          failField(`${at}.name`, `名称不得超过 ${SKILL_NAME_MAX_CHARS} 字`);
+          skillFailed = true;
+        } else {
+          const exempt = builtinName !== undefined
+            || opts?.skillNameSoft === true
+            || opts?.existingFindSkillNames?.has(name) === true;
+          if (!exempt && !SKILL_NAME_RE.test(name)) {
+            failField(`${at}.name`, `名称须为英文：${SKILL_NAME_RULE_HINT}（例：refs-locate）`);
+            skillFailed = true;
+          } else if (seenNames.has(name.toLowerCase())) {
+            failField(`${at}.name`, `名称重复：${name}`);
+            skillFailed = true;
+          }
+        }
+        seenNames.add(name.toLowerCase());
+        const description = typeof it.description === 'string' ? it.description.trim() : '';
+        if (description.length > SKILL_DESC_MAX_CHARS) {
+          failField(`${at}.description`, `描述不得超过 ${SKILL_DESC_MAX_CHARS} 字，实际 ${description.length}`);
+          skillFailed = true;
+        }
+        const content = typeof it.content === 'string' ? it.content : '';
+        if (content.length > SKILL_MAX_CHARS) {
+          failField(`${at}.content`, `不得超过 ${SKILL_MAX_CHARS} 字，实际 ${content.length}`);
+          skillFailed = true;
+        }
+        skills.push({
+          id,
+          name,
+          description,
+          content,
+          builtin: BUILTIN_FIND_SKILL_IDS.includes(id),
+          enabled: it.enabled !== false,
+          at: typeof it.at === 'string' ? it.at : BUILTIN_AT,
+        });
+      });
+      if (!skillFailed) {
+        for (const builtinId of BUILTIN_FIND_SKILL_IDS) {
+          if (!skills.some((s) => s.id === builtinId)) skills.push(builtinFindSkill(builtinId));
+        }
+        out.skills = skills;
+      }
+    }
+  }
+
+  // ── 预算三件套 ──
+  if (obj.maxRounds !== undefined) {
+    const v = obj.maxRounds;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > FIND_MAX_ROUNDS_LIMIT) {
+      failField('find.maxRounds', `应为 1–${FIND_MAX_ROUNDS_LIMIT} 的整数（轮）`);
+    } else {
+      out.maxRounds = v;
+    }
+  }
+  if (obj.maxCandidates !== undefined) {
+    const v = obj.maxCandidates;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > FIND_MAX_CANDIDATES_LIMIT) {
+      failField('find.maxCandidates', `应为 1–${FIND_MAX_CANDIDATES_LIMIT} 的整数（条）`);
+    } else {
+      out.maxCandidates = v;
+    }
+  }
+  if (obj.timeoutMs !== undefined) {
+    const v = obj.timeoutMs;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < FIND_TIMEOUT_MIN_MS || v > FIND_TIMEOUT_MAX_MS) {
+      failField('find.timeoutMs', `应为 ${FIND_TIMEOUT_MIN_MS}–${FIND_TIMEOUT_MAX_MS} 的整数（毫秒）`);
+    } else {
+      out.timeoutMs = v;
+    }
+  }
+
+  // ── 思考级别（本期只做形状校验；档位清单校验在深度通道接入时与 analysis 对齐）──
+  if (obj.reasoningEffort !== undefined) {
+    const v = obj.reasoningEffort;
+    const known = typeof v === 'string' && v === opts?.existingFindEffort;
+    if (typeof v !== 'string') {
+      failField('find.reasoningEffort', '应为字符串');
+    } else if (!v.trim() || v.length > REASONING_EFFORT_MAX_CHARS) {
+      failField('find.reasoningEffort', `应为 1–${REASONING_EFFORT_MAX_CHARS} 字符的非空字符串`);
+    } else if (v === REASONING_EFFORT_RESERVED && !known) {
+      failField('find.reasoningEffort', `"${REASONING_EFFORT_RESERVED}" 是内部保留值，不应提交`);
+    } else {
+      out.reasoningEffort = v;
+    }
+  }
+
+  // ── skill ↔ tool 依赖（看归一化后的 tools）──
+  const blocked = out.skills.filter((s) => {
+    const need = FIND_SKILL_REQUIRED_TOOLS[s.id];
+    return need !== undefined && s.enabled && out.tools[need] !== true;
+  });
+  for (const s of blocked) {
+    const need = FIND_SKILL_REQUIRED_TOOLS[s.id]!;
+    if (opts?.skillDependencySoft === true) {
+      s.enabled = false;
+      opts.softNotes?.push(`查找 skill「${s.name}」依赖的工具 ${need} 未启用，已自动停用该 skill（其余配置照常读取）`);
+    } else {
+      issues.push({
+        path: 'find.skills',
+        message: `查找 skill「${s.name}」需要先启用工具 ${need}，否则它无法工作`,
+      });
+    }
+  }
+
+  return out;
 }
 
 function normalizeAnalysisSection(
@@ -1245,6 +1697,18 @@ export function normalizePromptConfig(
     out.analysis = { ...defaultAnalysisConfig(), prompt: { ...out.analysisPrompt } };
   }
 
+  // find 独立配置域（REQ-20261116-005）
+  if (obj.find !== undefined) {
+    out.find = normalizeFindSection(obj.find, issues, opts);
+  } else if (obj.findPrompt !== undefined && out.findPrompt) {
+    // 老配置只有顶层 findPrompt（2026-11-15 预埋、无生效点）：平滑承接为 find.prompt。
+    // 读取路径**不写盘**（读操作不改文件）；保存路径会在写回时统一写成 find.prompt。
+    out.find = { ...defaultFindConfig(), prompt: { ...out.findPrompt } };
+    if (opts?.findSoft === true) {
+      opts.softNotes?.push('findPrompt 已迁移为 find.prompt（下次保存后统一写入 find）');
+    }
+  }
+
   return out;
 }
 
@@ -1265,6 +1729,9 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
     existingSkillNames: new Set(existing.skills.map((s) => s.name)),
     existingAnalysisSkillNames: new Set((existing.analysis?.skills ?? []).map((s) => s.name)),
     existingAnalysisEffort: existing.analysis?.reasoningEffort,
+    existingFindSkillNames: new Set((existing.find?.skills ?? []).map((s) => s.name)),
+    existingFindEffort: existing.find?.reasoningEffort,
+    ...(existing.find ? { existingFind: existing.find } : {}),
     effortOptions: config.llm?.reasoningEfforts,
   });
   if (issues.length > 0) throw new PromptConfigError(issues);
@@ -1292,6 +1759,13 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
       ...(rawInput.analysisPrompt !== undefined && next.analysisPrompt ? { prompt: { ...next.analysisPrompt } } : {}),
     };
   }
+  if (rawInput.find === undefined && existing.find) {
+    // 未提交 find 时沿用既有域；若本次只改了老字段 findPrompt，则把提示词承接到 find.prompt
+    next.find = {
+      ...existing.find,
+      ...(rawInput.findPrompt !== undefined && next.findPrompt ? { prompt: { ...next.findPrompt } } : {}),
+    };
+  }
   const now = new Date().toISOString();
   // 时间戳由服务端打（客户端时间不可信）
   next.prompt.at = now;
@@ -1307,6 +1781,14 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
     // 新版 analysis 提交而未单独提交 analysisPrompt 时，双写同步旧字段便于旧消费方兼容
     if (rawInput.analysis !== undefined && rawInput.analysisPrompt === undefined) {
       next.analysisPrompt = { ...next.analysis.prompt };
+    }
+  }
+  if (next.find) {
+    // 同 analysis 口径：提交 find 而未单独提交 findPrompt 时镜像到旧字段。
+    // 与 S-01 D-01-2「写入统一进 find」并不冲突 —— 旧字段这里只是**镜像**（值同源），
+    // 保证老前端读 defaults.findPrompt 不炸；唯一权威仍是 find.prompt。
+    if (rawInput.find !== undefined && rawInput.findPrompt === undefined) {
+      next.findPrompt = { ...next.find.prompt };
     }
   }
   const file = promptConfigPath(config);

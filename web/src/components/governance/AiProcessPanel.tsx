@@ -33,6 +33,16 @@ export interface AiProcessPanelProps {
   /** 实际检索模式；`fulltext` 表示语义侧不可用已降级，必须如实提示 */
   mode?: 'hybrid' | 'fulltext';
   degradedReason?: string;
+  /** 配置里存在但本次被剔除的库（无权限 / 已不存在 / 视图无成员） */
+  skippedTargets?: Array<{ name: string; reason: 'forbidden' | 'missing' | 'view-members-changed' }>;
+  /** 部分库检索失败（其余结果仍有效）——「查不了」必须与「没内容」分开说 */
+  targetErrors?: Array<{ name: string; error: string }>;
+  /** 深度通道：因轮次 / 超时提前结束（结果不完整，必须让用户知道） */
+  partial?: { reason: 'rounds' | 'timeout'; usedRounds: number };
+  /** 深度通道：模型给出但被校验剔除的条数 */
+  unconfirmedCount?: number;
+  /** 深度通道：模型输出是否可解析（false = 模型没给出结果，不是"没有相关文档"） */
+  parsed?: boolean;
   context: AiProcessContext;
 }
 
@@ -42,6 +52,16 @@ const STEP_TITLES: Record<RefSearchStep['name'], string> = {
   search: '语义检索',
   exclude: '排除已用文档',
   rank: '排序取候选',
+  // 深度通道（REQ-20261116-005）的两步：快速通道不会出现，但面板共用同一套标题表
+  tools: '工具调用',
+  verify: '校验候选',
+};
+
+/** 范围剔除原因 → 人话（不要给用户看 `forbidden` 这种机器码） */
+const SKIP_TEXT: Record<'forbidden' | 'missing' | 'view-members-changed', string> = {
+  forbidden: '无访问权限',
+  missing: '库已不存在',
+  'view-members-changed': '视图已无成员',
 };
 
 function numOf(value: number | string | undefined): number {
@@ -77,6 +97,13 @@ function stepSentence(step: RefSearchStep, ctx: AiProcessContext, keywordCount: 
       return `排除 ${numOf(step.metrics.associated)} 篇已关联、${numOf(step.metrics.added)} 篇已加入 → 剩 ${numOf(step.metrics.remaining)} 篇`;
     case 'rank':
       return `按相关度排序取前 ${numOf(step.metrics.candidates)} 篇（默认勾选阈值 ${numOf(step.metrics.threshold)}）`;
+    case 'tools':
+      return `第 ${numOf(step.metrics.round)} 轮：调用 ${numOf(step.metrics.calls)} 个只读工具`;
+    case 'verify':
+      // 深度通道没有检索分，不在这里编"相关度"；只说校验结果
+      return numOf(step.metrics.parsed) === 1
+        ? `校验模型给出的候选：通过 ${numOf(step.metrics.confirmed)} 条，剔除 ${numOf(step.metrics.unconfirmed)} 条`
+        : `模型没有给出可解析的候选数组（剔除 ${numOf(step.metrics.unconfirmed)} 条）`;
     default:
       return step.name;
   }
@@ -144,13 +171,46 @@ export function AiProcessPanel(args: AiProcessPanelProps): JSX.Element {
         </p>
       ) : null}
 
+      {/* 范围被收窄（无权限 / 已不存在 / 视图无成员）与「部分库失败」都要如实说：
+          「查不了」与「没内容」是两件事，混成一句会让用户以为库里真的没有 */}
+      {args.skippedTargets !== undefined && args.skippedTargets.length > 0 ? (
+        <p className="gov-ai-proc__degraded">
+          已按权限/可用性收窄范围，本次未检索：
+          {args.skippedTargets.map((t) => `${t.name}（${SKIP_TEXT[t.reason]}）`).join('、')}
+        </p>
+      ) : null}
+      {args.targetErrors !== undefined && args.targetErrors.length > 0 ? (
+        <p className="gov-ai-proc__degraded">
+          部分库本次检索失败（其余库结果正常）：
+          {args.targetErrors.map((t) => `${t.name}（${t.error}）`).join('、')}
+        </p>
+      ) : null}
+      {args.partial !== undefined ? (
+        <p className="gov-ai-proc__degraded">
+          {args.partial.reason === 'timeout'
+            ? `深度查找超时（已用 ${args.partial.usedRounds} 轮），下面的候选不完整；可缩小检索范围或改用快速查找。`
+            : `深度查找已用满 ${args.partial.usedRounds} 轮，模型提前收尾，下面的候选不完整。`}
+        </p>
+      ) : null}
+      {args.unconfirmedCount !== undefined && args.unconfirmedCount > 0 ? (
+        <p className="gov-ai-proc__degraded">
+          {args.parsed === false
+            ? `模型没有给出可解析的候选数组（另有 ${args.unconfirmedCount} 条没通过校验）；可重试，或改用快速查找。`
+            : `另有 ${args.unconfirmedCount} 条模型给出的候选没通过校验（不存在 / 不在范围内 / 已加入），已剔除。`}
+        </p>
+      ) : null}
+      {args.parsed === false && (args.unconfirmedCount ?? 0) === 0 ? (
+        <p className="gov-ai-proc__degraded">模型没有给出可解析的候选数组；可重试，或改用快速查找。</p>
+      ) : null}
+
       {open && args.steps.length > 0 ? (
         <ol className="gov-ai-proc__steps">
           {args.steps.map((step, i) => {
             const expandable = step.detail !== undefined;
             const expanded = openStep === i;
+            // 深度通道每轮一条 `tools` 步骤：只用 name 做 key 会重复，必须带序号
             return (
-              <li key={step.name} className="gov-ai-step is-done">
+              <li key={`${step.name}-${i}`} className="gov-ai-step is-done">
                 <span className="gov-ai-step__mark">✓</span>
                 <div className="gov-ai-step__body">
                   <button

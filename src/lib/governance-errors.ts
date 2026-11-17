@@ -74,6 +74,37 @@ export const GOVERNANCE_CODE_NUMBERS = {
   REF_LIMIT_EXCEEDED: 1405,
   /** refs/search 收到 query：该路由已收窄为「只出 AI 候选」，手动按名搜索改走 /governance/docs/search */
   REF_SEARCH_QUERY_UNSUPPORTED: 1406,
+  /** 跨库引用的范围校验（REQ-20261116-005）：运行期剔除走响应字段，保存配置时才用它报错 */
+  FIND_TARGET_NOT_AUTHORIZED: 1407,
+  /** 引用的目标文档在源库不存在（防伪造路径写进 refs.json 变成永远解析不到的脏引用） */
+  REF_DOC_NOT_FOUND: 1408,
+  /** 目标文档被**已收口**事件锁在不可检索阶段：加入后 AI 也永远读不到（未收口则放行） */
+  REF_DOC_NOT_SEARCHABLE: 1409,
+  /**
+   * @deprecated 二期（find-runner）上线后不再返回；保留码位只为老前端 / 老日志能识别。
+   * 语义：一期只有 fast 时，收到 `mode:'deep'` 显式拒绝而不是静默按 fast 跑。
+   */
+  FIND_DEEP_NOT_READY: 1410,
+  /** 未知查找模式（不是 fast / deep） */
+  FIND_MODE_INVALID: 1411,
+
+  // ── S-03 深度查找门禁与预算（REQ-20261116-005 二期）──
+  /** 未配置模型 / 模型不可用 */
+  FIND_LLM_UNAVAILABLE: 1420,
+  /** 未确认知识库内容外发 */
+  FIND_DISCLOSURE_REQUIRED: 1421,
+  /** 模型不支持工具调用 */
+  FIND_TOOLS_UNSUPPORTED: 1422,
+  /** `find.tools` 全关（不空转） */
+  FIND_TOOLS_ALL_DISABLED: 1423,
+  /** 同一事件已有深度查找在跑（**直接拒绝不复用**：查找是一次性交互） */
+  FIND_BUSY: 1424,
+  /** 日配额用尽（与 AI 分析共用 `llm.analysisDailyLimit`） */
+  FIND_QUOTA_EXCEEDED: 1425,
+  /** 硬超时且无候选（有候选时走 200 + `partial`） */
+  FIND_TIMEOUT: 1426,
+  /** 用户中止（前端已关闭，仅用于把 abort 与超时区分开） */
+  FIND_CANCELED: 1427,
 
   /** 通用 / 传输层（1500-1599）── */
   /** Token 无权访问该 scope（HTTP 层 403；**不复用** DATASOURCE_LIFECYCLE_LOCKED，
@@ -110,6 +141,19 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   TYPE_NOT_FOUND: 404,
   TRASH_NOT_FOUND: 404,
   REF_NOT_FOUND: 404,
+  FIND_TARGET_NOT_AUTHORIZED: 403,
+  REF_DOC_NOT_FOUND: 404,
+  REF_DOC_NOT_SEARCHABLE: 409,
+  FIND_DEEP_NOT_READY: 400,
+  FIND_MODE_INVALID: 400,
+  FIND_LLM_UNAVAILABLE: 503,
+  FIND_DISCLOSURE_REQUIRED: 409,
+  FIND_TOOLS_UNSUPPORTED: 409,
+  FIND_TOOLS_ALL_DISABLED: 400,
+  FIND_BUSY: 409,
+  FIND_QUOTA_EXCEEDED: 429,
+  FIND_TIMEOUT: 504,
+  FIND_CANCELED: 499,
   REVISION_CONFLICT: 409,
   RESTORE_NAME_CONFLICT: 409,
   REF_LIMIT_EXCEEDED: 409,

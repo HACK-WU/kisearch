@@ -19,6 +19,7 @@
 | 管理 Group（创建 / 删除 / 列表 / 分区） | [group.md](./group.md) |
 | 备份与恢复 scope | [backup-restore.md](./backup-restore.md) |
 | 看几个完整的使用场景 | [workflows.md](./workflows.md) |
+| 在事件里让 AI 找参考文档（配置检索范围、看懂候选、引用失效怎么办） | [ai-find.md](./ai-find.md) |
 
 ## 参考
 
