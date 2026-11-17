@@ -503,6 +503,48 @@ export async function handleGovernanceRoutes(
          * · POST 提问（knowledge.ask）；GET 读记录（knowledge.ask）；DELETE 清空（knowledge.write）
          * · 传了 runId 但与该事件当前草稿不符 → 409 REVISION_CONFLICT（避免"拿新结论回答老问题"）
          */
+        /*
+         * 追问流式通道（SSE）：`POST /analysis/ask/stream`
+         * 与普通 POST 共用同一套闸门与落库，这里只把增量文本实时吐给前端。
+         */
+        if (method === 'POST' && segs[3] === 'ask' && segs[4] === 'stream' && !segs[5]) {
+          const b = await body();
+          const scope = scopeFromBody(b);
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            Connection: 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          });
+          // SSE 必须立刻把响应头刷出去：否则前端要等到第一段正文才拿到 200，体感像"卡住"
+          res.flushHeaders?.();
+          res.socket?.setNoDelay?.(true);
+          const send = (payload: unknown): void => { res.write(`data: ${JSON.stringify(payload)}\n\n`); };
+          try {
+            const passedRunId = str(b.runId);
+            const currentRunId = readNormalizedAnalysisDoc(scope, event.id).draft?.runId ?? null;
+            if (passedRunId && passedRunId !== currentRunId) {
+              throw new GovernanceError('REVISION_CONFLICT', '分析结果已更新，请刷新后重新提问');
+            }
+            const result = await askEventAnalysis(scope, event as unknown as AskTargetEvent, {
+              question: str(b.question) ?? '',
+              onDelta: (text) => send({ type: 'delta', text }),
+            });
+            send({ type: 'done', turn: result.turn });
+          } catch (err) {
+            const ge = err instanceof GovernanceError ? err : null;
+            send({
+              type: 'error',
+              ...(ge ? { code: ge.code } : {}),
+              message: (err as Error).message || '追问失败',
+            });
+          } finally {
+            res.end();
+          }
+          return true;
+        }
         if (segs[3] === 'ask' && !segs[4]) {
           if (method === 'GET') {
             const scope = scopeFromQuery();

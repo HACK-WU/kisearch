@@ -51,8 +51,12 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
   /** 可多行同时展开（I-28） */
   const [openLocs, setOpenLocs] = useState<string[]>([]);
 
-  // D-02 / D-03：无草稿且无已确认位置 → 整卡不渲染
-  if (!draft && confirmed.length === 0) return null;
+  /*
+   * D-02 / D-03：无草稿且无已确认位置 → 整卡不渲染。
+   * 例外：用户刚点了「AI 分析」（startSignal > 0）时必须渲染 —— 否则信号没有接收者，
+   * 点了没反应，连"启动失败"的报错都没地方显示（真机 2026-11-17）。
+   */
+  if (!draft && confirmed.length === 0 && startSignal === 0) return null;
 
   const chip = chipOf(analysis);
   const running = draft?.status === 'running';
@@ -95,7 +99,8 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
           </div>
         ) : null}
 
-        {draft ? (
+        {/* 无草稿但刚点了「AI 分析」：也要挂载面板，由它发起并在失败时显示原因 */}
+        {draft || startSignal > 0 ? (
           <AiAnalyzePanel
             scope={scope}
             event={event}

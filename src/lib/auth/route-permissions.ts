@@ -135,6 +135,8 @@ const RULES: Rule[] = [
   // 追问（B2）：提问与读记录都要 knowledge.ask（viewer 有该能力）；
   // 清空是写操作，要求 knowledge.write。
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
+  // 流式追问（SSE）：与普通 POST 同权限
+  pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask\/stream$/, 'permission', 'knowledge.ask'),
   pattern('GET', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/confirm$/, 'permission', 'knowledge.write'),

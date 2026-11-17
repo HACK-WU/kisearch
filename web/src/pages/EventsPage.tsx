@@ -152,6 +152,8 @@ export function EventsPage(): JSX.Element {
     setFindStatus(null);
     setPendingRemove(null);
     setRefConfirmKey(null);
+    // 触发信号必须归零：否则切回事件时残留的 signal 会被面板当成"用户刚点了分析"
+    setStartSignal(0);
   }, [scope, activeId]);
 
   // 页面只判 capability，不判 role（authContext 的约定）
@@ -563,8 +565,8 @@ export function EventsPage(): JSX.Element {
             </div>
           </div>
 
-          {/* 右：详情 */}
-          <div className="gov-pane">
+          {/* 右：详情（卡片自己承担边界，外层不再画一层白卡，见 .gov-pane--flat） */}
+          <div className="gov-pane gov-pane--flat">
             {!active ? (
               <div className="gov-cell-muted" style={{ padding: 24 }}>左侧选择一个事件查看详情</div>
             ) : (
@@ -608,6 +610,8 @@ export function EventsPage(): JSX.Element {
                       void run(async () => '这次分析已经完成，不用重复点；如需重跑请用「AI 分析」卡里的「重新分析」');
                       return;
                     }
+                    // 立刻给一次反馈：卡片要等下一帧才挂载，期间用户会以为"点了没反应"
+                    setMessage({ tone: 'ok', text: '正在启动分析…' });
                     setStartSignal((n) => n + 1);
                   }}
                   onReopen={() => void run(async () => {

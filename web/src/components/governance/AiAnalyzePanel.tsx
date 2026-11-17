@@ -75,7 +75,16 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
   const [actionError, setActionError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [procOpen, setProcOpen] = useState(true);
+  /*
+   * 过程区默认展开；**已确认过的结果默认折叠**（G-04/G-11）：
+   * 否则用户每次打开事件都要先滚过一整屏步骤才能看到底栏。
+   */
+  const initialCommitted = (() => {
+    const cands = analysis?.draft?.candidates ?? [];
+    const conf = analysis?.confirmed ?? [];
+    return cands.length > 0 && cands.every((c) => conf.some((x) => x.file === c.file && x.line === c.line));
+  })();
+  const [procOpen, setProcOpen] = useState(!initialCommitted);
   const [openStep, setOpenStep] = useState<number | null>(null);
   const [openCands, setOpenCands] = useState<string[]>([]);
   const [picked, setPicked] = useState<Set<string>>(() => new Set(
@@ -101,8 +110,11 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
     }
   }, []);
 
+  /** 在途守卫：连点「AI 分析」或 effect 与按钮同时触发时，只发一次 start */
+  const startingRef = useRef(false);
   const triggerStart = useCallback(async (forceOverwrite = false): Promise<void> => {
-    if (!canWrite) return;
+    if (!canWrite || startingRef.current) return;
+    startingRef.current = true;
     setStarting(true);
     setStartError(null);
     setActionError('');
@@ -120,15 +132,23 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
         setStartError(formatError(err));
       }
     } finally {
+      startingRef.current = false;
       setStarting(false);
     }
   }, [canWrite, scope, event.id, syncFromAnalysis]);
 
   // 只有 startSignal **变化**才启动；挂载时 signal 未变 → 不启动
-  const lastSignal = useRef(startSignal);
+  /*
+   * `lastSignal` 必须从 **0** 起，不能用 `startSignal` 初始化：
+   * 卡片可能正是"因为用户点了 AI 分析"才挂载（此时 startSignal 已经是 1），
+   * 若以当前值初始化，挂载永远判定"没变化" —— 点一下什么都不发生（真机 2026-11-17）。
+   * 父级把 signal 复位成 0 时只更新基线，不触发启动。
+   */
+  const lastSignal = useRef(0);
   useEffect(() => {
     if (startSignal === lastSignal.current) return;
     lastSignal.current = startSignal;
+    if (startSignal === 0) return;
     void triggerStart(false);
   }, [startSignal, triggerStart]);
 
@@ -193,6 +213,8 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
         discardDraft: false,
       });
       syncFromAnalysis({ draft: res.draft, confirmed: res.confirmed }, false);
+      // 确认后把过程折叠起来：结果已定稿，界面应让位给「已确认位置 + 重新分析」
+      setProcOpen(false);
     } catch (err) {
       setActionError(formatError(err).message);
     } finally {
@@ -325,7 +347,9 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                 : `${steps.length} 步 · ${callCount} 次调用 · ${elapsedSec}s`}
             </span>
             {!stick && isRunning ? <span className="gov-ai-proc__badge">有新步骤</span> : null}
-            <span className="gov-ai-proc__toggle">{procOpen ? '收起' : (committed ? '查看详情' : '查看过程')}</span>
+            <span className="gov-ai-proc__toggle">
+              {committed ? (procOpen ? '收起详情' : '查看详情') : (procOpen ? '收起' : '查看过程')}
+            </span>
             <span className="gov-ai-proc__chev" aria-hidden="true">▾</span>
           </button>
 
@@ -415,8 +439,12 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
         </>
       ) : null}
 
-      {/* F-15：运行中不渲染候选（Q1：不做阶段性候选） */}
-      {!isRunning && candidates.length > 0 ? (
+      {/*
+       * F-15：运行中不渲染候选（Q1：不做阶段性候选）。
+       * 已确认（committed）后整块收起，只有点「查看详情」才展开候选 —— 否则确认过的卡片
+       * 仍然把一屏候选摊在页面上，"收起"等于没生效（2026-11-17 真机走查）。
+       */}
+      {!isRunning && candidates.length > 0 && (!committed || procOpen) ? (
         <div className="gov-cand-list gov-cand-list--embed">
           {candidates.map((c, ci) => {
             const checked = picked.has(c.id);
@@ -464,7 +492,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
         </div>
       ) : null}
 
-      {!isRunning && draft && draft.unconfirmed.length > 0 ? (
+      {!isRunning && draft && draft.unconfirmed.length > 0 && (!committed || procOpen) ? (
         <p className="gov-inline-tip" style={{ padding: '0 12px' }}>
           <b>未确认点：</b>{draft.unconfirmed.join('；')}
         </p>

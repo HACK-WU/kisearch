@@ -1638,3 +1638,80 @@
 /* 追问：一问一答成组（避免所有提问先列完再列回答） */
 .gov-ask__thread { display: flex; flex-direction: column; gap: 6px; }
 .gov-ask__thread + .gov-ask__thread { margin-top: 10px; }
+
+/* ── 2026-11-17 真机走查修复 ── */
+/* 1) 右栏改成卡片流后，.gov-pane 自身那层白卡会露出「多出来的一张白卡」：
+      详情侧改用扁平容器，卡片自己承担边界（左栏 .gov-pane 不动）。 */
+.gov-pane--flat {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  overflow: visible;
+}
+
+/* 2) 左栏事件列表：可视高度按视口给足（原来固定 560px 太矮）。
+      必须限定在单列断点**之上**：否则会盖掉 governance.css:1029 那条
+      `@media (max-width: 1080px) { .gov-pane__list { max-height: 320px } }`（媒体查询同特异性、后者更靠前）。 */
+@media (min-width: 1081px) {
+  .gov-pane__list { max-height: min(760px, calc(100vh - 220px)); }
+}
+
+/* 3) 「清空对话」用普通小按钮的外观（原来只有描边+底色，缺圆角与内联布局） */
+.gov-ask__clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--ki-radius-tag);
+  font-size: var(--ki-font-size-xs);
+  line-height: 1.7;
+  cursor: pointer;
+}
+.gov-ask__clear:disabled { cursor: not-allowed; }
+/* 流式输出光标：跟随最后一段文本，避免"整段突然出现"的错觉 */
+.gov-ask__cursor {
+  display: inline-block;
+  width: 7px; height: 13px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  background: var(--ki-color-primary);
+  border-radius: 1px;
+  animation: gov-ask-blink 1s steps(2, start) infinite;
+}
+@keyframes gov-ask-blink { to { visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) { .gov-ask__cursor { animation: none; } }
+.gov-ask__clear { font-family: inherit; }
+
+/* 代码快照：左侧真实行号列 + 右侧代码（行号与代码同一行高，滚动时一起走） */
+.gov-codeloc__codewrap {
+  display: flex;
+  margin-top: 6px;
+  border-radius: var(--ki-radius-sm);
+  background: #141c18;
+  overflow: hidden;
+}
+.gov-codeloc__ln {
+  flex: none;
+  min-width: 38px;
+  padding: 8px 7px;
+  text-align: right;
+  font-family: var(--ki-font-mono);
+  font-size: 11px;
+  line-height: 1.65;
+  color: #6b7a72;
+  background: #101815;
+  border-right: 1px solid #24312b;
+  user-select: none;
+}
+.gov-codeloc__ln span { display: block; }
+.gov-codeloc__codewrap > .gov-codeloc__snip {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 0;
+  background: transparent;
+  color: #dfe8e3;
+  font-size: 11px;
+  line-height: 1.65;
+  overflow-x: auto;
+}

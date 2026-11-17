@@ -147,8 +147,10 @@ describe('B2 追问执行器闸门', () => {
       yield { type: 'usage', promptTokens: 100, completionTokens: 20 };
     }
 
+    const deltas: string[] = [];
     const res = await askEventAnalysis(scope, { id: ev.id, title: ev.title }, {
       question: '为什么白屏？',
+      onDelta: (t) => deltas.push(t),
       deps: {
         loadConfigFn: () => cfg,
         resolveLlmStatusFn: () => okLlm,
@@ -157,6 +159,7 @@ describe('B2 追问执行器闸门', () => {
     });
 
     assert.equal(res.turn.answer, '因为登录守卫在解构前读了 token。');
+    assert.deepEqual(deltas, ['因为登录守卫在解构前读了 token。'], 'SSE 通道必须逐段回调增量');
     assert.equal(res.turn.runId, 'run_1');
     assert.equal(res.turn.usage?.promptTokens, 100);
     assert.match(seen, /根因是 token 为空未兜底/, '上下文必须带结论');

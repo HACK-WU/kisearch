@@ -44,6 +44,11 @@ export interface AskEventAnalysisArgs {
   question: string;
   /** 限流主体：HTTP 层无身份，固定 'local'（与 ki_ask 共享窗口，见 S06 §3.3） */
   principalKey?: string;
+  /**
+   * 流式增量回调（SSE 通道用）：每收到一段模型文本就回调一次。
+   * 注意：回调抛错不得影响主流程（HTTP 层已写成"写失败即断开"，由调用方保证）。
+   */
+  onDelta?: (text: string) => void;
   deps?: {
     loadConfigFn?: typeof loadConfig;
     resolveLlmStatusFn?: typeof resolveLlmStatus;
@@ -200,8 +205,10 @@ export async function askEventAnalysis(
         },
       });
       for await (const part of stream) {
-        if (part.type === 'content') answer += part.text;
-        else if (part.type === 'usage') {
+        if (part.type === 'content') {
+          answer += part.text;
+          args.onDelta?.(part.text);
+        } else if (part.type === 'usage') {
           promptTokens += part.promptTokens ?? 0;
           completionTokens += part.completionTokens ?? 0;
         }

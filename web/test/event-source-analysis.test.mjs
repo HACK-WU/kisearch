@@ -164,3 +164,29 @@ describe('S-01 · 分析目标目录：块级草稿 + 显式保存（2026-11-16�
     assert.match(modalSrc, /draft\.errorCode !== 'ANALYSIS_CANCELED' \? `\[\$\{draft\.errorCode\}\] ` : ''/);
   });
 });
+
+/**
+ * 真机回归（2026-11-17）：没有草稿的事件点「AI 分析」必须能启动。
+ * 曾经的三处组合导致"点了没反应"：卡片在无草稿时不渲染（信号无接收者）、
+ * 面板 lastSignal 以 startSignal 初始化（挂载即判定"没变化"）、切事件不复位信号。
+ */
+describe('S-05b · 「AI 分析」入口必须真的能启动', () => {
+  it('卡片在仅有点击信号时也挂载，并把信号交给面板', () => {
+    assert.match(
+      analysisCardSrc,
+      /if \(!draft && confirmed\.length === 0 && startSignal === 0\) return null;/,
+      '无草稿时只要 signal > 0 就必须渲染卡片，否则点击没有接收者',
+    );
+    assert.match(analysisCardSrc, /draft \|\| startSignal > 0 \?/, '面板必须随卡片挂载');
+  });
+
+  it('面板的 signal 基线从 0 起，且复位不触发启动', () => {
+    assert.match(modalSrc, /const lastSignal = useRef\(0\);/, '基线不能用 startSignal 初始化');
+    assert.match(modalSrc, /if \(startSignal === 0\) return;/, '父级复位不应触发一次分析');
+    assert.match(modalSrc, /startingRef\.current/, '同一时刻只允许一次在途 start');
+  });
+
+  it('切事件时把触发信号归零', () => {
+    assert.match(eventsSrc, /setStartSignal\(0\);/, '切 scope/事件必须复位 startSignal');
+  });
+});

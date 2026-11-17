@@ -578,6 +578,75 @@ export function askEventAnalysis(
   });
 }
 
+/**
+ * 追问（流式）：边生成边回调文本增量。
+ * 走 `POST /analysis/ask/stream`（SSE over fetch，不能用 EventSource —— 需要 POST body）。
+ * 响应非 200 时按普通 JSON 错误解析；流内 `type:'error'` 转为抛错。
+ */
+export async function askEventAnalysisStream(
+  scope: string,
+  eventId: string,
+  args: { question: string; runId?: string },
+  onDelta: (text: string) => void,
+): Promise<{ turn: AnalysisAskTurn }> {
+  const res = await fetch(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/ask/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      scope,
+      question: args.question,
+      ...(args.runId ? { runId: args.runId } : {}),
+    }),
+  });
+  if (!res.ok) {
+    let message = `追问失败（HTTP ${res.status}）`;
+    let code: string | undefined;
+    try {
+      const j = (await res.json()) as { error?: string; code?: string };
+      if (j.error) message = j.error;
+      code = j.code;
+    } catch { /* 非 JSON 错误体，用默认文案 */ }
+    throw new GovernanceApiError(message, res.status, code);
+  }
+  if (!res.body) throw new GovernanceApiError('当前环境不支持流式响应', 0);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let doneTurn: AnalysisAskTurn | null = null;
+  let errMessage = '';
+  let errCode: string | undefined;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx = buf.indexOf('\n\n');
+    while (idx >= 0) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      const line = chunk.split('\n').find((l) => l.startsWith('data: '));
+      if (line) {
+        try {
+          const payload = JSON.parse(line.slice(6)) as {
+            type: string; text?: string; turn?: AnalysisAskTurn; message?: string; code?: string;
+          };
+          if (payload.type === 'delta') onDelta(payload.text ?? '');
+          else if (payload.type === 'done' && payload.turn) doneTurn = payload.turn;
+          else if (payload.type === 'error') {
+            errMessage = payload.message ?? '追问失败';
+            errCode = payload.code;
+          }
+        } catch { /* 单条事件坏掉不影响后续 */ }
+      }
+      idx = buf.indexOf('\n\n');
+    }
+  }
+
+  if (!doneTurn) throw new GovernanceApiError(errMessage || '连接中断，回答未完成', 0, errCode);
+  return { turn: doneTurn };
+}
+
 /** 读追问记录（可按 runId 过滤） */
 export function listEventAnalysisAsk(
   scope: string,

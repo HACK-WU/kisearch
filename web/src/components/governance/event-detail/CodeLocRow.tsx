@@ -1,27 +1,51 @@
 import type { CodeLocRowProps } from './types';
+import { highlightCodeHtml, resolveHighlightLanguage } from '@/lib/codeHighlight';
 
 /**
- * 已确认代码位置行（2026-11-17 改版 · 批 4）。
+ * 已确认代码位置行（2026-11-17 改版 · 批 4，真机走查后补：图标 + 语法高亮）。
  *
  * 检查点：I-22~I-30。
- * · 热区**只有路径**（hover 出下划线），why 与空白区不触发展开（L-05）；
- * · 有 `snippet` 才可展开，展开区标注「分析时的代码快照 · commit xxxxxxx」+ 一句"不代表当前 HEAD"；
- * · 无 `snippet`（早期确认或手工录入）→ 不可点 + `title` 说明，不报错（I-27）；
- * · 可多行同时展开，展开状态由父级数组控制（I-28）。
- *
- * 注：快照按**纯文本**渲染（不做语法高亮）。高亮需要 `dangerouslySetInnerHTML`，
- * 在"分析时读取的片段"这种半可信内容上不值得冒注入风险；等 codeHighlight 提供
- * 纯节点渲染再补（已记入 S04 §3.4 的落地修正）。
+ * · 行首是 **SVG 尖括号图标**（与 demo 一致；早期版本误用了 `</>` 文本）；
+ * · 热区**只有路径**；有 `snippet` 才可展开，展开区标注「分析时的代码快照」+ 不代表 HEAD；
+ * · 无 `snippet` → 不可点 + `title` 说明（I-27）；可多行同时展开（I-28）；
+ * · 高亮复用 `codeHighlight`（highlight.js 同步、按需语言）：未知语言/超阈值返回 null 时
+ *   退回**转义纯文本**，绝不因为高亮失败而丢内容。
  */
+
+/** 扩展名 → highlight.js 语言 id（只覆盖本项目会读到的源码类型） */
+function langOfFile(file: string): string | undefined {
+  const ext = file.slice(file.lastIndexOf('.') + 1).toLowerCase();
+  const map: Record<string, string> = {
+    ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+    py: 'python', go: 'go', java: 'java', rs: 'rust',
+    json: 'json', jsonc: 'json', yaml: 'yaml', yml: 'yaml',
+    sh: 'bash', bash: 'bash', zsh: 'bash',
+    css: 'css', scss: 'css',
+    html: 'xml', xml: 'xml', svg: 'xml',
+    sql: 'sql',
+  };
+  const lang = map[ext];
+  return lang && resolveHighlightLanguage(lang) ? lang : undefined;
+}
+
+const ICON_CODE = (
+  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M5.8 4.2 2.4 8l3.4 3.8" />
+    <path d="M10.2 4.2 13.6 8l-3.4 3.8" />
+  </svg>
+);
+
 export function CodeLocRow(props: CodeLocRowProps): JSX.Element {
   const { loc, open, onToggle, canRemove, onRemove } = props;
   const expandId = `codeloc-${loc.id}`;
   const hasSnippet = Boolean(loc.snippet && loc.snippet.trim());
   const path = `${loc.file}:${loc.line}${loc.endLine ? `-${loc.endLine}` : ''}`;
+  const html = open && loc.snippet ? highlightCodeHtml(loc.snippet, langOfFile(loc.file)) : null;
 
   return (
     <div className={`gov-codeloc${open ? ' is-open' : ''}`}>
-      <span className="gov-codeloc__icon" aria-hidden="true">{'</>'}</span>
+      <span className="gov-codeloc__icon">{ICON_CODE}</span>
       <div className="gov-codeloc__main">
         <div className="gov-codeloc__head">
           {hasSnippet ? (
@@ -53,7 +77,19 @@ export function CodeLocRow(props: CodeLocRowProps): JSX.Element {
               分析时的代码快照{loc.commit ? ` · commit ${loc.commit}` : ''}
             </div>
             <div className="gov-codeloc__expand-note">来自本次分析读取的片段，不代表仓库当前 HEAD</div>
-            <pre className="gov-codeloc__snip">{loc.snippet}</pre>
+            <div className="gov-codeloc__codewrap">
+              {/* 行号用真实文件行号（快照从 loc.line 开始），让用户能直接跳过去核对 */}
+              <div className="gov-codeloc__ln" aria-hidden="true">
+                {loc.snippet!.split('\n').map((_, i) => (
+                  <span key={i}>{loc.line + i}</span>
+                ))}
+              </div>
+              {html ? (
+                <pre className="gov-codeloc__snip" dangerouslySetInnerHTML={{ __html: html }} />
+              ) : (
+                <pre className="gov-codeloc__snip">{loc.snippet}</pre>
+              )}
+            </div>
           </div>
         ) : null}
       </div>
