@@ -46,6 +46,9 @@ let searchThrows = false;
   return searchHits;
 };
 (vectorClient as any).closeEngine = async () => {};
+// 本文件用 mock 模拟「库里存在这些 docId」的场景：真实实现会先查 collection 是否存在
+// （不存在时短路，避免为它打开/创建空库），这里要让守卫放行到 mock 的删除逻辑。
+(vectorClient as any).scopeCollectionExists = () => true;
 
 const { executeDeleteRelation } = await import('../src/delete-relation.js');
 const { ensureScopeDir } = await import('../src/lib/store.js');
@@ -142,7 +145,7 @@ describe('delete-relation 清理路径向量（ki-relation）', () => {
     assert.match(String(outcome.result.relationVectorReason ?? ''), /g2/);
   });
 
-  it('路径向量本就不存在 → 不报错、不阻断删除', async () => {
+  it('有 memoryIds 却查不到路径向量 → 不阻断删除，但显式说明试过的形态', async () => {
     resetMocks();
     const scope = freshScope();
     seedScope(scope, { g1: [{ text: '无路径向量文档', memoryIds: ['content-x'] }] });
@@ -152,7 +155,61 @@ describe('delete-relation 清理路径向量（ki-relation）', () => {
     if (!outcome.ok) return;
     assert.equal(outcome.result.deleted, true, '主删除不受影响');
     assert.equal(outcome.result.relationVectorRemoved, false);
-    assert.equal(outcome.result.relationVectorReason, undefined, '未命中属于正常情况，不写失败原因');
+    // 2026-11-16 复核：cache 声称写过内容向量（memoryIds 非空）却没有路径向量，
+    // 属于可疑不一致（历史形态 / 摘除失败）。过去这里静默返回 relationVectorDeleted:0，
+    // 让人误以为「兜底都跑过了」——现在必须说明尝试过哪三种形态。
+    assert.match(String(outcome.result.relationVectorReason ?? ''), /三种形态/);
+  });
+
+  it('纯 FTS-only（无 memoryIds）→ 未命中不写原因（本就没有路径向量）', async () => {
+    resetMocks();
+    const scope = freshScope();
+    seedScope(scope, { g1: [{ text: '全文文档' }] });
+
+    const outcome = await executeDeleteRelation({ scope, group: 'g1', relation: '全文文档' });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    if (!outcome.ok) return;
+    assert.equal(outcome.result.relationVectorRemoved, false);
+    assert.equal(outcome.result.relationVectorReason, undefined, '无向量记录时未命中属正常，不制造噪声');
+  });
+
+  it('分块导入的路径向量（relation-01）按后缀形态重算删除', async () => {
+    resetMocks();
+    const scope = freshScope();
+    // 两个 chunk ⇒ import 写出的路径向量文本是 `分块文档-01` / `分块文档-02`
+    seedScope(scope, { g1: [{ text: '分块文档', memoryIds: ['chunk-1', 'chunk-2'] }] });
+    const chunkPathId = vectorClient.generateDocId('分块文档-01', scope, 'ki-relation');
+    existingIds.add(chunkPathId);
+    existingIds.add('chunk-1');
+    existingIds.add('chunk-2');
+
+    const outcome = await executeDeleteRelation({ scope, group: 'g1', relation: '分块文档' });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    if (!outcome.ok) return;
+    assert.ok(
+      deleteCalls.flat().includes(chunkPathId),
+      `分块路径向量 docId 应进入删除清单（过去只算纯名，必然漏删），实际：${JSON.stringify(deleteCalls)}`,
+    );
+    assert.equal(outcome.result.relationVectorDeleted, 1);
+  });
+
+  it('分块后缀未命中时，兜底检索能识别 relation-NN 并删除', async () => {
+    resetMocks();
+    const scope = freshScope();
+    seedScope(scope, { g1: [{ text: '后缀文档', memoryIds: ['chunk-a'] }] });
+    existingIds.add('chunk-a');
+    existingIds.add('suffix-hit');
+    searchHits = [
+      { memoryId: 'suffix-hit', content: '后缀文档-02', tag: 'ki-relation' },
+      { memoryId: 'unrelated', content: '后缀文档的补充说明', tag: 'ki-relation' },
+    ];
+
+    const outcome = await executeDeleteRelation({ scope, group: 'g1', relation: '后缀文档' });
+    assert.equal(outcome.ok, true, JSON.stringify(outcome));
+    if (!outcome.ok) return;
+    const flat = deleteCalls.flat();
+    assert.ok(flat.includes('suffix-hit'), `relation-NN 形态应被兜底识别：${JSON.stringify(deleteCalls)}`);
+    assert.ok(!flat.includes('unrelated'), '非「名称-两位数字」的条目不得误删');
   });
 
   it('兜底检索失败只降级：ok 仍为 true 并给出原因', async () => {

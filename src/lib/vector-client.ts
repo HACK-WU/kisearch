@@ -1528,6 +1528,21 @@ export async function vectorDelete(params: {
   const scope = resolveScope(loadConfig(), params.scope);
   const ids = [...new Set(params.ids.filter(Boolean))];
   if (ids.length === 0) return normalizeVectorDeleteResult(ids, { ok: 0, failed: 0 });
+  /**
+   * 库不存在 ⇒ 没有可删的向量，直接按 NOT_FOUND 返回。
+   *
+   * 不能直接 `withEngine`：`getEngine` 的 create 自愈会为它**建一个空库并登记常驻句柄**
+   * （实测：删除前 `collections/<scope>` 不存在 → 删除后目录出现 5 项）。写/检索需要自愈，
+   * 删除不需要 —— 且空库一旦建出，`scopeCollectionExists` 从此返回 true，
+   * 「该 scope 从未初始化」这一事实就被掩盖了。判据与 `vectorDeleteScope` 同口径。
+   */
+  if (!scopeCollectionExists(scope)) {
+    return normalizeVectorDeleteResult(ids, {
+      ok: 0,
+      failed: 0,
+      errors: ids.map((id) => ({ id, code: 'NOT_FOUND', reason: 'collection not found' })),
+    });
+  }
   const reported = await withEngine(scope, (engine) => engine.delete(ids));
   return normalizeVectorDeleteResult(ids, reported);
 }
@@ -1567,7 +1582,14 @@ function buildScopeTagFilter(scopes: string[], tags?: string[]): Filter {
 }
 
 /** 只读路径使用：不存在/空 Collection 视为空 scope，避免查询意外创建新库。 */
-function scopeCollectionExists(scope: string): boolean {
+/**
+ * 该 scope 的 dense collection 是否已存在。
+ *
+ * 导出给「按 id 删除」的调用方做前置判断：`vectorDelete` 走 `withEngine`，
+ * 对不存在的 collection 会**打开/创建**一个空库（进程内留下常驻句柄，脚本与单测因此不退出），
+ * 而「库里没有这个 scope」本身就等价于「没有可删的向量」。
+ */
+export function scopeCollectionExists(scope: string): boolean {
   assertNoPendingVectorMigration(scope);
   const config = loadConfig();
   const dbPath = getScopeCollectionPath(config, scope);

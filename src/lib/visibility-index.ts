@@ -17,12 +17,20 @@
  */
 
 import path from 'path';
-import { getKbDir } from './scope.js';
+import { getKbDir, getLocalKbDir } from './scope.js';
 import { readJson, writeJson } from './store.js';
-import { readAllGroupCaches } from './group-cache.js';
+import { readAllGroupCaches, loadGroupCache, writeGroupCache } from './group-cache.js';
 import { ftsDeleteByIds } from './fts-client.js';
-import { vectorDelete, ensureVectorAvailable } from './vector-client.js';
-import { deletePathVector, buildRelationContent, buildGroupPathContent } from './path-vectorize.js';
+import { vectorDelete, vectorSearch, ensureVectorAvailable } from './vector-client.js';
+import { deletePathVector, buildGroupPathContent } from './path-vectorize.js';
+import { removeRelationPathVectors } from './relation-path-vector.js';
+import {
+  recomputeContentVectorIds,
+  pickContentVectorHits,
+  contentVectorTags,
+  extractKbBody,
+  CONTENT_FALLBACK_SEARCH_LIMIT,
+} from './content-vector-match.js';
 import { readAllEvents } from './events/store.js';
 import { listTypes } from './events/type-service.js';
 import type { Relation } from './scoring.js';
@@ -277,6 +285,71 @@ function recordFailure(scope: string, failure: VisibilityFailure): void {
 }
 
 /**
+ * 内容向量摘除的检索补救：按「正文比对」挑出本篇的内容向量并删除。
+ *
+ * 只在 `vectorDelete` 没能覆盖全部 ids 时调用（异常路径），代价是**一次 embedding 查询**。
+ * 为什么不能省：hidden 是「语义上不可被检索」的隔离承诺，而它靠摘索引单点实现 ——
+ * 少摘一条就是一次静默数据泄漏，读侧没有任何兜底能发现。
+ */
+async function deleteContentVectorsBySearch(
+  scope: string,
+  relation: string,
+  body: string | null,
+  opts: { tags?: string[]; siblingBodies?: string[] } = {},
+): Promise<{ deleted: number; matched: number; error?: string }> {
+  const hits = await vectorSearch({
+    scope,
+    query: relation,
+    // tag 白名单：历史记录缺 tag 字段时，ki-relation（content 即 relation 名）会被标题判据
+    // 整体命中 ⇒ 删掉跨组共享的关系向量，绕过 hasOtherHolders 保护
+    tags: contentVectorTags(opts.tags),
+    limit: CONTENT_FALLBACK_SEARCH_LIMIT,
+  });
+  const { hits: matched } = pickContentVectorHits(hits, {
+    relation,
+    body,
+    siblingBodies: opts.siblingBodies,
+  });
+  if (matched.length === 0) return { deleted: 0, matched: 0 };
+  const res = await vectorDelete({ scope, ids: matched.map((hit) => hit.memoryId) });
+  if (res.errors.length > 0) return { deleted: res.deleted, matched: matched.length, error: res.errors[0].reason };
+  if (res.deleted < matched.length) {
+    // 「命中 N 条只删掉 M 条（含 0）」= 隔离承诺没兑现，必须落 failed，不能只记 removed。
+    return {
+      deleted: res.deleted,
+      matched: matched.length,
+      error: `检索命中 ${matched.length} 条本篇内容向量，仅删除 ${res.deleted} 条`,
+    };
+  }
+  return { deleted: res.deleted, matched: matched.length };
+}
+
+
+/**
+ * 摘除成功后清掉 cache 里过期的内容向量 id。
+ *
+ * 为什么必做（而不是"反正删除侧能重算"）：`memoryIds` 是 cache 对外的「已向量化」声明，
+ * 摘除后它们指向的是**已被删除的 docId**。不清掉的后果不止删除侧 0 命中——
+ * `group-delete`（按 memoryIds 收集要删的向量）、`rebuild-vector`、`fts-rebuild`
+ * 都照这批死 id 干活，而且 cache 长期谎报"这篇有 dense 索引"。
+ * hidden → full 补写时 `vectorWriteBack` 会把新 id 写回，不会永久丢记录。
+ */
+function clearDenseIdsInCache(scope: string, group: string, relation: string): void {
+  try {
+    const doc = loadGroupCache(scope, group);
+    const rel = doc?.hot_relations.find((item) => item.text === relation);
+    if (!doc || !rel) return;
+    if (!rel.memoryIds?.length && !rel.memoryId) return;
+    delete rel.memoryIds;
+    delete rel.memoryId;
+    writeGroupCache(scope, group, doc);
+  } catch (err) {
+    // 清不掉只是 cache 不准确（下次删除仍能靠正文重算兜住），不能因此判摘除失败
+    console.warn(`[visibility] 清理过期内容向量 id 失败（${group}/${relation}）：${(err as Error).message}`);
+  }
+}
+
+/**
  * 单文档档位切换。调用方必须已持 scope 写锁（本函数不自己加锁）。
  *
  * 失败语义：**摘除失败也把档位标记为 `to`** —— 宁可"声明已隐藏但索引残留"被诊断发现，
@@ -337,7 +410,61 @@ async function applyVisibilityCore(args: ApplyArgs, ctx: ApplyContext): Promise<
       try {
         const res = await vectorDelete({ scope: args.scope, ids });
         if (res.errors.length > 0) throw new Error(res.errors[0].reason);
-        removed.push(kind);
+        let deleted = res.deleted;
+        /**
+         * ★ 必须核对「库里是否真的没有这篇的内容向量」，不能只看 errors：
+         * `vectorDelete` 对不存在的 docId 不报错，`deleted === 0` 时过去照样记成功 ——
+         * 实测后果是「声明 hidden，但 ki_search 仍能召回该文档」
+         * （`.debug/delete-vector-residual-20261116` E-04）。
+         * cache 的 ids 一旦过期（补写失败 / tag 变更 / 写入形态切换），
+         * 库里可能还挂着同内容的另一个 docId，只有「正文重算」与「检索比对」能挖出来。
+         */
+        let denseUnverified = false;
+        if (deleted < ids.length) {
+          // 一次读同组 KB：本篇正文（重算 docId）+ 兄弟文档正文（排除公共段落误判）
+          const groupKb = (() => {
+            try {
+              return readJson<Record<string, unknown>>(getLocalKbDir(args.scope, args.group)) ?? {};
+            } catch {
+              return {} as Record<string, unknown>;
+            }
+          })();
+          const body = extractKbBody(groupKb[args.relation]);
+          if (body) {
+            const extra = recomputeContentVectorIds(args.scope, body, rel?.tags).filter((id) => !ids.includes(id));
+            if (extra.length > 0) {
+              const res2 = await vectorDelete({ scope: args.scope, ids: extra });
+              if (res2.errors.length > 0) throw new Error(res2.errors[0].reason);
+              deleted += res2.deleted;
+            }
+          }
+          // 「一条都没删到」才是 cache 全过期的实锤（实测泄漏场景）→ 检索比对补齐。
+          // 部分命中时不做：那说明向量确实存在且已删掉一部分，剩余多是不存在的陈旧 id，
+          // 为它付一次 embedding 会让每次阶段流转都变慢。
+          if (deleted === 0) {
+            // 检索需要 embedding：向量不可用时先 fastFail，别把绑定/解绑接口拖到超时
+            // （与上方 relation / path 摘除同一口径）。
+            if (!(await ensureVector())) {
+              denseUnverified = true;
+            } else {
+              const siblingBodies = Object.entries(groupKb)
+                .filter(([key]) => key !== args.relation)
+                .map(([, raw]) => extractKbBody(raw))
+                .filter((item): item is string => Boolean(item));
+              const fallback = await deleteContentVectorsBySearch(args.scope, args.relation, body, {
+                tags: rel?.tags,
+                siblingBodies,
+              });
+              if (fallback.error) throw new Error(fallback.error);
+              deleted += fallback.deleted;
+            }
+          }
+        }
+        if (denseUnverified) skipped.push({ kind, reason: 'vector-unavailable' });
+        else {
+          clearDenseIdsInCache(args.scope, args.group, args.relation);
+          removed.push(kind);
+        }
       } catch (err) {
         failed.push(kind);
         failedDetails.push({ kind, error: (err as Error).message });
@@ -379,10 +506,23 @@ async function applyVisibilityCore(args: ApplyArgs, ctx: ApplyContext): Promise<
         skipped.push({ kind, reason: 'vector-unavailable' });
         continue;
       }
-      const res = await deletePathVector(buildRelationContent(args.relation, args.group), 'ki-relation', args.scope);
-      if (res.ok) removed.push(kind);
+      // 与 delete-relation 同源（relation-path-vector）：单条 + 分块 `relation-NN` + 历史形态。
+      // 过去这里只走 deletePathVector（按纯名检索），分块导入的文档 hidden 后 `relation-01`
+      // 摘不掉 ⇒ 按关系名仍可被召回。
+      const groupDoc = ctx.caches.get(args.group);
+      const relVec = await removeRelationPathVectors({
+        scope: args.scope,
+        relation: args.relation,
+        group: args.group,
+        contentVectorCount: Math.max(0, (rel?.memoryIds?.length ?? 0) - (rel?.tags?.length ?? 0)),
+        siblingNames: new Set((groupDoc?.hot_relations ?? [])
+          .map((item) => item.text)
+          .filter((name) => name !== args.relation)),
+      });
+      // `missing` = 三种形态都查过且库里没有（上一轮已摘 / 本来就没写）⇒ 视为已清理
+      if (relVec.removed || relVec.missing) removed.push(kind);
       else {
-        const error = res.error ?? 'unknown';
+        const error = relVec.reason ?? 'unknown';
         failed.push(kind);
         failedDetails.push({ kind, error });
         recordFailure(args.scope, {

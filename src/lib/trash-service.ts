@@ -62,7 +62,7 @@ export type MoveToTrashOutcome =
 export function moveToTrash(args: MoveToTrashArgs): MoveToTrashOutcome {
   const now = args.now ?? Date.now();
   try {
-    const content = readLocalKbContent(args.scope, args.group, args.relation);
+    const content = readKbRelationContent(args.scope, args.group, args.relation);
     /**
      * 正文为空 → **拒绝进站**（fail-closed）。
      *
@@ -96,8 +96,14 @@ export function moveToTrash(args: MoveToTrashArgs): MoveToTrashOutcome {
   }
 }
 
-/** 读 local KB 里某文档的原文（结构：`{ [relation]: string | { moduleInfo | content } }`） */
-function readLocalKbContent(scope: string, group: string, relation: string): string {
+/**
+ * 读 local KB 里某文档的原文（结构：`{ [relation]: string | { moduleInfo | content } }`）。
+ *
+ * 导出消费方：`delete-relation`（删前重算内容向量 docId）与 `visibility-index`
+ * （摘除补救）。两处都必须在「KB 已被删除」之前调用 —— 正文是 docId 的唯一可重算来源。
+ * 缺省返回空串表示「KB 中没有该条」，调用方据此决定是否放弃重算。
+ */
+export function readKbRelationContent(scope: string, group: string, relation: string): string {
   // getLocalKbDir 返回的就是 index.json 文件路径，不能再 join 一次（否则变成 index.json/index.json）
   const kbPath = getLocalKbDir(scope, group);
   const kb = readJson<Record<string, unknown>>(kbPath);
