@@ -1327,7 +1327,7 @@ export interface OptimizeIndexOptions {
 }
 
 export type OptimizeIndexOutcome =
-  | { ok: true; wallMs: number }
+  | { ok: true; wallMs: number; skipped?: 'collection-missing' }
   | { ok: false; degraded: 'timeout' | 'unavailable' | 'error'; reason: string; waitedMs: number };
 
 export async function optimizeVectorIndex(
@@ -1338,12 +1338,23 @@ export async function optimizeVectorIndex(
   const startedAt = Date.now();
   // ★ 必须包在 async IIFE 内：`withEngine` 可能在返回 Promise **之前**同步抛错
   //   （如 scope 校验失败），裸 `.catch()` 接不住 ⇒ 违反本函数"不抛错"的契约。
-  const work = (async () => {
+  type WorkResult = { ok: true; skipped?: 'collection-missing'; error: undefined } | { ok: false; error: string };
+  const work = (async (): Promise<WorkResult> => {
     try {
+      /**
+       * 库不存在 ⇒ 没有可整理的索引，直接按"无操作成功"返回。
+       *
+       * 不能直接 `withEngine`：`getEngine` 的 create 自愈会为它**建出一个空库并登记常驻句柄**
+       * （与 `vectorDelete` 同源，见 REQ-20261117-001 的实证：不存在的 scope 被建出 5 项目录），
+       * 且空库一旦建出，`scopeCollectionExists` 从此返回 true，「该 scope 从未初始化」被永久掩盖。
+       * 守卫放在 try 内：`scopeCollectionExists` 自己会抛（scope 非法 / 迁移未完成），
+       * 与改动前 `getEngine` 抛出同一条错误、同样被归一为 degraded，不构成回归。
+       */
+      if (isCollectionAbsent(scope)) return { ok: true, skipped: 'collection-missing', error: undefined };
       await withEngine(scope, (engine) => engine.optimize(concurrency !== undefined ? { concurrency } : undefined));
-      return { ok: true as const, error: undefined as string | undefined };
+      return { ok: true, error: undefined };
     } catch (err) {
-      return { ok: false as const, error: (err as Error).message };
+      return { ok: false, error: (err as Error).message };
     }
   })();
   const outcome = await withTimeoutFallback(
@@ -1361,7 +1372,7 @@ export async function optimizeVectorIndex(
     const unavailable = /LOCKED|锁|被其他进程占用|CORRUPT|NOT_FOUND/i.test(reason);
     return { ok: false, degraded: unavailable ? 'unavailable' : 'error', reason, waitedMs };
   }
-  return { ok: true, wallMs: waitedMs };
+  return { ok: true, wallMs: waitedMs, ...(outcome.value.skipped ? { skipped: outcome.value.skipped } : {}) };
 }
 
 /**
@@ -1536,7 +1547,7 @@ export async function vectorDelete(params: {
    * 删除不需要 —— 且空库一旦建出，`scopeCollectionExists` 从此返回 true，
    * 「该 scope 从未初始化」这一事实就被掩盖了。判据与 `vectorDeleteScope` 同口径。
    */
-  if (!scopeCollectionExists(scope)) {
+  if (isCollectionAbsent(scope)) {
     return normalizeVectorDeleteResult(ids, {
       ok: 0,
       failed: 0,
@@ -1583,22 +1594,54 @@ function buildScopeTagFilter(scopes: string[], tags?: string[]): Filter {
 
 /** 只读路径使用：不存在/空 Collection 视为空 scope，避免查询意外创建新库。 */
 /**
- * 该 scope 的 dense collection 是否已存在。
+ * 该 scope 的 dense collection 是否已存在（且看起来是一个**真的集合**）。
  *
  * 导出给「按 id 删除」的调用方做前置判断：`vectorDelete` 走 `withEngine`，
  * 对不存在的 collection 会**打开/创建**一个空库（进程内留下常驻句柄，脚本与单测因此不退出），
  * 而「库里没有这个 scope」本身就等价于「没有可删的向量」。
+ *
+ * ★ 判据是「目录内有 zvec 布局文件（`manifest*` / `idmap*`）」，不是「目录非空」：
+ * 目录里落一个无关文件（拷贝残留、手工 touch）时，非空判据会把它当成集合 ⇒ 删除/整理进引擎
+ * ⇒ probe 对非集合目录 3s 超时被误判 locked ⇒ 报「被其他进程占用或存在崩溃残留」并白重试 6s。
+ *
+ * ⚠️ 该判据依赖 zvec 的磁盘布局。升级 zvec 后若这两个前缀都改名，判据会退化成 false
+ * （删除/整理变静默 no-op）——`test/vector-optimize-no-create.test.ts` 用真实建库断言
+ * 「真集合判为 true」，用来守住这条依赖。
+ *
+ * 读路径（listDocs / fetchDocs / listTags / dbStats 等）也用本函数做前置判断：集合正在创建、
+ * 布局文件尚未落盘的那一瞬间会被判为「无库」→ 读返回空（此前是进引擎 open，可能报错或阻塞）。
+ * 属"保守返回空"而非"返回错误"，但确实是行为差异，改判据时须留意。
  */
 export function scopeCollectionExists(scope: string): boolean {
   assertNoPendingVectorMigration(scope);
   const config = loadConfig();
   const dbPath = getScopeCollectionPath(config, scope);
+  let entries: string[];
   try {
-    return fs.statSync(dbPath).isDirectory() && fs.readdirSync(dbPath).length > 0;
+    if (!fs.statSync(dbPath).isDirectory()) return false;
+    entries = fs.readdirSync(dbPath);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw err;
   }
+  return entries.some((name) => name === 'manifest' || name.startsWith('manifest.')
+    || name === 'idmap' || name.startsWith('idmap.'));
+}
+
+/**
+ * 「没有可操作的 Collection」判据：删除 / 整理这类**无需自愈建库**的操作据此短路。
+ *
+ * 两个条件必须同时成立：
+ *  1. 磁盘上该 scope 的 Collection 不存在；
+ *  2. 本进程**没有已打开的句柄**。
+ *
+ * 第 2 条不能省：有句柄说明这个库曾经存在（典型是 daemon 配置的向量路径中途漂移，
+ * `getEngine` 命中缓存时靠 `DAEMON_IDENTITY_DRIFT` 把这种情况显式报出来）。
+ * 只看磁盘会让这类「库其实还在、只是路径对不上」的故障被静默当成「从来没有过」，
+ * 把原本 fail-loud 的保护吞掉。
+ */
+export function isCollectionAbsent(scope: string): boolean {
+  return !_enginePromises.has(scope) && !scopeCollectionExists(scope);
 }
 
 /**
@@ -1944,7 +1987,7 @@ export async function vectorDeleteScope(
   onProgress?: (deleted: number) => void
 ): Promise<{ deleted: number; remaining?: number }> {
   validateScope(params.scope);
-  if (!scopeCollectionExists(params.scope)) return { deleted: 0 };
+  if (isCollectionAbsent(params.scope)) return { deleted: 0 };
   const filter = buildScopeTagFilter([params.scope], params.tags);
   return withEngine(params.scope, async (engine) => {
     let total = 0;

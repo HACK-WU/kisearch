@@ -15,7 +15,7 @@
  * （`delete-relation` 有 otherHolders 判定，`visibility-index` 有 hasOtherHoldersIn）。
  */
 
-import { generateDocId, vectorDelete, vectorSearch, scopeCollectionExists } from './vector-client.js';
+import { generateDocId, vectorDelete, vectorSearch, isCollectionAbsent } from './vector-client.js';
 import { buildRelationContent } from './path-vectorize.js';
 
 const RELATION_TAG = 'ki-relation';
@@ -86,7 +86,9 @@ export async function removeRelationPathVectors(
   const contentCount = Math.max(0, params.contentVectorCount ?? 0);
   // 库不存在 ⇒ 没有路径向量可清。`vectorDelete` 内部已对空 collection 短路（不再建库），
   // 这里提前返回是为了**省掉后面那次检索兜底**，并保持「本来就没有」不带 reason 的语义。
-  if (!scopeCollectionExists(params.scope)) return { removed: false, deleted: 0, missing: true };
+  // 判据与 vectorDelete 共用 `isCollectionAbsent`（含「本进程有活句柄则不短路」，
+  // 免得把 daemon 的向量路径漂移误当「从来没建过库」而静默跳过）。
+  if (isCollectionAbsent(params.scope)) return { removed: false, deleted: 0, missing: true };
   const candidateIds = relationPathVectorIds(params);
 
   let deleted = 0;
