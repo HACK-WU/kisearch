@@ -11,7 +11,7 @@
  * 运行：npx jiti test/events/find-runner.test.ts
  */
 
-import { after, before, describe, it } from 'node:test';
+import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,7 +25,12 @@ import type { KiConfig } from '../../src/lib/config.js';
 import { defaultFindConfig } from '../../src/lib/chat/prompt-config.js';
 import { createEvent } from '../../src/lib/events/event-service.js';
 import { addRefs } from '../../src/lib/events/refs-service.js';
-import { runDeepFind, type DeepFindDeps } from '../../src/lib/events/find-runner.js';
+import {
+  deepFindConcurrency,
+  resetFindConcurrencyForTest,
+  runDeepFind,
+  type DeepFindDeps,
+} from '../../src/lib/events/find-runner.js';
 import { runDeepFindAsSearchResult } from '../../src/lib/events/find-service.js';
 import { GovernanceError } from '../../src/lib/governance-errors.js';
 import type { ChatTurn, LlmStatus, StreamPart } from '../../src/lib/chat/llm-client.js';
@@ -103,6 +108,11 @@ function deps(over: Partial<DeepFindDeps> & { stream: DeepFindDeps['llm'] } ): D
   };
 }
 
+// 并发限制是模块级状态：每个用例前复位，否则前一个用例收窄的上限会漏给下一个
+beforeEach(() => {
+  resetFindConcurrencyForTest();
+});
+
 before(() => {
   registerTestScope(scope);
   initScope(scope);
@@ -117,6 +127,7 @@ before(() => {
 });
 
 after(() => {
+  resetFindConcurrencyForTest();
   const kbDir = getKbDir(scope);
   if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
   cleanupTestConfig();
@@ -150,8 +161,75 @@ describe('① 门禁', () => {
     );
   });
 
-  it('同一事件并发 → FIND_BUSY（直接拒绝，不复用）', async () => {
+  it('同一事件并发 → 排队执行（不拒绝），先到的先跑、后到的等它结束', async () => {
     const ev = await createEvent(scope, { title: '并发验证', typeId: 'et_1' });
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let firstDone = false;
+    const hanging = async function* (): AsyncGenerator<StreamPart> {
+      await gate;
+      firstDone = true;
+      yield { type: 'content', text: '[]' };
+    };
+    const first = runDeepFind(scope, ev.id, deps({ stream: { stream: hanging, status: () => okStatus() } }));
+    // 第二个请求此刻应处于排队（既不抛错，也还没开始跑）
+    const second = runDeepFind(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } }));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(deepFindConcurrency().queued, 1, '同事件的第二个请求应在排队，而不是被拒绝');
+    assert.equal(firstDone, false, '第一个还没结束，第二个不能抢跑');
+    release();
+    const [r1, r2] = await Promise.all([first, second]);
+    assert.equal(r1.candidates.length, 0);
+    assert.equal(r2.candidates.length, 0, '排队后应正常执行并返回，而不是 409');
+  });
+
+  it('队列满 → FIND_BUSY；排队超时 → FIND_QUEUE_TIMEOUT', async () => {
+    resetFindConcurrencyForTest();
+    const ev = await createEvent(scope, { title: '队列上限验证', typeId: 'et_1' });
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const hanging = async function* (): AsyncGenerator<StreamPart> {
+      await gate;
+      yield { type: 'content', text: '[]' };
+    };
+    const first = runDeepFind(scope, ev.id, deps({
+      stream: { stream: hanging, status: () => okStatus() },
+      limits: { maxConcurrent: 1, queueMax: 0 },
+    }));
+    await new Promise((r) => setTimeout(r, 10));
+    await assert.rejects(
+      () => runDeepFind(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } })),
+      (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_BUSY',
+      '队列容量为 0 时应直接拒绝（不是无限堆积）',
+    );
+    release();
+    await first;
+
+    // 排队超时：容量 1、队列 1、等待 60ms → 第二个必然等超时
+    resetFindConcurrencyForTest();
+    let release2 = (): void => {};
+    const gate2 = new Promise<void>((resolve) => { release2 = resolve; });
+    const hanging2 = async function* (): AsyncGenerator<StreamPart> {
+      await gate2;
+      yield { type: 'content', text: '[]' };
+    };
+    const third = runDeepFind(scope, ev.id, deps({
+      stream: { stream: hanging2, status: () => okStatus() },
+      limits: { maxConcurrent: 1, queueMax: 2, queueWaitMs: 60 },
+    }));
+    await new Promise((r) => setTimeout(r, 10));
+    await assert.rejects(
+      () => runDeepFind(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } })),
+      (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_QUEUE_TIMEOUT',
+    );
+    release2();
+    await third;
+  });
+});
+
+describe('①b 排队中的中止', () => {
+  it('排队时前端断开 → FIND_CANCELED，且不占队列（不能留下幽灵等待）', async () => {
+    const ev = await createEvent(scope, { title: '排队中止验证', typeId: 'et_1' });
     let release = (): void => {};
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const hanging = async function* (): AsyncGenerator<StreamPart> {
@@ -159,12 +237,53 @@ describe('① 门禁', () => {
       yield { type: 'content', text: '[]' };
     };
     const first = runDeepFind(scope, ev.id, deps({ stream: { stream: hanging, status: () => okStatus() } }));
+    const ctrl = new AbortController();
+    const second = runDeepFind(scope, ev.id, deps({
+      stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() },
+      signal: ctrl.signal,
+    }));
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(deepFindConcurrency().queued, 1);
+    ctrl.abort();
     await assert.rejects(
-      () => runDeepFind(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } })),
-      (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_BUSY',
+      () => second,
+      (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_CANCELED',
     );
+    assert.equal(deepFindConcurrency().queued, 0, '中止后必须出队');
     release();
     await first;
+  });
+});
+
+describe('①c 跨事件并发闸门', () => {
+  it('执行位占满时，另一个事件要排队（不是直接跑）', async () => {
+    const evA = await createEvent(scope, { title: '并发 A', typeId: 'et_1' });
+    const evB = await createEvent(scope, { title: '并发 B', typeId: 'et_1' });
+    let releaseA = (): void => {};
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+    const hangingA = async function* (): AsyncGenerator<StreamPart> {
+      await gateA;
+      yield { type: 'content', text: '[]' };
+    };
+    // 只用 1 个执行位：B 必须排队（两者 key 不同，排队原因只能是容量）
+    const a = runDeepFind(scope, evA.id, deps({
+      stream: { stream: hangingA, status: () => okStatus() },
+      limits: { maxConcurrent: 1, queueMax: 4, queueWaitMs: 5_000 },
+    }));
+    await new Promise((r) => setTimeout(r, 20));
+    let bStarted = false;
+    const bStream = async function* (): AsyncGenerator<StreamPart> {
+      bStarted = true;
+      yield { type: 'content', text: '[]' };
+    };
+    const b = runDeepFind(scope, evB.id, deps({ stream: { stream: bStream, status: () => okStatus() } }));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(deepFindConcurrency().active, 1, '执行位只有一个');
+    assert.equal(deepFindConcurrency().queued, 1, '不同事件在容量不足时也要排队');
+    assert.equal(bStarted, false, 'B 不能抢跑');
+    releaseA();
+    await Promise.all([a, b]);
+    assert.equal(bStarted, true, 'A 结束后 B 应被放行');
   });
 });
 
@@ -305,6 +424,31 @@ describe('⑤ 超时', () => {
     } finally {
       clearTimeout(keepAlive);
     }
+  });
+});
+
+describe('⑤b 检索模式聚合', () => {
+  it('模型请求 hybrid 但引擎实际降级为全文 → 聚合 mode 必须是 fulltext（不许照抄入参）', async () => {
+    const ev = await createEvent(scope, { title: '降级模式验证', typeId: 'et_1' });
+    const script = scriptedStream([
+      { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
+      { text: '[]' },
+    ]);
+    const r = await runDeepFindAsSearchResult(scope, ev.id, deps({
+      stream: { stream: script.fn, status: () => okStatus() },
+      // 引擎如实返回 mode=fulltext（语义侧不可用）
+      search: async () => ({ results: [], mode: 'fulltext' as const }),
+    }));
+    assert.equal(r.mode, 'fulltext', '降级必须如实透出，否则面板会把全文检索显示成语义+全文');
+  });
+
+  it('未发生任何检索时不声称降级（按 hybrid）', async () => {
+    const ev = await createEvent(scope, { title: '无检索验证', typeId: 'et_1' });
+    const script = scriptedStream([{ text: '[]' }]);
+    const r = await runDeepFindAsSearchResult(scope, ev.id, deps({
+      stream: { stream: script.fn, status: () => okStatus() },
+    }));
+    assert.equal(r.mode, 'hybrid');
   });
 });
 

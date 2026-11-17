@@ -114,7 +114,8 @@ describe('④ 二期双通道 UI 标记（REQ-20261116-005 · B8）', () => {
     assert.ok(s.includes('onClick={stop}'), '深度查找必须有停止');
     assert.ok(s.includes('partial: result.partial'), '结果不完整必须如实透给面板');
     assert.ok(s.includes('parsed: result.parsed'), '模型未给出可解析结果要与"没有相关文档"分开');
-    assert.ok(s.includes("mode === 'deep' ? 75_000 : 15_000"), '深度通道客户端超时要比后端硬超时更长');
+    // 客户端超时必须覆盖「排队 20s + 执行 60s」两端，否则后端还在等、前端先报超时
+    assert.ok(s.includes("mode === 'deep' ? 95_000 : 15_000"), '深度通道客户端超时要覆盖排队 + 执行');
   });
 
   it('过程面板为 tools / verify 两步给出人话文案，且提示不完整', () => {

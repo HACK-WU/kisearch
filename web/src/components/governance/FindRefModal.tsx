@@ -98,11 +98,14 @@ export function FindRefModal(args: FindRefModalProps): JSX.Element {
     setSubmitError('');
     setStopped(false);
     try {
-      // 深度通道要等模型多轮工具调用：客户端超时给到后端硬超时之上（75s > 60s 上限）
+      /*
+       * 深度通道的三段耗时相加：排队上限 20s + 执行硬超时 60s + 余量。
+       * 客户端超时必须比后端更宽，否则后端还没放弃、前端先报"请求超时"（旧值 75s 不够排队）。
+       */
       const r = await findRefCandidates(args.scope, args.eventId, {
         mode,
         signal: ctrl.signal,
-        timeoutMs: mode === 'deep' ? 75_000 : 15_000,
+        timeoutMs: mode === 'deep' ? 95_000 : 15_000,
       });
       if (ctrl.signal.aborted) return;
       setResult(r);
@@ -219,7 +222,7 @@ export function FindRefModal(args: FindRefModalProps): JSX.Element {
         <div className="gov-modal__body">
           {state === 'loading' && mode === 'deep' ? (
             <div className="gov-hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span>正在深度查找（模型多轮检索，最长约 75 秒）…</span>
+              <span>正在深度查找（模型多轮检索，最长约 1 分半；同一事件会排队）…</span>
               <button type="button" className="gov-btn gov-btn--ghost gov-btn--sm" onClick={stop}>
                 停止
               </button>

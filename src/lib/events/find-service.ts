@@ -65,7 +65,8 @@ export async function runDeepFindAsSearchResult(
     }
     return c;
   };
-  const totalByScope = countDocsByTargets(deps.targets, { viewMembers: viewMembersOf, cachesOf });
+  // 去重后再统计：重复 target 会把同一库算两遍，`total` 随之偏大（HTTP 层已去重，这里兜底）
+  const totalByScope = countDocsByTargets([...new Set(deps.targets)], { viewMembers: viewMembersOf, cachesOf });
   const total = totalByScope.reduce((sum, x) => sum + x.docs, 0);
 
   // `excluded` 对外只暴露**文档名**（与快速通道同口径，前端拿它做"已排除"提示）
@@ -78,11 +79,11 @@ export async function runDeepFindAsSearchResult(
     excluded: { associated: members, added },
     total,
     totalByScope,
-    targets: deps.targets,
+    targets: [...new Set(deps.targets)],
     durationMs: Date.now() - started,
     query: result.query,
-    // 深度通道两路检索都会用到，取 hybrid 作代表；真实降级情况由步骤 metrics 体现
-    mode: 'hybrid',
+    // 由 runner 按轮次聚合：全部轮次都走全文才算 fulltext（面板据此如实显示"仅全文"）
+    mode: result.mode,
     // 无候选一律 next-best：模型没给出可解析结果时靠 `parsed:false` 区分，不冒充"没有相关文档"
     ...(result.candidates.length === 0 ? { reason: 'no-hits' as const } : {}),
     ...(result.partial ? { partial: result.partial } : {}),

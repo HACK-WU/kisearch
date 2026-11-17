@@ -105,6 +105,8 @@ export const GOVERNANCE_CODE_NUMBERS = {
   FIND_TIMEOUT: 1426,
   /** 用户中止（前端已关闭，仅用于把 abort 与超时区分开） */
   FIND_CANCELED: 1427,
+  /** 排队等待超过上限（同事件串行；不无限等） */
+  FIND_QUEUE_TIMEOUT: 1428,
 
   /** 通用 / 传输层（1500-1599）── */
   /** Token 无权访问该 scope（HTTP 层 403；**不复用** DATASOURCE_LIFECYCLE_LOCKED，
@@ -154,6 +156,7 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   FIND_QUOTA_EXCEEDED: 429,
   FIND_TIMEOUT: 504,
   FIND_CANCELED: 499,
+  FIND_QUEUE_TIMEOUT: 429,
   REVISION_CONFLICT: 409,
   RESTORE_NAME_CONFLICT: 409,
   REF_LIMIT_EXCEEDED: 409,

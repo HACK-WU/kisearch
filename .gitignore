@@ -50,3 +50,4 @@ web/dist/
 temp/
 
 AGENTS.md 
+__pycache__/

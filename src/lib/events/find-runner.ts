@@ -9,8 +9,8 @@
  * 2. **候选必须三重校验**：范围 → 存在性 → 未已用，任一不过进 `unconfirmed` 并剔除。
  * 3. **预算硬约束**：轮次 / 候选数 / 硬超时；超时有候选返回 `partial`，无候选抛
  *    `FIND_TIMEOUT`（不返回空成功）。
- * 4. **同步、一次性**：同一 `(scope, eventId)` 同时只允许 1 个深度查找（`FIND_BUSY`
- *    直接拒绝，不复用 —— 复用会让两个人看到同一份进行中结果）。
+ * 4. **同步 + 排队**：不同事件可并行（默认 3 个），**同一 `(scope, eventId)` 串行排队**
+ *    （复用会让两个人看到同一份进行中结果，所以排队而不是复用）。队列满 / 等待超时才拒绝。
  */
 
 import { loadConfig, runWithConfigSnapshot, type KiConfig } from '../config.js';
@@ -62,19 +62,142 @@ const SYSTEM_OUTPUT_TAIL = `【系统输出与安全规范（不可覆盖）】
 你只能读，不能修改、创建、删除任何文档，也不能执行命令。
 必须遵守：候选只能来自检索结果里真实出现过的 group 与文档名；不确定就写"仅语义相近"。`;
 
-interface ActiveDeepRun {
-  startedAt: number;
+// ─── 并发与排队（REQ-20261116-005 二期）────────────────────────────
+
+/**
+ * 跨事件并行执行上限。
+ *
+ * 为什么不是 1：不同事件之间没有共享状态（各自的 events / refs / 分片），限制成 1 只会
+ * 让两个人互相等。真实瓶颈在下面两层，这里只是"别让一次点 20 个把上游打满"。
+ *   ① 工具调用：`OperationCoordinator` 的 read 车道（`maxWorkers = min(4, CPU)`）本来就会排队；
+ *   ② 上游模型：每次 `streamChat` 独立 HTTP 请求，无全局池化。
+ */
+export const FIND_MAX_CONCURRENT = 3;
+/** 等待队列上限（跨所有事件合计）；满了直接拒绝，不让请求无限堆积 */
+export const FIND_QUEUE_MAX = 8;
+/** 单次排队等待上限；超过即放弃（客户端不会为此无限等） */
+export const FIND_QUEUE_WAIT_MS = 20_000;
+
+interface FindWaiter {
+  key: string;
+  resolve: () => void;
+  reject: (err: unknown) => void;
 }
 
-const activeDeepRuns = new Map<string, ActiveDeepRun>();
+/**
+ * 运行时限制（模块级：生产恒为默认值；单测可用 `deps.limits` 临时收窄）。
+ * 放在模块级是因为 `pump` 需要在不带参数的情况下做调度。
+ */
+const findLimits = {
+  maxConcurrent: FIND_MAX_CONCURRENT,
+  queueMax: FIND_QUEUE_MAX,
+  queueWaitMs: FIND_QUEUE_WAIT_MS,
+};
+
+let activeFindRuns = 0;
+const runningKeys = new Set<string>();
+const findWaiters: FindWaiter[] = [];
 
 function runKey(scope: string, eventId: string): string {
   return `deep\u0000${scope}\u0000${eventId}`;
 }
 
-/** 是否有深度查找在跑（供 HTTP 层给前端做禁用提示；不做复用） */
-export function isDeepFindActive(scope: string, eventId: string): boolean {
-  return activeDeepRuns.has(runKey(scope, eventId));
+/**
+ * **仅单测用**：把并发 / 队列限制与运行时状态复位。
+ * 生产不调用（默认值随进程启动固定）。测试之间必须复位，否则前一个用例收窄的上限会漏给下一个。
+ */
+export function resetFindConcurrencyForTest(): void {
+  findLimits.maxConcurrent = FIND_MAX_CONCURRENT;
+  findLimits.queueMax = FIND_QUEUE_MAX;
+  findLimits.queueWaitMs = FIND_QUEUE_WAIT_MS;
+  activeFindRuns = 0;
+  runningKeys.clear();
+  findWaiters.length = 0;
+}
+
+/** 当前并发快照（排障用：前端/日志想知道"卡在队列还是在跑"） */
+export function deepFindConcurrency(): { active: number; max: number; queued: number } {
+  return { active: activeFindRuns, max: findLimits.maxConcurrent, queued: findWaiters.length };
+}
+
+/**
+ * 调度：只要还有空位，就按 FIFO 启动**同一个 key 最早的那个**等待者。
+ * 同 key 串行靠"前面还有同 key 等待者就跳过"实现，而不是另外加锁。
+ */
+function pumpFindQueue(): void {
+  for (let i = 0; i < findWaiters.length; ) {
+    const w = findWaiters[i]!;
+    const sameKeyEarlier = findWaiters.slice(0, i).some((x) => x.key === w.key);
+    if (activeFindRuns >= findLimits.maxConcurrent || runningKeys.has(w.key) || sameKeyEarlier) {
+      i += 1;
+      continue;
+    }
+    findWaiters.splice(i, 1);
+    activeFindRuns += 1;
+    runningKeys.add(w.key);
+    w.resolve();
+  }
+}
+
+/**
+ * 取一个执行槽位（必要时排队）。
+ *
+ * @param signal 前端断开时出队并中止，避免"用户早关页面了还在排"
+ */
+async function acquireFindSlot(key: string, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new GovernanceError('FIND_CANCELED', '查找已被中止');
+  // 有空位且没有同 key 在跑/在等 → 直接跑，不进队列（省掉一次微任务与定时器）
+  if (!runningKeys.has(key) && !findWaiters.some((w) => w.key === key) && activeFindRuns < findLimits.maxConcurrent) {
+    activeFindRuns += 1;
+    runningKeys.add(key);
+    return;
+  }
+  if (findWaiters.length >= findLimits.queueMax) {
+    throw new GovernanceError(
+      'FIND_BUSY',
+      `深度查找队列已满（最多 ${findLimits.queueMax} 个排队），请稍后再试或改用快速查找`,
+      { active: activeFindRuns, max: findLimits.maxConcurrent, queued: findWaiters.length },
+    );
+  }
+  await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    let settled = false;
+    /*
+     * 三种结局（出队执行 / 排队超时 / 前端断开）都必须走同一个 `settle`：
+     * 任一出口漏了出队，队列里就会留下一具"幽灵"，把位置占死到进程重启。
+     */
+    const settle = (finalize: () => void): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
+      const idx = findWaiters.indexOf(waiter);
+      if (idx >= 0) findWaiters.splice(idx, 1);
+      finalize();
+    };
+    const waiter: FindWaiter = {
+      key,
+      resolve: () => settle(resolve),
+      reject: (err) => settle(() => reject(err)),
+    };
+    timer = setTimeout(() => {
+      waiter.reject(new GovernanceError(
+        'FIND_QUEUE_TIMEOUT',
+        `排队等待超过 ${Math.round(findLimits.queueWaitMs / 1000)} 秒，请稍后再试或改用快速查找`,
+      ));
+    }, findLimits.queueWaitMs);
+    onAbort = (): void => waiter.reject(new GovernanceError('FIND_CANCELED', '查找已被中止'));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    findWaiters.push(waiter);
+    pumpFindQueue();
+  });
+}
+
+function releaseFindSlot(key: string): void {
+  runningKeys.delete(key);
+  activeFindRuns = Math.max(0, activeFindRuns - 1);
+  pumpFindQueue();
 }
 
 export interface UnconfirmedCandidate {
@@ -98,6 +221,12 @@ export interface DeepFindResult {
   unconfirmedCount: number;
   /** 模型输出不可解析时置 false（前端据此显示"模型未给出可解析结果"而不是"没有相关文档"） */
   parsed: boolean;
+  /**
+   * 本次所有检索轮次的**聚合检索模式**：
+   * 全部轮次都走全文 → `fulltext`（面板必须如实显示"仅全文"）；只要有一轮走了语义 → `hybrid`。
+   * 没有任何检索（模型直接凭清单判断）也按 `hybrid`（不声称降级）。
+   */
+  mode: 'hybrid' | 'fulltext';
 }
 
 export interface DeepFindDeps {
@@ -119,6 +248,11 @@ export interface DeepFindDeps {
   viewMembers?: (name: string) => string[] | null;
   /** 前端断开时中止（与硬超时共用 signal，靠 `timedOut` 标记区分终态） */
   signal?: AbortSignal;
+  /**
+   * **仅单测用**：把并发 / 队列上限收窄到可测规模（生产不传 = 默认值）。
+   * 不放进 `FindConfig`：这是部署侧容量参数，不该成为用户在设置页能改的东西。
+   */
+  limits?: { maxConcurrent?: number; queueMax?: number; queueWaitMs?: number };
   nowFn?: () => number;
 }
 
@@ -279,10 +413,12 @@ export async function runDeepFind(
   }
 
   const key = runKey(scope, event.id);
-  if (activeDeepRuns.has(key)) {
-    throw new GovernanceError('FIND_BUSY', '这个事件的深度查找正在进行中，请等它结束或改用快速查找');
-  }
-  activeDeepRuns.set(key, { startedAt });
+  /*
+   * 并发/排队：**同事件串行排队**（不是拒绝）。限制用模块级对象是为了让 `pump` 能无参调度；
+   * `deps.limits` 仅供单测把上限收窄到可测规模，生产永远不传。
+   */
+  if (deps.limits) Object.assign(findLimits, deps.limits);
+  await acquireFindSlot(key, deps.signal);
 
   const controller = new AbortController();
   const onOuterAbort = (): void => controller.abort();
@@ -391,6 +527,10 @@ export async function runDeepFind(
      * 会把新一批追加进来，用"首次出现顺序"当名次会得到与契约（分数名次）不符的值。
      */
     const hitScores = new Map<string, number>();
+
+    /** 本次检索轮次的模式足迹：用于给出**聚合后**的 `mode`，而不是写死 hybrid */
+    let sawHybridSearch = false;
+    let sawFulltextSearch = false;
 
     const toolDefs: ToolDef[] = [];
     if (enabledTools.includes('ki_search')) {
@@ -518,6 +658,13 @@ export async function runDeepFind(
             ? await deps.search({ scope: multiScope, query: queryText, mode, limit })
             : await runScopedRead('ki_search', () =>
                 withTimeout(executeSearch({ scope: multiScope, query: queryText, mode, limit }), TOOL_TIMEOUT.WRITE, 'ki_search'));
+          /*
+           * ★ 记**实际**模式而不是模型请求的：`executeSearch` 在语义侧不可用时会降级为全文，
+           *   若照抄入参，面板就会把一次降级检索显示成"语义+全文"—— 正是 `mode` 字段要防的事。
+           */
+          const actualMode = (res as { mode?: 'hybrid' | 'fulltext' }).mode ?? mode;
+          if (actualMode === 'fulltext') sawFulltextSearch = true;
+          else sawHybridSearch = true;
           const hits = (res as { results?: Array<{ scope?: string; group?: string; relation?: string; score?: number }> }).results ?? [];
           for (const h of hits) {
             if (!h.group || !h.relation || typeof h.score !== 'number') continue;
@@ -861,11 +1008,13 @@ export async function runDeepFind(
         : {}),
       unconfirmedCount: unconfirmed.length,
       parsed: parsed !== null,
+      // 一次深度查找可能混用两种模式：只有**全部**轮次都降级才算 fulltext
+      mode: sawHybridSearch || !sawFulltextSearch ? 'hybrid' : 'fulltext',
     };
   } finally {
     clearTimeout(hardTimer);
     deps.signal?.removeEventListener('abort', onOuterAbort);
-    activeDeepRuns.delete(key);
+    releaseFindSlot(key);
   }
 }
 
