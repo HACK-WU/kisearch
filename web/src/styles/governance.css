@@ -1167,3 +1167,474 @@
 }
 .gov-codeloc__unconfirmed { align-items: flex-start; }
 .gov-modal--wide { width: min(680px, 100%); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   事件详情页改版 · 卡片族与文档区（2026-11-17 · 自 demo D 段迁入）
+   来源：.requirements/2026-11-17-event-detail-redesign/demo/ui/event-detail-redesign/index.html
+   约定：① 只增不改既有 .gov-card / .gov-sect / .gov-docline 全局样式；
+        ② 列表类样式限定在 .gov-doclist / .gov-codelist 容器内；
+        ③ 断点 1080（与 .gov-split 一致）+ 640；暗色靠 ki.css token，仅代码块固定深底。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── demo 控制条（不是产品的一部分） ── */
+/* ── 视图舞台 ── */
+/* 窄屏：与 .gov-split 的单列断点对齐（1080），demo 的容器预演规则不再需要 */
+/* ── 右栏卡片流 ── */
+.gov-dcard-flow { display: flex; flex-direction: column; gap: var(--ki-space-3); min-width: 0; }
+.gov-pane--sticky { position: sticky; top: 0; align-self: start; }
+
+/* ── 卡片外壳：每个区域一张，靠描边+底色分出层次（现状 .gov-sect 无边界） ── */
+.gov-dcard {
+  --gov-tone: var(--ki-color-text-subtle);
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-lg);
+  overflow: hidden;
+}
+/* 卡头底色掺一点区域色相（5%）：既让六个区域一眼可辨，又不至于变成六种主题色 */
+.gov-dcard__head {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 7px var(--ki-space-3);
+  border-bottom: 1px solid var(--ki-color-border);
+  background: color-mix(in srgb, var(--gov-tone) 5%, var(--ki-color-bg-secondary));
+}
+/* 图标块：淡底 + 同色字（不实底，避免破坏「一个强调色锁」）
+   这是「不同区域一眼可辨」的主要手段 —— 色相与图标形状双编码 */
+.gov-dcard__icon {
+  flex: none; width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: var(--ki-radius-tag);
+  font-size: 11px; font-weight: 700; line-height: 1;
+  color: var(--gov-tone);
+  background: color-mix(in srgb, var(--gov-tone) 12%, transparent);
+}
+.gov-dcard__title { font-size: 13px; font-weight: 600; color: var(--ki-color-text); }
+.gov-dcard__hint { font-size: 11px; color: var(--ki-color-text-subtle); }
+.gov-dcard__actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.gov-dcard__body { padding: var(--ki-space-3); display: flex; flex-direction: column; gap: 10px; }
+
+/* 区域色相（只染图标与运行态描边，不染正文） */
+.gov-dcard--summary  { --gov-tone: var(--ki-color-primary); }
+.gov-dcard--analysis { --gov-tone: var(--ki-color-purple); }  /* AI 能力色，与「AI 分析」按钮同色 */
+.gov-dcard--member   { --gov-tone: var(--ki-color-success); }
+.gov-dcard--ref      { --gov-tone: var(--ki-color-purple); }
+
+/* 卡内正在跑 / 有待办：描边提亮 + 外发光（比加背景色更轻，暗色也成立） */
+.gov-dcard--live {
+  border-color: color-mix(in srgb, var(--ki-color-primary) 42%, var(--ki-color-border));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-primary) 8%, transparent);
+}
+
+/* 卡片头状态徽标 */
+.gov-dchip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 6px; border-radius: var(--ki-radius-tag);
+  font-size: 11px; font-weight: 600; line-height: 1.6; white-space: nowrap;
+}
+.gov-dchip--idle { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
+.gov-dchip--run  { color: var(--ki-color-primary); background: var(--ki-color-primary-soft); }
+.gov-dchip--ok   { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 13%, transparent); }
+.gov-dchip--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
+.gov-dchip--err  { color: var(--ki-color-danger);  background: var(--ki-color-danger-soft); }
+
+/* ── 内嵌 AI 面板（替代弹窗）：靠底色分层，不再叠一层描边阴影 ── */
+.gov-ai-embed {
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  overflow: hidden;
+  background: var(--ki-color-bg-secondary);
+}
+.gov-ai-embed .gov-ai-proc { border: 0; border-radius: 0; background: none; }
+/* 折叠行本身就是展开/收起开关：给足 hover 反馈 + 右侧文案，别让人以为只是标题 */
+.gov-ai-embed .gov-ai-proc__head:hover { background: var(--ki-color-hover); }
+.gov-ai-proc__toggle {
+  font-size: 11px; font-weight: 600; color: var(--ki-color-primary);
+  padding: 0 2px; white-space: nowrap;
+}
+/* 分析过程区**固定高度**：步骤再多也不向下长高，超出即内部滚动（跑完自动折叠）。
+   AI 查找是秒级确定性检索，用 --auto 变体只封上限，避免大片空白。 */
+.gov-ai-embed__scroll { height: 160px; overflow-y: auto; overscroll-behavior: contain; }
+.gov-ai-embed__scroll--auto { height: auto; max-height: 160px; }
+.gov-ai-embed__foot {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 8px var(--ki-space-3);
+  border-top: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface);
+}
+.gov-ai-embed__stat { font-size: 11px; color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums; }
+/* 候选清单在面板里也要限高（保持面板整体 ≤ 一屏半） */
+.gov-cand-list--embed { max-height: 236px; overflow-y: auto; padding-right: 2px; }
+
+/* 已确认位置区小标题（与下方「候选草稿」面板形成两层：已生效 / 待确认） */
+.gov-confirmed { display: flex; flex-direction: column; gap: 0; }
+.gov-confirmed__head {
+  margin-bottom: 2px;
+  font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  color: var(--ki-color-text-subtle);
+}
+
+/* ── 首次生成结果时的入场：结论打字机 + 下方块渐进出现 ── */
+.gov-conclusion--typing { cursor: pointer; }
+.gov-conclusion__text--typing::after {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 13px;
+  margin-left: 2px;
+  vertical-align: -2px;
+  border-radius: 1px;
+  background: var(--ki-color-purple);
+  animation: gov-caret 900ms steps(1) infinite;
+}
+@keyframes gov-caret { 50% { opacity: 0; } }
+/* 打字期间给一行提示：可点跳过（长结论时很重要） */
+.gov-conclusion__skip { font-size: 11px; color: var(--ki-color-text-subtle); }
+
+/* 渐进出现：结论打完前**整块塌陷到 0 高**（否则打字期下面是一大片空白），
+   打完再展开 + 子元素按 --i 顺序上浮淡入（整批 ≤ 300ms） */
+.gov-reveal {
+  display: flex; flex-direction: column; gap: 10px;
+  min-height: 0; overflow: hidden;
+  max-height: 0; opacity: 0;
+  transition: max-height 280ms ease, opacity 200ms ease;
+}
+.gov-reveal.is-in { max-height: 3000px; opacity: 1; }
+.gov-reveal > * { opacity: 0; }
+.gov-reveal.is-in > * {
+  animation: gov-reveal-in 260ms cubic-bezier(.2, .7, .3, 1) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+.gov-reveal.is-in .gov-cand-list--embed > .gov-cand {
+  animation: gov-reveal-in 240ms cubic-bezier(.2, .7, .3, 1) both;
+  animation-delay: calc(150ms + var(--i, 0) * 60ms);
+}
+@keyframes gov-reveal-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: none; }
+}
+/* 静态展开（运行中每 620ms 重渲染一次 / 已看过的结果）：直接显示，绝不重播入场 */
+.gov-reveal.is-in.is-static { transition: none; }
+.gov-reveal.is-in.is-static > *,
+.gov-reveal.is-in.is-static .gov-cand-list--embed > .gov-cand {
+  opacity: 1;
+  animation: none;
+}
+
+/* 无障碍：用户要求减少动效时全部直出，不播任何入场 */
+@media (prefers-reduced-motion: reduce) {
+  .gov-reveal { transition: none; max-height: none; opacity: 1; }
+  .gov-reveal > *, .gov-reveal.is-in > *,
+  .gov-reveal.is-in .gov-cand-list--embed > .gov-cand { opacity: 1; animation: none; }
+  .gov-conclusion__text--typing::after { animation: none; }
+}
+
+/* ── 文档 / 代码位置列表：从"纯文字+虚线"改成有图标锚点、hover 反馈的清单 ──
+   只在本容器的后代上覆盖，避免外溢到其它治理页复用的 .gov-docline / .gov-codeloc */
+.gov-doclist, .gov-codelist { display: flex; flex-direction: column; gap: 0; }
+
+/* 行间分隔：用伪元素画**内缩**的 1px 实线（左右各缩一个内距），
+   这样既能分行，又不会在圆角行 hover 时露出线头 */
+.gov-doclist .gov-docline,
+.gov-codelist .gov-codeloc { position: relative; }
+.gov-doclist .gov-docline:not(:last-child)::after,
+.gov-codelist .gov-codeloc:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: var(--ki-space-2);
+  right: var(--ki-space-2);
+  bottom: 0;
+  height: 1px;
+  background: color-mix(in srgb, var(--ki-color-border-strong) 62%, transparent);
+}
+
+.gov-doclist .gov-docline {
+  grid-template-columns: 18px minmax(0, 1fr) auto 22px;
+  gap: var(--ki-space-2);
+  padding: 9px var(--ki-space-2);
+  border-bottom: 0;
+  border-radius: var(--ki-radius-sm);
+  transition: background var(--ki-motion-fast);
+}
+.gov-doclist .gov-docline:hover { background: var(--ki-color-hover); }
+.gov-docline__icon {
+  display: grid; place-items: center;
+  color: var(--ki-color-text-subtle);
+}
+.gov-docline__icon svg { width: 14px; height: 14px; }
+.gov-doclist .gov-docline__main { min-width: 0; cursor: pointer; }
+.gov-doclist .gov-docline__main:hover .gov-docline__name {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.gov-doclist .gov-docline__name { font-weight: 500; }
+.gov-doclist .gov-docline__meta { margin-top: 1px; color: var(--ki-color-text-subtle); }
+
+/* 可见性小胶囊：形状（点）+ 文字双编码，比原来裸文字更好扫 */
+.gov-vis--pill {
+  gap: 5px;
+  padding: 1px 7px 1px 6px;
+  border-radius: var(--ki-radius-track);
+  background: var(--ki-color-bg-muted);
+  font-size: 11px;
+  color: var(--ki-color-text-muted);
+}
+.gov-vis--pill .gov-vis__dot { width: 5px; height: 5px; }
+
+/* 行尾 × 弱化，hover 行时才提亮（避免一列叉号抢眼） */
+.gov-docline__x { opacity: .38; transition: opacity var(--ki-motion-fast), color var(--ki-motion-fast); }
+.gov-docline:hover .gov-docline__x,
+.gov-codeloc:hover .gov-docline__x { opacity: 1; }
+.gov-docline__x:hover { color: var(--ki-color-danger); }
+
+.gov-codelist .gov-codeloc {
+  grid-template-columns: 18px minmax(0, 1fr) 22px;
+  gap: var(--ki-space-2);
+  padding: 9px var(--ki-space-2);
+  border-bottom: 0;
+  border-radius: var(--ki-radius-sm);
+  transition: background var(--ki-motion-fast);
+}
+.gov-codelist .gov-codeloc:hover { background: var(--ki-color-hover); }
+.gov-codeloc__icon {
+  margin-top: 1px;
+  display: grid; place-items: center;
+  color: color-mix(in srgb, var(--ki-color-info) 70%, var(--ki-color-text-subtle));
+}
+.gov-codeloc__icon svg { width: 14px; height: 14px; }
+.gov-codelist .gov-codeloc__path { font-size: 12px; }
+
+/* 可展开的只有「文件路径」这一处：hover 才出现下划线，整行不再是点击热区 */
+.gov-codelist .gov-codeloc.is-open { background: var(--ki-color-hover); }
+.gov-codeloc__pathbtn {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 0; border: 0; background: none;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.gov-codeloc__pathbtn:hover .gov-codeloc__path {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--ki-color-info) 60%, transparent);
+}
+.gov-codeloc__pathbtn:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 2px; border-radius: 3px; }
+.gov-codeloc__chev {
+  font-size: 10px;
+  color: var(--ki-color-text-subtle);
+  transition: transform var(--ki-motion-fast);
+}
+.gov-codelist .gov-codeloc.is-open .gov-codeloc__chev { transform: rotate(180deg); }
+.gov-codeloc__expand {
+  grid-column: 2 / -1;
+  margin-top: 4px;
+  display: flex; flex-direction: column; gap: 5px;
+}
+.gov-codeloc__expand-head {
+  display: flex; align-items: baseline; gap: var(--ki-space-2); flex-wrap: wrap;
+  font-size: 11px; font-weight: 600; color: var(--ki-color-text-subtle);
+}
+.gov-codeloc__expand-note { font-weight: 400; opacity: .85; }
+.gov-codeloc__expand .gov-codeloc__snip { margin: 0; }
+
+/* 候选里的「查看代码片段」：不能做成 checkbox label 的一部分，否则点它会连带勾选 */
+.gov-cand__peek {
+  margin-top: 4px;
+  padding: 0;
+  border: 0; background: none;
+  font: inherit; font-size: 11px; font-weight: 600;
+  color: var(--ki-color-primary);
+  cursor: pointer;
+}
+.gov-cand__peek:hover { text-decoration: underline; }
+
+/* ── 代码片段：固定深色底（用户要求），配色取 ki.css 的暗色 code token ──
+   深底不随主题变：亮色页面里代码块也是深色，和编辑器观感一致 */
+.gov-codeloc__snip {
+  --hl-keyword: #74c3a0;
+  --hl-string: #d9ad5c;
+  --hl-number: #d9ad5c;
+  --hl-comment: #7c8a83;
+  --hl-func: #8fd6b6;
+  --hl-punct: #b4beb7;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--ki-radius-sm);
+  background: #141c18;
+  color: #dfe8e3;
+  font-family: var(--ki-font-mono);
+  font-size: 11.5px;
+  line-height: 1.65;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, .06);
+}
+.gov-codeloc__snip .hljs-keyword { color: var(--hl-keyword); font-weight: 600; }
+.gov-codeloc__snip .hljs-literal { color: var(--hl-keyword); }
+.gov-codeloc__snip .hljs-string { color: var(--hl-string); }
+.gov-codeloc__snip .hljs-number { color: var(--hl-number); }
+.gov-codeloc__snip .hljs-comment { color: var(--hl-comment); font-style: italic; }
+.gov-codeloc__snip .hljs-title { color: var(--hl-func); }
+.gov-codeloc__snip .hljs-punctuation { color: var(--hl-punct); }
+
+/* ── 追问区（针对本次分析的答疑，不是全局对话） ── */
+.gov-ask {
+  display: flex; flex-direction: column; gap: var(--ki-space-2);
+  margin-top: 2px; padding-top: var(--ki-space-3);
+  border-top: 1px dashed var(--ki-color-border);
+}
+.gov-ask__head { display: flex; align-items: center; gap: 6px; }
+.gov-ask__icon {
+  flex: none; width: 18px; height: 18px; display: grid; place-items: center;
+  border-radius: var(--ki-radius-tag); font-size: 11px; font-weight: 700;
+  color: var(--ki-color-purple); background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent);
+}
+.gov-ask__title { font-size: 12px; font-weight: 600; color: var(--ki-color-text); }
+.gov-ask__hint { font-size: 11px; color: var(--ki-color-text-subtle); }
+.gov-ask__list { display: flex; flex-direction: column; gap: 8px; }
+.gov-ask__msg { display: flex; }
+.gov-ask__msg--user { justify-content: flex-end; }
+.gov-ask__bubble {
+  max-width: 84%; padding: 7px 10px; border-radius: var(--ki-radius-md);
+  font-size: 12px; line-height: 1.7;
+  background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border);
+  color: var(--ki-color-text);
+}
+.gov-ask__msg--user .gov-ask__bubble {
+  background: var(--ki-color-primary-soft); border-color: transparent; color: var(--ki-color-text);
+}
+/* 抽屉遮罩：比弹窗遮罩淡，侧滑抽屉不该像弹窗那样把页面压黑 */
+.gov-drawer-mask {
+  position: fixed; inset: 0; z-index: 999;
+  background: color-mix(in srgb, var(--ki-scrim) 55%, transparent);
+}
+.gov-drawer__close { margin-left: auto; }
+
+.gov-ask__clear {
+  margin-left: auto;
+  gap: 5px;
+  border: 1px solid var(--ki-color-border);
+  /* 浅灰底而不是白底：在白色卡片里才看得出是个按钮，又不抢追问区的注意力 */
+  background: var(--ki-color-bg-secondary);
+  color: var(--ki-color-text-muted);
+  padding: 3px 9px;
+}
+/* hover 只让字/图标转危险色 + 底色加深一档，不铺粉红底（面积色最容易刺眼） */
+.gov-ask__clear:hover:not(:disabled) {
+  background: var(--ki-color-bg-muted);
+  border-color: color-mix(in srgb, var(--ki-color-danger) 30%, var(--ki-color-border));
+  color: var(--ki-color-danger);
+}
+.gov-ask__clear:disabled { opacity: .45; }
+.gov-ask__clear svg { width: 12px; height: 12px; flex: none; }
+.gov-ask__input { display: flex; gap: 6px; }
+.gov-ask__input .gov-input { flex: 1; }
+
+/* 已确认的候选：勾选框禁用 + 标「已确认」。
+   注意不能 display:none —— .gov-cand 首列是固定 18px，抽掉 checkbox 会把内容挤进那一列 */
+.gov-cand.is-committed { cursor: default; }
+.gov-cand.is-committed input { opacity: .55; }
+.gov-cand__done {
+  display: inline-block; margin-bottom: 2px;
+  font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  color: var(--ki-color-success);
+  padding: 1px 5px; border-radius: var(--ki-radius-tag);
+  background: color-mix(in srgb, var(--ki-color-success) 13%, transparent);
+}
+
+/* ── 空态 / 内联引导 ── */
+.gov-empty {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: var(--ki-space-4) var(--ki-space-3);
+  border: 1px dashed var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  color: var(--ki-color-text-subtle);
+  font-size: var(--ki-font-size-sm);
+  text-align: center;
+}
+.gov-inline-tip { font-size: 11px; color: var(--ki-color-text-subtle); line-height: 1.6; }
+
+/* ── 概要卡内部（描述已并入本卡，不再单独成卡） ── */
+.gov-summary__title { font-size: var(--ki-font-size-xl); font-weight: 600; letter-spacing: -.01em; color: var(--ki-color-text); line-height: 1.35; }
+.gov-summary__row { display: flex; align-items: center; gap: var(--ki-space-2); flex-wrap: wrap; }
+.gov-summary__meta { display: flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); flex-wrap: wrap; }
+.gov-summary__dot { color: var(--ki-color-border-strong); }
+/* 描述块：与上方阶段线/提示条用虚线隔开，标题行右侧收「编辑」 */
+.gov-summary__desc {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 2px; padding-top: var(--ki-space-3);
+  border-top: 1px dashed var(--ki-color-border);
+}
+.gov-summary__desc-head { display: flex; align-items: center; gap: var(--ki-space-2); }
+.gov-summary__desc-head .gov-btn { margin-left: auto; }
+
+/* ── AI 分析卡的「分析结论」块 ── */
+.gov-conclusion {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: var(--ki-space-3);
+  border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-purple) 6%, var(--ki-color-surface));
+  border-left: 3px solid color-mix(in srgb, var(--ki-color-purple) 50%, transparent);
+}
+.gov-conclusion__head { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--ki-color-purple); }
+.gov-conclusion__text { margin: 0; font-size: var(--ki-font-size-sm); line-height: 1.75; color: var(--ki-color-text); }
+.gov-conclusion__todo { opacity: .85; }
+.gov-conclusion__todo code {
+  padding: 1px 4px; border-radius: 3px;
+  background: var(--ki-color-bg-muted); font-family: var(--ki-font-mono); font-size: 11px;
+}
+
+/* 窄屏时时间线/概要动作换行 */
+@media (max-width: 1080px) {
+  .gov-dcard__head { flex-wrap: wrap; }
+  .gov-dcard__actions { margin-left: 0; }
+}
+
+/* ≤640：卡片满宽、动作整行、长内容不横向溢出（N-17） */
+@media (max-width: 640px) {
+  .gov-dcard__head { padding: 6px 10px; }
+  .gov-dcard__body { padding: 10px; }
+  .gov-dcard__hint { display: none; }
+  .gov-dcard__actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
+  .gov-ai-embed__scroll { height: auto; max-height: 160px; }
+  .gov-codeloc__snip { font-size: 11px; }
+  .gov-ask__msg { max-width: 100%; }
+}
+
+/* ── 批 1 过渡：尚未换成 .gov-dcard__head/__body 的三张卡（代码位置 / 关联 / 参考）
+   直接把旧 .gov-sect 放进 .gov-dcard 内，补一层内距避免内容贴边；
+   批 2~4 换完内部结构后这条可删（grep `.gov-dcard > .gov-sect`）。 ── */
+.gov-dcard > .gov-sect { padding: var(--ki-space-3); }
+
+/* 过程区「有新步骤」提示（E-15：不贴底时提示，不抢折叠提示位） */
+.gov-ai-proc__badge {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--ki-radius-tag);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+}
+
+/* ── AI 查找内嵌面板（批 3）：--auto 只封上限，内容少不留空框（I-16） ── */
+.gov-ai-embed--auto .gov-ai-proc__steps { max-height: 160px; overflow-y: auto; }
+.gov-ai-embed__bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px 4px; flex-wrap: wrap; }
+.gov-ai-embed__barhint { flex: 1 1 100%; font-size: 11px; }
+.gov-seg__btn {
+  padding: 2px 8px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-tag);
+  background: transparent;
+  font-size: 11.5px;
+  color: var(--ki-color-text-secondary);
+  cursor: pointer;
+}
+.gov-seg__btn.is-on {
+  border-color: var(--ki-color-primary);
+  color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 8%, transparent);
+}
+
+/* 追问：一问一答成组（避免所有提问先列完再列回答） */
+.gov-ask__thread { display: flex; flex-direction: column; gap: 6px; }
+.gov-ask__thread + .gov-ask__thread { margin-top: 10px; }

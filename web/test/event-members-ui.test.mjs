@@ -15,6 +15,9 @@ const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const read = (rel) => fs.readFileSync(path.join(webRoot, rel), 'utf-8');
 
 const page = read('src/pages/EventsPage.tsx');
+/** 2026-11-17 改版：文档行与文档卡抽到 event-detail/，源码断言改指向新组件 */
+const docLine = read('src/components/governance/event-detail/DocLine.tsx');
+const docsCard = read('src/components/governance/event-detail/EventDocsCard.tsx');
 const picker = read('src/components/governance/DocPickerModal.tsx');
 const api = read('src/api/governanceApi.ts');
 
@@ -43,21 +46,25 @@ describe('② 详情页「关联文档」区：添加 + 移除', () => {
 
   it('添加走 addMembers，移除走 removeMember', () => {
     assert.match(page, /await addMembers\(scope, active\.id, docs\)/);
-    assert.match(page, /await removeMember\(scope, active!\.id, m\.group, m\.name\)/);
+    assert.match(page, /await removeMember\(scope, active\.id, row\.group, row\.name\)/);
   });
 
   it('移除是两步确认（文案用「确认」而不是弹窗删除）', () => {
-    assert.match(page, /pendingRemove === key \? '确认' : '×'/);
-    assert.match(page, /移除 = 解绑/);
+    // 两步确认的文案在 DocLine，确认态由卡片的 confirmKey 控制（同一时刻只有一行）
+    assert.match(docLine, /confirmRemove \? '确认' : '×'/);
+    assert.match(docsCard, /confirmRemove=\{confirmKey === row\.key\}/);
+    assert.match(page, /confirmKey=\{pendingRemove\}/);
+    assert.match(docsCard, /解绑|移除该参考文档/);
   });
 
   it('空态指向按钮，不再让用户去用 ki_sync_relation 绑定', () => {
-    assert.match(page, /暂无关联文档，点上方「＋ 添加」/);
+    assert.match(page, /emptyText="暂无关联文档，点右上「＋ 添加」/);
     assert.doesNotMatch(page, /暂无关联文档（用 ki_sync_relation 的 event 参数绑定）/);
   });
 
   it('索引未能摘除时有警示，不谎报「已隐藏」', () => {
-    assert.match(page, /visibilityFailed/);
+    assert.match(page, /memberVisWarn/);
+    assert.match(page, /notice=\{memberVisWarn \?/);
     assert.match(page, /仍可能被检索到/);
   });
 });
@@ -67,8 +74,10 @@ describe('③ 只读账号门禁（写入口不隐藏、只禁用）', () => {
     // 「＋ 添加」：只读账号禁用，事件已收口也禁用
     assert.match(page, /disabled=\{busy \|\| !canWrite \|\| closed\}/);
     // 行内「×」：只读账号禁用
-    assert.match(page, /disabled=\{busy \|\| !canWrite\}/);
-    assert.match(page, /title=\{readOnlyHint \?\? '从事件移除该文档/);
+    // 行内「×」：由卡片把 canWrite 折算成 canRemove，再交给 DocLine 禁用
+    assert.match(docsCard, /canRemove=\{canWrite && !busy && !row\.lockedReason\}/);
+    assert.match(docLine, /disabled=\{!canRemove\}/);
+    assert.match(docsCard, /removeTitle=\{row\.lockedReason \?\? \(isMember \? '从事件移除（解绑，文档保留）'/);
   });
 });
 

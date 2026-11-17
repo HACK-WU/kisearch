@@ -107,8 +107,8 @@ describe('② 渲染标记', () => {
 describe('④ 二期双通道 UI 标记（REQ-20261116-005 · B8）', () => {
   const read = (rel) => fs.readFileSync(path.join(webRoot, 'src', rel), 'utf-8');
 
-  it('查找弹窗有「快速 / 深度」切换、停止按钮，并把 partial / unconfirmed / parsed 透给过程面板', () => {
-    const s = read('components/governance/FindRefModal.tsx');
+  it('查找面板有「快速 / 深度」切换、停止按钮，并把 partial / unconfirmed / parsed 透给过程面板（批 3：弹窗改卡内嵌）', () => {
+    const s = read('components/governance/FindRefPanel.tsx');
     assert.ok(s.includes("useState<'fast' | 'deep'>('fast')"), '默认走快速查找（深度成本可见才选）');
     assert.ok(s.includes('深度查找（AI）'), '模式入口必须可见');
     assert.ok(s.includes('onClick={stop}'), '深度查找必须有停止');

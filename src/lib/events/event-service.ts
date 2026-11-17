@@ -32,6 +32,7 @@ import { addRefDocs, readRefs, removeRefsFile } from './refs-store.js';
 import { REF_LIMIT } from './refs-service.js';
 import { bindMembersLocked, collectMembers, MEMBER_LIMIT, type BindMembersOutcome, type MemberDoc } from './members.js';
 import { removeAnalysisFile } from './analysis-store.js';
+import { removeAskFile } from './analysis-ask-store.js';
 import { getType, listTypes, resolveStageVisibility } from './type-service.js';
 import {
   EVENT_DESCRIPTION_MAX_CHARS,

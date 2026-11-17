@@ -83,7 +83,14 @@ export function registerEventListTool(server: McpServer): void {
               ...(item.memberTotal > item.members.length
                 ? { docsPreviewNote: `仅显示前 ${item.members.length} 篇，共 ${item.memberTotal} 篇` }
                 : {}),
-              codeLocationTotal: confirmed.length,
+              ...(analysis.draft?.conclusion
+          ? {
+            conclusionPreview: analysis.draft.conclusion.length > 120
+              ? `${analysis.draft.conclusion.slice(0, 120)}…`
+              : analysis.draft.conclusion,
+          }
+          : {}),
+        codeLocationTotal: confirmed.length,
               codeLocationsPreview: confirmed.slice(0, locLimit).map((c) => ({
                 file: c.file,
                 line: c.line,

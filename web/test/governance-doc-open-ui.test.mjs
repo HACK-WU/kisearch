@@ -23,6 +23,8 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf-8');
 const events = read('src/pages/EventsPage.tsx');
 const lifecycle = read('src/pages/LifecyclePage.tsx');
 const css = read('src/styles/governance.css');
+/** 2026-11-17 改版：文档行抽到 DocLine，跨页断言改读组件源码 */
+const docLine = read('src/components/governance/event-detail/DocLine.tsx');
 
 /** 数出「<button> 上挂了某个 className」的出现次数（跨行匹配，容忍属性换行） */
 function clickableCount(src, className) {
@@ -32,16 +34,21 @@ function clickableCount(src, className) {
 }
 
 test('事件页：关联文档与参考文档的文档名都是可点按钮，且落到 setDocTarget', () => {
-  const mains = events.match(/className="gov-docline__main"/g) ?? [];
-  assert.equal(mains.length, 2, '关联文档 / 参考文档各应有 1 个 .gov-docline__main');
+  // 文档行统一走 DocLine：组件内 1 个 .gov-docline__main 按钮；事件页两张卡都用它
+  const mains = docLine.match(/className="gov-docline__main"/g) ?? [];
+  assert.equal(mains.length, 1, 'DocLine 内应有且仅有 1 个 .gov-docline__main');
+  assert.equal((events.match(/<EventDocsCard/g) ?? []).length, 2, '关联文档 / 参考文档各渲染一次 EventDocsCard');
 
-  for (const m of events.matchAll(/<button[\s\S]{0,160}?className="gov-docline__main"/g)) {
+  for (const m of docLine.matchAll(/<button[\s\S]{0,160}?className="gov-docline__main"/g)) {
     assert.ok(m[0].startsWith('<button'), '.gov-docline__main 必须挂在 <button> 上（可聚焦 / 可回车）');
   }
-  assert.match(events, /setDocTarget\(\{ group: m\.group, name: m\.name \}\)/, '关联文档点击需落到 setDocTarget');
-  assert.match(events, /setDocTarget\(\{ group: ref\.group, name: ref\.name \}\)/, '参考文档点击需落到 setDocTarget');
+  assert.equal(
+    (events.match(/onOpen=\{\(group, name\) => setDocTarget\(\{ group, name \}\)\}/g) ?? []).length,
+    2,
+    '两张卡的 onOpen 都必须落到 setDocTarget（传原始 group/name，不套闭包变量名）',
+  );
   assert.ok(
-    !events.includes('<div className="gov-docline__name">'),
+    !docLine.includes('<div className="gov-docline__name">'),
     '文档名不许退回纯 <div>（那正是「点了没反应」的原始形态）',
   );
 });
@@ -69,9 +76,11 @@ test('分类页：文档名是可点按钮，且同样复用 ModuleDrawer', () =
 });
 
 test('切 scope（事件页还要换事件）时收起抽屉，避免串库', () => {
+  // 2026-11-17 改版：同一 effect 还要收回 AI 查找面板/二次确认等跨事件临时态，
+  // 契约不变：依赖必须是 [scope, activeId]，且第一句就是 setDocTarget(null)。
   assert.match(
     events,
-    /useEffect\(\(\) => \{ setDocTarget\(null\); \}, \[scope, activeId\]\);/,
+    /useEffect\(\(\) => \{\s*setDocTarget\(null\);[\s\S]{0,200}?\}, \[scope, activeId\]\);/,
     '事件页：scope 或选中事件变化即收起抽屉',
   );
   // 2026-11-16 起该 effect 顺带把页码归 1（REQ-20261116-001），故允许 setDocTarget 后跟其他动作；
@@ -96,7 +105,7 @@ test('可点击态用 ki token，且带 focus-visible（键盘可达）', () => 
  * 这里显式断言它至少能数出 2 个，避免函数被误改成永远返回 0 还一路绿。
  */
 test('辅助计数函数可用（防被改坏后静默失效）', () => {
-  assert.equal(clickableCount(events, 'gov-docline__main'), 2);
+  assert.equal(clickableCount(docLine, 'gov-docline__main'), 1);
 });
 
 test('治理页抽屉保持只读：不得开启 editable，也不得挂删除 / 移动回调', () => {

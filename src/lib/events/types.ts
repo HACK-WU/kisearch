@@ -171,6 +171,11 @@ export interface AnalysisDraft {
   commit: string | null;
   errorCode?: string;
   errorMessage?: string;
+  /**
+   * 分析结论（根因判断 + 影响 + 建议方向，不含代码块）。
+   * 旧文件或模型未给出时为 null；解析层硬上限 2000 字（模板要求 ≤300）。
+   */
+  conclusion: string | null;
   candidates: AnalysisCandidate[];
   unconfirmed: string[];
   steps: AnalysisStepRecord[];
@@ -198,5 +203,32 @@ export interface EventAnalysisDoc {
   eventId: string;
   draft: AnalysisDraft | null;
   confirmed: ConfirmedCodeLocation[];
+  updatedAt: number;
+}
+
+/** 一轮「追问这次分析」的问答（B2） */
+export interface AnalysisAskTurn {
+  id: string;
+  question: string;
+  answer: string;
+  /** 该轮所依据的分析 runId（= 提问时的 draft.runId） */
+  runId: string | null;
+  at: number;
+  /** 硬超时保留部分答案时为 true（有内容就不算失败） */
+  truncated?: boolean;
+  usage?: { promptTokens: number; completionTokens: number };
+  context?: {
+    conclusionChars: number;
+    candidatesUsed: number;
+    confirmedUsed: number;
+    historyUsed: number;
+  };
+}
+
+/** 追问记录落点：`{scope}/.events/{eventId}.ask.json`（独立于 .analysis.json） */
+export interface EventAnalysisAskDoc {
+  version: 1;
+  eventId: string;
+  turns: AnalysisAskTurn[];
   updatedAt: number;
 }

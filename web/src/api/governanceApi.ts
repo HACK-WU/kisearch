@@ -10,6 +10,7 @@
  */
 
 import type {
+  AnalysisAskTurnDto,
   AnalysisDraftDto,
   ConfirmedCodeLocationDto,
   EventAnalysisDto,
@@ -499,6 +500,7 @@ export interface EventDetail {
 export type AnalysisDraft = AnalysisDraftDto;
 export type ConfirmedCodeLocation = ConfirmedCodeLocationDto;
 export type EventAnalysis = EventAnalysisDto;
+export type AnalysisAskTurn = AnalysisAskTurnDto;
 
 export function getEventDetail(scope: string, eventId: string): Promise<EventDetail> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}?${new URLSearchParams({ scope }).toString()}`);
@@ -554,6 +556,44 @@ export function discardEventAnalysisDraft(
   eventId: string,
 ): Promise<{ ok: true; scope: string; eventId: string; draft: AnalysisDraft | null; confirmed: ConfirmedCodeLocation[] }> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/draft?${new URLSearchParams({ scope }).toString()}`, {
+    method: 'DELETE',
+  });
+}
+
+/** 追问这次分析（B2）：提问一轮 */
+export function askEventAnalysis(
+  scope: string,
+  eventId: string,
+  args: { question: string; runId?: string },
+): Promise<{ ok: true; scope: string; eventId: string; turn: AnalysisAskTurn }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      scope,
+      question: args.question,
+      ...(args.runId ? { runId: args.runId } : {}),
+    }),
+    timeoutMs: 60_000,
+  });
+}
+
+/** 读追问记录（可按 runId 过滤） */
+export function listEventAnalysisAsk(
+  scope: string,
+  eventId: string,
+  runId?: string,
+): Promise<{ ok: true; scope: string; eventId: string; turns: AnalysisAskTurn[]; total: number; truncated: boolean; activeRunId: string | null }> {
+  const qs = new URLSearchParams({ scope, ...(runId ? { runId } : {}) });
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/ask?${qs}`);
+}
+
+/** 清空追问记录（写权限） */
+export function clearEventAnalysisAsk(
+  scope: string,
+  eventId: string,
+): Promise<{ ok: true; scope: string; eventId: string; cleared: number }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/ask?${new URLSearchParams({ scope })}`, {
     method: 'DELETE',
   });
 }

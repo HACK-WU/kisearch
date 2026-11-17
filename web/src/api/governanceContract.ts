@@ -385,6 +385,8 @@ export interface AnalysisDraftDto {
   commit: string | null;
   errorCode?: string;
   errorMessage?: string;
+  /** 分析结论；旧数据 / 模型未给出时为 null */
+  conclusion: string | null;
   candidates: AnalysisCandidateDto[];
   unconfirmed: string[];
   steps: AnalysisStepDto[];
@@ -409,6 +411,32 @@ export interface ConfirmedCodeLocationDto {
 export interface EventAnalysisDto {
   draft: AnalysisDraftDto | null;
   confirmed: ConfirmedCodeLocationDto[];
+}
+
+/** 一轮「追问这次分析」的问答（B2） */
+export interface AnalysisAskTurnDto {
+  id: string;
+  question: string;
+  answer: string;
+  runId: string | null;
+  at: number;
+  /** 硬超时保留部分答案时为 true */
+  truncated?: boolean;
+  usage?: { promptTokens: number; completionTokens: number };
+  context?: {
+    conclusionChars: number;
+    candidatesUsed: number;
+    confirmedUsed: number;
+    historyUsed: number;
+  };
+}
+
+export interface EventAnalysisAskDto {
+  turns: AnalysisAskTurnDto[];
+  total: number;
+  /** 记录是否曾因字节/条数上限被裁剪 */
+  truncated: boolean;
+  activeRunId: string | null;
 }
 
 export interface CodeLocationPreviewDto {

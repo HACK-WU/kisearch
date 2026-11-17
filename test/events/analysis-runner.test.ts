@@ -222,6 +222,7 @@ describe('S-04 异步分析 Pipeline', () => {
       yield {
         type: 'content',
         text: JSON.stringify({
+          conclusion: '根因是 token 为空时未兜底：登录守卫在解构前就读取了 token，缺失即抛错。',
           candidates: [
             { file: 'src/login.ts', line: 3, why: 'token 为空直接抛出 TOKEN_MISSING', confidence: 0.9 },
             { file: 'src/ghost.ts', line: 10, why: '幻觉文件', confidence: 0.8 },
@@ -257,6 +258,11 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.equal(seenFirstUserMessages[0]!.includes('SECRET_DOC_BODY_SHOULD_NOT_BE_PRELOADED'), false, '初始上下文绝不能预塞正文');
 
     assert.equal(finalDoc.draft?.status, 'ready');
+    assert.equal(
+      finalDoc.draft?.conclusion,
+      '根因是 token 为空时未兜底：登录守卫在解构前就读取了 token，缺失即抛错。',
+      'B1：模型给出的结论必须原样落库',
+    );
     assert.equal(finalDoc.draft?.candidates.length, 1, '幻觉文件与越界行号必须被二次校验剔除');
     assert.equal(finalDoc.draft?.candidates[0]!.file, 'src/login.ts');
     assert.equal(finalDoc.draft?.candidates[0]!.line, 3);
@@ -350,5 +356,6 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.equal(doc.draft?.status, 'partial', '已产出候选时停止应落 partial，候选仍可确认');
     assert.equal(doc.draft?.errorCode, 'ANALYSIS_CANCELED');
     assert.equal(doc.draft?.candidates.length, 1, '停止不该丢弃已产出的候选');
+    assert.equal(doc.draft?.conclusion, null, '模型未给结论时必须落 null（前端据此整块不渲染）');
   });
 });

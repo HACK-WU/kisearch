@@ -132,6 +132,11 @@ const RULES: Rule[] = [
   pattern('POST', /^\/governance\/events\/[^/]+\/analyze$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/cancel$/, 'permission', 'knowledge.write'),
   pattern('GET', /^\/governance\/events\/[^/]+\/analysis$/, 'permission', 'knowledge.read'),
+  // 追问（B2）：提问与读记录都要 knowledge.ask（viewer 有该能力）；
+  // 清空是写操作，要求 knowledge.write。
+  pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
+  pattern('GET', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
+  pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/confirm$/, 'permission', 'knowledge.write'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/draft$/, 'permission', 'knowledge.write'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/confirmed\/[^/]+$/, 'permission', 'knowledge.write'),

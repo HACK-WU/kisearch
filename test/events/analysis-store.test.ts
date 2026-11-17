@@ -160,6 +160,29 @@ describe('S-03 事件描述与分析存储契约', () => {
     assert.equal(normalized.draft?.errorCode, 'ANALYSIS_INTERRUPTED');
   });
 
+  it('③b 历史文件（ready，无 conclusion）读取时归一为 null —— 归一必须发生在「非 running 早退」之前', () => {
+    const normalized = normalizeAnalysisDocForRead({
+      version: 1,
+      eventId: 'evt_old',
+      draft: {
+        runId: 'r_old',
+        status: 'ready',
+        targetDir: '/tmp',
+        commit: null,
+        candidates: [],
+        unconfirmed: [],
+        steps: [],
+        stats: { turns: 1, filesRead: 1, tokens: 10, ms: 20 },
+        startedAt: Date.now() - 10_000,
+        updatedAt: Date.now() - 10_000,
+      } as never,
+      confirmed: [],
+      updatedAt: Date.now() - 10_000,
+    }, false);
+    assert.equal(normalized.draft?.conclusion, null, '旧文件没有该字段时必须补 null，不能留 undefined');
+    assert.equal(normalized.draft?.status, 'ready', '归一不得影响原有状态');
+  });
+
   it('④ ki_event_list 透出 codeLocationTotal 与 codeLocationsPreview；deleteEvent 清理 .analysis.json', async () => {
     const ev = await createEvent(scope, { title: '列表透出测试', typeId: 'et_1' });
     await writeDraftStart(scope, ev.id, {

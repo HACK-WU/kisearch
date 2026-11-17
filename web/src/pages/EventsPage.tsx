@@ -3,10 +3,10 @@
  *
  * 界面以 demo 的事件页为基线：**左侧事件列表 + 右侧详情**，详情含
  * 事件头（编号 / 类型 / 当前阶段 / 关联与参考篇数 / 操作）、阶段线（可点）、
- * 可见性提示条、关联文档、参考文档（AI 查找 / 添加）、AI 同源操作代码块。
+ * 可见性提示条、关联文档、参考文档（AI 查找 / 添加）。2026-11-17 改版：MCP 同源操作代码块已移除。
  *
  * 与 demo 的三处差异：
- *   · 「AI 分析」是独立的仓库代码定位入口（`AiAnalyzeModal`），与知识库检索无关；
+ *   · 「AI 分析」是独立的仓库代码定位入口（`AiAnalyzePanel`，卡内嵌），与知识库检索无关；
  *   · 参考文档的「AI 查找」走**确定性检索**（不调 LLM），候选带分数与原因，由人勾选确认；
  *   · 点文档名开的是全站阅读器 `ModuleDrawer`（70vw 抽屉，带大纲/文档内查找/全屏），
  *     不是 demo 里 560px + 遮罩的只读弹窗 —— 这是 S-07 §3.3「直接复用 ModuleDrawer」的结果。
@@ -18,13 +18,16 @@ import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
 import { aiSettingsHref } from '@/lib/aiSettingsUrl';
-import { FindRefModal } from '@/components/governance/FindRefModal';
-import { AiAnalyzeModal } from '@/components/governance/AiAnalyzeModal';
+import { FindRefPanel } from '@/components/governance/FindRefPanel';
 import { DocPickerModal, type DocPickerRef } from '@/components/governance/DocPickerModal';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
+import { EventSummaryCard } from '@/components/governance/event-detail/EventSummaryCard';
+import { EventAnalysisCard } from '@/components/governance/event-detail/EventAnalysisCard';
+import { EventDocsCard } from '@/components/governance/event-detail/EventDocsCard';
+import type { VisTone } from '@/components/governance/event-detail/types';
 import { getDocContent } from '@/api/httpApi';
 import {
-  addMembers, addRefs, createEvent, deleteEvent, getEventAnalysis, getEventDetail, getGovernanceCounts,
+  addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
   listEventTypes, listEvents, listRefs, removeConfirmedCodeLocation, removeMember, removeRef,
   reopenEvent, setEventStage, updateEvent, updateEventType,
   GovernanceApiError,
@@ -100,7 +103,8 @@ export function EventsPage(): JSX.Element {
   const [addStageOpen, setAddStageOpen] = useState(false);
   const [newEventOpen, setNewEventOpen] = useState(false);
   const [newTypeOpen, setNewTypeOpen] = useState(false);
-  const [aiOpen, setAiOpen] = useState(false);
+  /** 递增触发一次 AI 分析（面板用 useRef 比对上次值，挂载时不会误触发） */
+  const [startSignal, setStartSignal] = useState(0);
   const [transOpen, setTransOpen] = useState(false);
   /** 「删除事件」两步确认（会清空阶段日志，不可恢复） */
   const [delConfirm, setDelConfirm] = useState(false);
@@ -109,14 +113,22 @@ export function EventsPage(): JSX.Element {
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   /** 关联文档行内二次确认（点一次变「确认」，再点才真解绑） */
   const [pendingRemove, setPendingRemove] = useState<string | null>(null);
+  /** 参考文档的二次确认 key（与关联文档分开，避免两处同时进入确认态） */
+  const [refConfirmKey, setRefConfirmKey] = useState<string | null>(null);
   /** 绑定成功但索引没摘掉：必须持续显示，不能只闪一条消息 */
   const [memberVisWarn, setMemberVisWarn] = useState<string | null>(null);
   /** 「AI 查找」弹窗：打开即请求候选，不再一点就自动加入（R28/R29） */
   const [findRefOpen, setFindRefOpen] = useState(false);
+  /** 查找面板回抛的状态：卡头 chip 用（检索中 / N 篇候选） */
+  const [findStatus, setFindStatus] = useState<{ state: string; count: number } | null>(null);
   const [typeFilter, setTypeFilter] = useState('');
   /** 「事件描述」内联编辑态（REQ-20261113-003 · S-05） */
-  const [editingDesc, setEditingDesc] = useState(false);
-  const [descDraft, setDescDraft] = useState('');
+  /** 描述内联编辑：单一 state（C-12）；切事件由 activeId 的 effect 复位 */
+  const [descEdit, setDescEdit] = useState<{ open: boolean; draft: string; saving: boolean }>({
+    open: false,
+    draft: '',
+    saving: false,
+  });
   /**
    * 点开正文的文档（关联文档 / 参考文档）。null = 未打开。
    * 复用浏览页的 `ModuleDrawer`（抽屉态，S-07 §3.3「文档抽屉直接复用 ModuleDrawer」），
@@ -129,11 +141,24 @@ export function EventsPage(): JSX.Element {
    * （`if (content !== null) return`），留着会把上一个库 / 上一个事件的正文继续挂着，
    * 而抽屉头部已换成新 scope —— 静默串库比直接收起更糟。
    */
-  useEffect(() => { setDocTarget(null); }, [scope, activeId]);
+  /*
+   * 切 scope / 切事件时必须把「跨事件会串台」的临时态一起收回：
+   * 抽屉正文、AI 查找面板与它的 chip、两处行内二次确认。
+   * 分析卡另有 key={active.id} 强制重挂（面板内部 state 不跟随 props）。
+   */
+  useEffect(() => {
+    setDocTarget(null);
+    setFindRefOpen(false);
+    setFindStatus(null);
+    setPendingRemove(null);
+    setRefConfirmKey(null);
+  }, [scope, activeId]);
 
   // 页面只判 capability，不判 role（authContext 的约定）
   const { can, status: authStatus } = useAuth();
   const canWrite = can('knowledge.write');
+  /** 追问提问权限（knowledge.ask）：viewer 也有，与写权限分开判 */
+  const canAsk = can('knowledge.ask');
 
   /**
    * 就近深链（2026-11-15）：从「AI 分析 / AI 查找」弹窗直达 AI 设置的对应分组。
@@ -183,27 +208,12 @@ export function EventsPage(): JSX.Element {
 
   useEffect(() => {
     setDelConfirm(false);
-    setEditingDesc(false);
+    setDescEdit({ open: false, draft: '', saving: false });
     if (activeId) void loadDetail(activeId);
     else { setDetail(null); setRefs([]); }
   }, [activeId, loadDetail]);
 
-  // 关掉分析弹窗后若任务仍在后台跑，详情页保持轻量轮询直到终态
-  const analysisRunning = detail?.event.id === activeId && detail?.analysis?.draft?.status === 'running' && !aiOpen;
-  useEffect(() => {
-    if (!analysisRunning || !activeId) return;
-    let alive = true;
-    const timer = window.setInterval(() => {
-      void getEventAnalysis(scope, activeId).then((res) => {
-        if (!alive) return;
-        setDetail((prev) => (prev ? { ...prev, analysis: { draft: res.draft, confirmed: res.confirmed } } : prev));
-      }).catch(() => {});
-    }, 2000);
-    return () => {
-      alive = false;
-      window.clearInterval(timer);
-    };
-  }, [analysisRunning, scope, activeId]);
+  // 分析进度轮询已下沉到 AiAnalyzePanel（1.5s，单一真源）；页面不再持有轮询
 
   const active = useMemo(() => events.find((e) => e.id === activeId) ?? detail?.event ?? null, [events, activeId, detail]);
   const activeAnalysis = detail?.event.id === active?.id ? (detail?.analysis ?? null) : null;
@@ -558,74 +568,21 @@ export function EventsPage(): JSX.Element {
             {!active ? (
               <div className="gov-cell-muted" style={{ padding: 24 }}>左侧选择一个事件查看详情</div>
             ) : (
-              <div className="gov-detail">
-                <div className="gov-detail__head">
-                  <div>
-                    <div className="gov-detail__title">#{active.shortId} {active.title}</div>
-                    <div className="gov-ev__meta" style={{ marginTop: 4 }}>
-                      <span>{type?.name ?? active.typeId}</span>
-                      <span>· 当前「{type?.stages[stageIdx]?.name ?? '未知'}」</span>
-                      <span>· 关联 {memberCount} 篇</span>
-                      <span>· 参考 {refs.length} 篇</span>
-                    </div>
-                  </div>
-                  <div className="gov-detail__actions">
-                    <button
-                      className="gov-btn gov-btn--sm gov-btn--ai"
-                      disabled={busy || !canWrite}
-                      title={readOnlyHint ?? '基于事件信息与文档清单，在目标代码目录定位相关源码'}
-                      onClick={() => setAiOpen(true)}
-                    >
-                      <svg className="gov-btn--ai__icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                        <path d="M6.4 1.6c.28 2.4 1.72 3.84 4.12 4.12-2.4.28-3.84 1.72-4.12 4.12C6.12 7.44 4.68 6 2.28 5.72 4.68 5.44 6.12 4 6.4 1.6Z" />
-                        <path d="M11.9 9.2c.17 1.45 1.05 2.33 2.5 2.5-1.45.17-2.33 1.05-2.5 2.5-.17-1.45-1.05-2.33-2.5-2.5 1.45-.17 2.33-1.05 2.5-2.5Z" opacity=".62" />
-                      </svg>
-                      AI 分析
-                    </button>
-                    {closed ? (
-                      <button
-                        className="gov-btn gov-btn--sm"
-                        disabled={busy || !canWrite}
-                        title={readOnlyHint}
-                        onClick={() => void run(async () => {
-                          const r = await reopenEvent(scope, active.id);
-                          return r.hint;
-                        })}
-                      >
-                        重新打开
-                      </button>
-                    ) : null}
-                    <button
-                      className="gov-btn gov-btn--sm gov-btn--danger-ghost"
-                      disabled={busy || !closed || !canWrite}
-                      title={!canWrite ? readOnlyHint : closed ? '删除事件：关联文档改为长期保留' : '事件未收口不能删除，先流转到末位阶段'}
-                      onClick={() => {
-                        // 不可逆（事件与阶段日志一并删除）：第一次点击只进入确认态
-                        if (!delConfirm) { setDelConfirm(true); return; }
-                        setDelConfirm(false);
-                        void run(async () => {
-                          const r = await deleteEvent(scope, active.id, 'wiki');
-                          setActiveId(null);
-                          return `已删除事件；${r.affected.docs} 篇文档改为长期保留`;
-                        });
-                      }}
-                    >
-                      {delConfirm ? '确认删除事件（不可恢复）' : '删除事件'}
-                    </button>
-                    {closed ? null : (
-                      <button
-                        className="gov-btn gov-btn--sm gov-btn--primary"
-                        disabled={busy || !canWrite}
-                        title={readOnlyHint}
-                        onClick={() => setTransOpen(true)}
-                      >
-                        流转
-                      </button>
-                    )}
-                  </div>
-                </div>
-
-                {/* 阶段线 */}
+              <div className="gov-dcard-flow">
+                <EventSummaryCard
+                  event={active}
+                  typeName={type?.name ?? active.typeId}
+                  stageName={type?.stages[stageIdx]?.name ?? '未知'}
+                  memberCount={memberCount}
+                  refCount={refs.length}
+                  closed={closed}
+                  canWrite={canWrite}
+                  busy={busy}
+                  delConfirm={delConfirm}
+                  descEdit={descEdit}
+                  showAnalyzeGuide={!activeAnalysis?.draft && (activeAnalysis?.confirmed.length ?? 0) === 0}
+                  stageSlot={(
+                    <>
                 <div className="gov-stage">
                   {(type?.stages ?? []).map((s, i) => (
                     <div
@@ -638,226 +595,169 @@ export function EventsPage(): JSX.Element {
                     </div>
                   ))}
                 </div>
-
                 <div className="gov-infobar">
                   当前阶段「{type?.stages[stageIdx]?.name ?? '未知'}」：{memberCount} 篇文档的可见性为
                   <strong>{VIS_TEXT[stageVis]}</strong>
                   {stageVis === 'hidden' ? '（语义与全文都搜不到，这是阶段设计的预期行为）' : ''}
                 </div>
-
-                {/* 事件描述（REQ-20261113-003 · S-05） */}
-                <div className="gov-sect">
-                  <div className="gov-sect__head">
-                    <span className="gov-sect__title">事件描述</span>
-                    <span className="gov-sect__hint">现象、报错摘要或上下文（会进入 AI 分析）</span>
-                    <span className="gov-sect__actions">
-                      {!editingDesc ? (
-                        <button
-                          type="button"
-                          className="gov-btn gov-btn--ghost gov-btn--sm"
-                          disabled={busy || !canWrite}
-                          title={readOnlyHint}
-                          onClick={() => {
-                            setDescDraft(active.description ?? '');
-                            setEditingDesc(true);
-                          }}
-                        >
-                          编辑
-                        </button>
-                      ) : null}
-                    </span>
-                  </div>
-                  {editingDesc ? (
-                    <div className="gov-desc-edit">
-                      <textarea
-                        className="gov-textarea"
-                        rows={4}
-                        maxLength={4000}
-                        placeholder="补充事件现象、报错原文、复现条件等…"
-                        value={descDraft}
-                        onChange={(e) => setDescDraft(e.target.value)}
-                      />
-                      <div className="gov-desc-edit__foot">
-                        <span className="gov-hint">{descDraft.trim().length} / 4000</span>
-                        <span style={{ flex: 1 }} />
-                        <button
-                          type="button"
-                          className="gov-btn gov-btn--sm"
-                          onClick={() => setEditingDesc(false)}
-                        >
-                          取消
-                        </button>
-                        <button
-                          type="button"
-                          className="gov-btn gov-btn--sm gov-btn--primary"
-                          disabled={busy}
-                          onClick={() => void run(async () => {
-                            await updateEvent(scope, active.id, { description: descDraft, revision: active.revision });
-                            setEditingDesc(false);
-                            return '已更新事件描述';
-                          })}
-                        >
-                          保存
-                        </button>
-                      </div>
-                    </div>
-                  ) : active.description?.trim() ? (
-                    <p className="gov-desc-text">{active.description}</p>
-                  ) : (
-                    <div className="gov-cell-muted">暂无描述</div>
+                    </>
                   )}
-                </div>
+                  onAnalyze={() => {
+                    // G-08：已分析过再点只提示；重跑走卡片内的「重新分析」
+                    if (activeAnalysis?.draft || (activeAnalysis?.confirmed.length ?? 0) > 0) {
+                      void run(async () => '这次分析已经完成，不用重复点；如需重跑请用「AI 分析」卡里的「重新分析」');
+                      return;
+                    }
+                    setStartSignal((n) => n + 1);
+                  }}
+                  onReopen={() => void run(async () => {
+                    const r = await reopenEvent(scope, active.id);
+                    return r.hint;
+                  })}
+                  onDelete={() => {
+                    if (!delConfirm) { setDelConfirm(true); return; }
+                    setDelConfirm(false);
+                    void run(async () => {
+                      const r = await deleteEvent(scope, active.id, "wiki");
+                      setActiveId(null);
+                      return `已删除事件；${r.affected.docs} 篇文档改为长期保留`;
+                    });
+                  }}
+                  onTransition={() => setTransOpen(true)}
+                  onDescEdit={() => setDescEdit({ open: true, draft: active.description ?? '', saving: false })}
+                  onDescChange={(v) => setDescEdit((s2) => ({ ...s2, draft: v }))}
+                  onDescSave={() => {
+                    setDescEdit((s2) => ({ ...s2, saving: true }));
+                    void run(async () => {
+                      await updateEvent(scope, active.id, { description: descEdit.draft, revision: active.revision });
+                      setDescEdit({ open: false, draft: '', saving: false });
+                      return '已更新事件描述';
+                    }).finally(() => setDescEdit((s2) => (s2.open ? { ...s2, saving: false } : s2)));
+                  }}
+                  onDescCancel={() => setDescEdit({ open: false, draft: '', saving: false })}
+                />
 
-                {/* 代码位置（REQ-20261113-003 · S-05） */}
-                <div className="gov-sect">
-                  <div className="gov-sect__head">
-                    <span className="gov-sect__title">代码位置</span>
-                    <span className="gov-sect__hint">经确认的仓库源码定位</span>
-                    <span className="gov-sect__actions">
-                      {activeAnalysis?.draft ? (
-                        <button
-                          type="button"
-                          className="gov-btn gov-btn--sm"
-                          onClick={() => setAiOpen(true)}
-                        >
-                          {activeAnalysis.draft.status === 'running'
-                            ? '分析进行中 · 查看进度'
-                            : activeAnalysis.draft.errorCode === 'ANALYSIS_CANCELED'
-                              // 主动停止 ≠ 失败：文案不引导去改配置；
-                              // 有候选时状态是 partial，也据 errorCode 显示为「已停止」
-                              ? (activeAnalysis.draft.candidates.length > 0
-                                ? `分析已停止 · ${activeAnalysis.draft.candidates.length} 处候选 · 查看`
-                                : '分析已停止 · 查看')
-                              : activeAnalysis.draft.status === 'failed'
-                                ? '分析未完成 · 查看'
-                                : `有待确认草稿（${activeAnalysis.draft.candidates.length} 处）· 查看`}
-                        </button>
-                      ) : null}
-                    </span>
-                  </div>
-                  {(activeAnalysis?.confirmed ?? []).map((loc) => (
-                    <div className="gov-codeloc" key={loc.id}>
-                      <div className="gov-codeloc__main">
-                        <div className="gov-codeloc__head">
-                          <span className="gov-codeloc__path">
-                            {loc.file}:{loc.line}{loc.endLine ? `-${loc.endLine}` : ''}
-                          </span>
-                          {loc.commit ? <span className="gov-badge gov-badge--kb">{loc.commit}</span> : null}
-                        </div>
-                        <div className="gov-codeloc__why">{loc.why}</div>
-                      </div>
-                      <div className="gov-docline__right">
-                        <button
-                          type="button"
-                          className="gov-btn gov-btn--ghost gov-btn--sm"
-                          disabled={busy || !canWrite}
-                          title={readOnlyHint ?? '移除该代码位置'}
-                          onClick={() => void run(async () => {
-                            await removeConfirmedCodeLocation(scope, active.id, loc.id);
-                            return `已移除代码位置「${loc.file}:${loc.line}」`;
-                          })}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                  {(activeAnalysis?.confirmed ?? []).length === 0 && !activeAnalysis?.draft ? (
-                    <div className="gov-cell-muted">暂无代码位置，可点击右上角「AI 分析」定位仓库源码</div>
-                  ) : null}
-                </div>
+                {/* AI 分析（默认不渲染：无草稿且无已确认位置时整卡不出现） */}
+                <EventAnalysisCard
+                  key={active.id}
+                  scope={scope}
+                  event={active}
+                  analysis={activeAnalysis}
+                  canWrite={canWrite}
+                  canAsk={canAsk}
+                  busy={busy}
+                  readOnlyHint={readOnlyHint}
+                  startSignal={startSignal}
+                  onUpdated={(next: EventAnalysis) => {
+                    setDetail((prev) => (prev ? { ...prev, analysis: next } : prev));
+                  }}
+                  onOpenSettings={() => openAiSettings('analysis')}
+                  onRemoveLocation={(loc) => void run(async () => {
+                    await removeConfirmedCodeLocation(scope, active.id, loc.id);
+                    return `已移除代码位置「${loc.file}:${loc.line}」`;
+                  })}
+                />
 
                 {/* 关联文档 */}
-                <div className="gov-sect">
-                  <div className="gov-sect__head">
-                    <span className="gov-sect__title">关联文档</span>
-                    <span className="gov-sect__hint">可见性随事件阶段变化</span>
-                    <span className="gov-sect__actions">
-                      <button
-                        className="gov-btn gov-btn--ghost gov-btn--sm"
-                        disabled={busy || !canWrite || closed}
-                        title={readOnlyHint ?? (closed ? '事件已收口，不能再挂文档；如需继续请先「重新打开」' : '选择要挂到本事件的文档')}
-                        onClick={() => setAddMemberOpen(true)}
-                      >
-                        ＋ 添加
-                      </button>
-                    </span>
-                  </div>
-                  {memberVisWarn ? (
-                    <div className="gov-cell-muted" style={{ color: 'var(--ki-warn, #b26a00)' }}>{memberVisWarn}</div>
-                  ) : null}
-                  {(detail?.members ?? []).map((m) => {
-                    const key = `${m.group}/${m.name}`;
-                    return (
-                      <div className="gov-docline" key={key}>
-                        {/*
-                          文档名是按钮（demo `.docline` 的语义）：点开右侧阅读抽屉看正文。
-                          此前这行是纯 <div>，点了没有任何反应 —— 事件页里最要紧的动作（看证据原文）缺失。
-                        */}
-                        <button
-                          type="button"
-                          className="gov-docline__main"
-                          title={`查看「${m.name}」正文`}
-                          onClick={() => setDocTarget({ group: m.group, name: m.name })}
-                        >
-                          <span className="gov-docline__name">{m.name}</span>
-                          <span className="gov-docline__meta">{m.group}</span>
-                        </button>
-                        <div className="gov-docline__right">
-                          <span className={`gov-vis gov-vis--${VIS_CLASS[stageVis as Visibility] ?? 'hidden'}`}>
-                            <span className="gov-vis__dot" />
-                            {VIS_TEXT[stageVis]}
-                          </span>
-                          {/*
-                            移除 = 解绑（文档回 wiki，不删、不进回收站），所以二次确认文案用「确认移除」，
-                            不用「删除」—— 避免让人以为会丢数据。
-                          */}
-                          <button
-                            className="gov-btn gov-btn--ghost gov-btn--sm"
-                            disabled={busy || !canWrite}
-                            title={readOnlyHint ?? '从事件移除该文档（解绑，文档保留）'}
-                            onClick={() => {
-                              if (pendingRemove !== key) {
-                                setPendingRemove(key);
-                                return;
-                              }
-                              setPendingRemove(null);
-                              void run(async () => {
-                                const r = await removeMember(scope, active!.id, m.group, m.name);
-                                setMemberVisWarn(null);
-                                return `已移除「${m.name}」${r.pending.length > 0 ? '；索引补齐中，数秒后可被语义检索' : ''}`;
-                              });
-                            }}
-                          >
-                            {pendingRemove === key ? '确认' : '×'}
-                          </button>
-                        </div>
-                      </div>
-                    );
+                {/* 关联文档（可见性随事件阶段变化） */}
+                <EventDocsCard
+                  mode="member"
+                  docs={(detail?.members ?? []).map((m) => ({
+                    key: m.group + "/" + m.name,
+                    name: m.name,
+                    group: m.group,
+                    vis: { tone: (VIS_CLASS[stageVis] ?? "hidden") as VisTone, text: VIS_TEXT[stageVis] },
+                  }))}
+                  canWrite={canWrite}
+                  busy={busy}
+                  hint="可见性随事件阶段变化"
+                  notice={memberVisWarn ? (
+                    <div className="gov-cell-muted" style={{ color: "var(--ki-warn, #b26a00)" }}>{memberVisWarn}</div>
+                  ) : undefined}
+                  emptyText="暂无关联文档，点右上「＋ 添加」把要跟踪的文档挂上来"
+                  confirmKey={pendingRemove}
+                  onConfirmChange={setPendingRemove}
+                  onOpen={(group, name) => setDocTarget({ group, name })}
+                  onRemove={(row) => void run(async () => {
+                    const r = await removeMember(scope, active.id, row.group, row.name);
+                    setMemberVisWarn(null);
+                    return `已移除「${row.name}」${r.pending.length > 0 ? '；索引补齐中，数秒后可被语义检索' : ''}`;
                   })}
-                  {memberCount === 0 ? (
-                    <div className="gov-cell-muted">暂无关联文档，点上方「＋ 添加」把要跟踪的文档挂上来（AI 也可用 ki_event_docs）</div>
-                  ) : null}
-                </div>
+                  actions={(
+                    <button
+                      className="gov-btn gov-btn--ghost gov-btn--sm"
+                      disabled={busy || !canWrite || closed}
+                      title={readOnlyHint ?? (closed ? "事件已收口，不能再挂文档；如需继续请先「重新打开」" : "选择要挂到本事件的文档")}
+                      onClick={() => setAddMemberOpen(true)}
+                    >
+                      ＋ 添加
+                    </button>
+                  )}
+                />
 
                 {/* 参考文档 */}
-                <div className="gov-sect">
-                  <div className="gov-sect__head">
-                    <span className="gov-sect__title">参考文档</span>
-                    <span className="gov-sect__hint">外部引用，不随事件阶段变化</span>
-                    <span className="gov-sect__actions">
-                      {/*
-                        打开弹窗即请求候选：不再"点一下自动加前 3 篇"。
-                        旧实现把事件标题当手动搜索词发出去，命中就静默加入 —— 既不是 AI 查找，
-                        也违反 R29（低分与未确认的项不该被默认采纳）。
-                      */}
-                      <button
-                        className="gov-btn gov-btn--sm"
-                        disabled={busy}
-                        onClick={() => setFindRefOpen(true)}
-                      >
-                        AI 查找
-                      </button>
+                {/* 参考文档（不随事件阶段变化） */}
+                <EventDocsCard
+                  mode="ref"
+                  docs={refs.map((ref) => ({
+                    key: (ref.sourceScope ?? "") + "/" + ref.group + "/" + ref.name,
+                    name: ref.name,
+                    group: [
+                      ref.sourceScope && ref.sourceScope !== scope ? ref.sourceScope + " · " : "",
+                      ref.group,
+                      ref.stale ? (ref.staleReason === "scope-missing" ? " · 源库已不存在" : " · 文档已不存在") : "",
+                    ].join(""),
+                    vis: { tone: (VIS_CLASS[ref.visibility] ?? "hidden") as VisTone, text: VIS_TEXT[ref.visibility] },
+                  }))}
+                  canWrite={canWrite}
+                  busy={busy}
+                  hint="外部引用，不随事件阶段变化"
+                  panel={findRefOpen ? (
+                    <FindRefPanel
+                      scope={scope}
+                      eventId={active.id}
+                      canWrite={canWrite}
+                      context={{
+                        title: active.title,
+                        shortId: active.shortId,
+                        ...(type?.name ? { typeName: type.name } : {}),
+                        stageName: type?.stages.find((s) => s.key === active.stageKey)?.name ?? '—',
+                        assocCount: memberCount,
+                        scope,
+                      }}
+                      open={findRefOpen}
+                      onOpenChange={(open) => { if (!open) setFindRefOpen(false); }}
+                      onStatus={setFindStatus}
+                      onAdded={(added, skipped) => {
+                        // 局部刷新参考文档区：查找本身没写数据，不该触发整页重载
+                        setMessage({
+                          tone: 'ok',
+                          text: `已加入 ${added} 篇参考文档${skipped > 0 ? `，跳过 ${skipped} 篇（已存在）` : ''}`,
+                        });
+                        void loadDetail(active.id);
+                      }}
+                      onSwitchToManual={() => { setFindRefOpen(false); setAddRefOpen(true); }}
+                      onOpenSettings={() => { setFindRefOpen(false); openAiSettings('find'); }}
+                    />
+                  ) : null}
+                  emptyText="暂无参考文档：可用「AI 查找」或手动「＋ 添加」"
+                  confirmKey={refConfirmKey}
+                  onConfirmChange={setRefConfirmKey}
+                  onOpen={(group, name) => setDocTarget({ group, name })}
+                  onRemove={(row) => {
+                    const ref = refs.find((r) => (r.sourceScope ?? "") + "/" + r.group + "/" + r.name === row.key);
+                    if (!ref) return;
+                    void run(async () => {
+                      await removeRef(scope, active.id, ref.group, ref.name, ref.sourceScope);
+                      return `已移除参考文档「${ref.name}」`;
+                    });
+                  }}
+                  actions={(
+                    <>
+                      {findRefOpen ? (
+                        <span className="gov-dchip gov-dchip--run">{findStatus?.state === 'loading' ? '检索中 ◐' : (findStatus?.count ?? 0) > 0 ? `${findStatus?.count} 篇候选` : '无候选'}</span>
+                      ) : null}
+                      <button className="gov-btn gov-btn--sm" disabled={busy} onClick={() => setFindRefOpen(true)}>AI 查找</button>
                       <button
                         className="gov-btn gov-btn--ghost gov-btn--sm"
                         disabled={busy || !canWrite}
@@ -866,72 +766,10 @@ export function EventsPage(): JSX.Element {
                       >
                         ＋ 添加
                       </button>
-                    </span>
-                  </div>
-                  {refs.map((ref) => (
-                    /* key 含源库：跨库同名文档否则会撞 key（React 复用错行） */
-                    <div className="gov-docline" key={`${ref.sourceScope ?? ''}/${ref.group}/${ref.name}`}>
-                      {/* stale = 引用指向的文档已被删除/移走：仍允许点，由阅读器给出「未找到 + 路径」的失败态，
-                          比禁用按钮更容易让人查清到底哪一篇没了 */}
-                      <button
-                        type="button"
-                        className="gov-docline__main"
-                        title={ref.stale ? `查看「${ref.name}」（${
-                          ref.staleReason === 'scope-missing' ? '所在库已不存在' : '文档已不存在'
-                        }）` : `查看「${ref.name}」正文`}
-                        onClick={() => setDocTarget({ group: ref.group, name: ref.name })}
-                      >
-                        <span className="gov-docline__name">{ref.name}</span>
-                        <span className="gov-docline__meta">
-                          {/* 跨库引用要显示源库；同库引用保持原样（常驻库名是噪声） */}
-                          {ref.sourceScope && ref.sourceScope !== scope ? `${ref.sourceScope} · ` : ''}
-                          {ref.group}
-                          {ref.stale ? (
-                            <span className="gov-error">
-                              {ref.staleReason === 'scope-missing' ? ' · 源库已不存在' : ' · 文档已不存在'}
-                            </span>
-                          ) : null}
-                        </span>
-                      </button>
-                      <div className="gov-docline__right">
-                        <span className={`gov-vis gov-vis--${VIS_CLASS[ref.visibility] ?? 'hidden'}`}>
-                          <span className="gov-vis__dot" />
-                          {VIS_TEXT[ref.visibility]}
-                        </span>
-                        <button
-                          className="gov-btn gov-btn--ghost gov-btn--sm"
-                          disabled={busy || !canWrite}
-                          title={readOnlyHint ?? '移除该参考文档'}
-                          onClick={() => void run(async () => {
-                            // 带 sourceScope：不带会去事件库找同名文档，跨库引用删不掉（或删错）
-                            await removeRef(scope, active.id, ref.group, ref.name, ref.sourceScope);
-                            return `已移除参考文档「${ref.name}」`;
-                          })}
-                        >×</button>
-                      </div>
-                    </div>
-                  ))}
-                  {refs.length === 0 ? <div className="gov-cell-muted">暂无参考文档</div> : null}
-                </div>
+                    </>
+                  )}
+                />
 
-                {/* AI 同源操作 */}
-                <div className="gov-sect">
-                  <div className="gov-sect__head">
-                    <span className="gov-sect__title">AI 同源操作（MCP）</span>
-                    <span className="gov-sect__hint">页面按钮只是这些命令的外壳</span>
-                  </div>
-                  <pre className="gov-code">{`// 挂关联文档（可见性随阶段；remove 即解绑，文档回长期保留）
-ki_event_docs({ scope: "${scope}", event: "#${active.shortId}", action: "add", docs: [{ group: "${detail?.members[0]?.group ?? '<group>'}", name: "${detail?.members[0]?.name ?? '<name>'}" }] })
-
-// 推进阶段（到终态按类型设定的收口动作处理关联文档）
-ki_event_set_stage({ scope: "${scope}", event: "#${active.shortId}", stage: "${type?.stages[Math.min(stageIdx + 1, (type?.stages.length ?? 1) - 1)]?.name ?? ''}" })
-
-// 建一个同类事件，可一次带上文档与引用
-ki_event_create({ scope: "${scope}", title: "${active.title}", type: "${type?.name ?? ''}", docs: [{ group, name }], refs: [{ group, name }] })
-
-// 删除（须已收口；doc_action 必填：wiki 保留 / trash 进回收站）
-ki_event_delete({ scope: "${scope}", event: "#${active.shortId}", doc_action: "wiki" })`}</pre>
-                </div>
               </div>
             )}
           </div>
@@ -975,20 +813,6 @@ ki_event_delete({ scope: "${scope}", event: "#${active.shortId}", doc_action: "w
         />
       ) : null}
 
-      {aiOpen && active ? (
-        <AiAnalyzeModal
-          key={active.id}
-          scope={scope}
-          event={active}
-          analysis={activeAnalysis}
-          canWrite={canWrite}
-          onClose={() => setAiOpen(false)}
-          onUpdated={(next: EventAnalysis) => {
-            setDetail((prev) => (prev ? { ...prev, analysis: next } : prev));
-          }}
-          onOpenSettings={() => { setAiOpen(false); openAiSettings('analysis'); }}
-        />
-      ) : null}
 
       {/*
         关联文档 / 参考文档 → 右侧阅读抽屉（S-07 §3.3：复用 `ModuleDrawer`，不改组件本身）。
@@ -1021,35 +845,6 @@ ki_event_delete({ scope: "${scope}", event: "#${active.shortId}", doc_action: "w
         />
       ) : null}
 
-      {findRefOpen && active ? (
-        <FindRefModal
-          scope={scope}
-          eventId={active.id}
-          canWrite={canWrite}
-          context={{
-            title: active.title,
-            shortId: active.shortId,
-            ...(type?.name ? { typeName: type.name } : {}),
-            stageName: type?.stages.find((s) => s.key === active.stageKey)?.name ?? '—',
-            assocCount: memberCount,
-            scope,
-          }}
-          onClose={() => setFindRefOpen(false)}
-          onAdded={(added, skipped) => {
-            // 局部刷新参考文档区：搜索本身没写数据，不该触发整页重载与列表重排
-            setMessage({
-              tone: 'ok',
-              text: `已加入 ${added} 篇参考文档${skipped > 0 ? `，跳过 ${skipped} 篇（已存在）` : ''}`,
-            });
-            void loadDetail(active.id);
-          }}
-          onSwitchToManual={() => {
-            setFindRefOpen(false);
-            setAddRefOpen(true);
-          }}
-          onOpenSettings={() => { setFindRefOpen(false); openAiSettings('find'); }}
-        />
-      ) : null}
 
       {addRefOpen && active ? (
         <DocPickerModal

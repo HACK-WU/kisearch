@@ -45,6 +45,13 @@ import {
   removeConfirmedLocation,
 } from './events/analysis-store.js';
 import { cancelEventAnalysis, isAnalysisActive, readNormalizedAnalysisDoc, startEventAnalysis } from './events/analysis-runner.js';
+import {
+  ASK_DOC_MAX_BYTES,
+  ASK_DOC_MAX_TURNS,
+  clearAskTurns,
+  readAskDoc,
+} from './events/analysis-ask-store.js';
+import { askEventAnalysis, type AskTargetEvent } from './events/analysis-ask-runner.js';
 import { listTrash, readTrashSettings, writeTrashSettings, removeTrashItem } from './trash-store.js';
 import { restoreFromTrash, purgeExpired } from './trash-service.js';
 import { pendingCount, listPending, scheduleConsume } from './visibility-queue.js';
@@ -491,6 +498,53 @@ export async function handleGovernanceRoutes(
       }
 
       if (id && segs[2] === 'analysis') {
+        /*
+         * 追问（B2）：`/analysis/ask`
+         * · POST 提问（knowledge.ask）；GET 读记录（knowledge.ask）；DELETE 清空（knowledge.write）
+         * · 传了 runId 但与该事件当前草稿不符 → 409 REVISION_CONFLICT（避免"拿新结论回答老问题"）
+         */
+        if (segs[3] === 'ask' && !segs[4]) {
+          if (method === 'GET') {
+            const scope = scopeFromQuery();
+            const event = findEventIn(readAllEvents(scope), id);
+            if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+            const doc = readAskDoc(scope, event.id);
+            const onlyRun = str(q.get('runId'));
+            const turns = onlyRun ? doc.turns.filter((t) => t.runId === onlyRun) : doc.turns;
+            const activeRunId = readNormalizedAnalysisDoc(scope, event.id).draft?.runId ?? null;
+            return sendJson(res, 200, {
+              ok: true,
+              scope,
+              eventId: event.id,
+              turns,
+              total: turns.length,
+              truncated: doc.turns.length > ASK_DOC_MAX_TURNS
+                || Buffer.byteLength(JSON.stringify(doc.turns)) > ASK_DOC_MAX_BYTES,
+              activeRunId,
+            });
+          }
+          if (method === 'POST') {
+            const b = await body();
+            const scope = scopeFromBody(b);
+            const event = findEventIn(readAllEvents(scope), id);
+            if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+            const passedRunId = str(b.runId);
+            const currentRunId = readNormalizedAnalysisDoc(scope, event.id).draft?.runId ?? null;
+            if (passedRunId && passedRunId !== currentRunId) {
+              throw new GovernanceError('REVISION_CONFLICT', '分析结果已更新，请刷新后重新提问');
+            }
+            const question = str(b.question) ?? '';
+            const result = await askEventAnalysis(scope, event as unknown as AskTargetEvent, { question });
+            return sendJson(res, 200, { ok: true, scope, eventId: event.id, turn: result.turn });
+          }
+          if (method === 'DELETE') {
+            const scope = scopeFromQuery();
+            const event = findEventIn(readAllEvents(scope), id);
+            if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+            const cleared = await clearAskTurns(scope, event.id);
+            return sendJson(res, 200, { ok: true, scope, eventId: event.id, cleared });
+          }
+        }
         if (method === 'GET' && !segs[3]) {
           const scope = scopeFromQuery();
           const event = findEventIn(readAllEvents(scope), id);

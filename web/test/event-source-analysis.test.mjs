@@ -23,14 +23,20 @@ const {
   shouldDefaultCheckCandidate,
   shouldOpenAiSettingsForError,
   formatAnalysisMs,
-} = await vite.ssrLoadModule('/src/components/governance/AiAnalyzeModal.tsx');
+} = await vite.ssrLoadModule('/src/components/governance/AiAnalyzePanel.tsx');
 
 after(async () => { await vite.close(); });
 
 const eventsSrc = fs.readFileSync(path.join(webRoot, 'src/pages/EventsPage.tsx'), 'utf8');
 const aiSettingsSrc = fs.readFileSync(path.join(webRoot, 'src/pages/AiSettingsPage.tsx'), 'utf8');
 const layerSrc = fs.readFileSync(path.join(webRoot, 'src/chat/PromptConfigLayer.tsx'), 'utf8');
-const modalSrc = fs.readFileSync(path.join(webRoot, 'src/components/governance/AiAnalyzeModal.tsx'), 'utf8');
+const modalSrc = fs.readFileSync(path.join(webRoot, 'src/components/governance/AiAnalyzePanel.tsx'), 'utf8');
+/** 改版后「AI 分析」挂在 event-detail/EventAnalysisCard 上（批 2） */
+const analysisCardSrc = fs.readFileSync(
+  path.join(webRoot, 'src/components/governance/event-detail/EventAnalysisCard.tsx'), 'utf8');
+/** 2026-11-17 改版：概要卡（含「AI 分析」按钮与描述编辑）已抽到 event-detail/，源码断言改指向新组件 */
+const summaryCardSrc = fs.readFileSync(
+  path.join(webRoot, 'src/components/governance/event-detail/EventSummaryCard.tsx'), 'utf8');
 const scopePickerSrc = fs.readFileSync(path.join(webRoot, 'src/components/ScopeMultiPicker.tsx'), 'utf8');
 const kiCss = fs.readFileSync(path.join(webRoot, 'src/styles/ki.css'), 'utf8');
 const pickerCss = fs.readFileSync(path.join(webRoot, 'src/styles/scope-picker.css'), 'utf8');
@@ -51,14 +57,14 @@ describe('S-05 · AiAnalyzeModal 辅助逻辑与前端守卫', () => {
     assert.equal(formatAnalysisMs(120), '120ms');
   });
 
-  it('EventsPage：「AI 分析」按钮仅受 write 权限禁用（已收口事件放行），包含描述区与代码位置区', () => {
-    const aiBtnStart = eventsSrc.indexOf('gov-btn--ai"');
-    const aiBtnBlock = eventsSrc.slice(aiBtnStart, eventsSrc.indexOf('</button>', aiBtnStart));
+  it('概要卡：「AI 分析」按钮仅受 write 权限禁用（已收口事件放行），含描述区；详情页保留代码位置区', () => {
+    const aiBtnStart = summaryCardSrc.indexOf('gov-btn--ai"');
+    const aiBtnBlock = summaryCardSrc.slice(aiBtnStart, summaryCardSrc.indexOf('</button>', aiBtnStart));
     assert.match(aiBtnBlock, /disabled=\{busy \|\| !canWrite\}/, 'AI 分析按钮必须受 canWrite 门禁');
     assert.match(aiBtnBlock, /AI 分析/);
-    assert.match(eventsSrc, /事件描述/, '详情页需包含事件描述区');
-    assert.match(eventsSrc, /代码位置/, '详情页需包含代码位置区');
-    assert.match(eventsSrc, /<AiAnalyzeModal/, 'EventsPage 应挂载 AiAnalyzeModal');
+    assert.match(summaryCardSrc, /事件描述/, '概要卡需包含事件描述区块（C-06：描述并入概要卡）');
+    assert.match(eventsSrc, /代码位置/, '详情页需保留代码位置区（批 2 再并入分析卡）');
+    assert.match(eventsSrc, /<EventAnalysisCard/, '详情页应渲染 EventAnalysisCard（AI 分析卡）');
     assert.match(modalSrc, /expectedRunId: draft\.runId/, '确认写入必须携带 expectedRunId 防并发重跑错绑');
   });
 
@@ -140,7 +146,7 @@ describe('S-01 · 分析目标目录：块级草稿 + 显式保存（2026-11-16�
     assert.match(modalSrc, /停止中…/, '停止需有进行中反馈并防连点');
     assert.match(modalSrc, /gov-btn--danger-ghost/, '停止是破坏性动作，用 danger 幽灵样式');
     assert.match(modalSrc, /分析已停止/, 'cancelled 需要独立标题文案');
-    assert.match(eventsSrc, /分析已停止 · 查看/, '事件详情徽标需区分「已停止」与「未完成」');
+    assert.match(analysisCardSrc, /text: '已停止'/, '卡头徽标需区分「已停止」与「未完成」');
     // 主动停止不该被当成配置错误而引导去设置页（判据是 SETTINGS_GUIDE_CODES 集合）
     const guideBlock = modalSrc.slice(
       modalSrc.indexOf('SETTINGS_GUIDE_CODES = new Set(['),
@@ -150,7 +156,6 @@ describe('S-01 · 分析目标目录：块级草稿 + 显式保存（2026-11-16�
     // partial + cancelled 也不能显示成「分析完成」：判据必须用 errorCode
     assert.match(modalSrc, /draft\?\.errorCode === 'ANALYSIS_CANCELED'/);
     assert.match(modalSrc, /分析已停止 · 保留 \$\{candidates\.length\} 处候选/);
-    assert.match(eventsSrc, /分析已停止 · \$\{activeAnalysis\.draft\.candidates\.length\} 处候选 · 查看/);
     // 停止按钮状态必须能复位，否则下次重新分析时永久禁用
     assert.match(modalSrc, /if \(!isRunning\) setStopping\(false\)/);
     // 后台已收尾（canceled:false）时同样要复原，不能停在「停止中…」

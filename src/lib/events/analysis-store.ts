@@ -70,14 +70,25 @@ export function normalizeAnalysisDocForRead(
   now = Date.now(),
 ): EventAnalysisDoc {
   const d = doc.draft;
-  if (!d || d.status !== 'running' || isActive) return doc;
-  const staleProcess = d.bootId !== undefined && d.bootId !== CURRENT_BOOT_ID;
-  const timedOut = now - (d.updatedAt || d.startedAt) > ZOMBIE_TIMEOUT_MS;
-  if (!staleProcess && !timedOut) return doc;
+  if (!d) return doc;
+  /*
+   * 字段归一必须在下面那句早退**之前**（历史文件 ready/partial 100% 走早退，
+   * 插在僵尸分支里等于只修了 running 的文件）；但**不能 return** ——
+   * 否则僵尸 running 的恢复逻辑会被跳过（曾因此让「跨进程僵尸态」测试变红）。
+   */
+  const normalized = typeof (d as { conclusion?: unknown }).conclusion === 'string'
+    ? d
+    : { ...d, conclusion: null };
+  const withNormalized = (draft: typeof d) => (normalized === d ? doc : { ...doc, draft });
+
+  if (normalized.status !== 'running' || isActive) return withNormalized(normalized);
+  const staleProcess = normalized.bootId !== undefined && normalized.bootId !== CURRENT_BOOT_ID;
+  const timedOut = now - (normalized.updatedAt || normalized.startedAt) > ZOMBIE_TIMEOUT_MS;
+  if (!staleProcess && !timedOut) return withNormalized(normalized);
   return {
     ...doc,
     draft: {
-      ...d,
+      ...normalized,
       status: 'failed',
       errorCode: 'ANALYSIS_INTERRUPTED',
       errorMessage: '服务已重启或分析任务意外中断，请重新发起分析',

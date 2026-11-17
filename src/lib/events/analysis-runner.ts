@@ -152,6 +152,7 @@ const SYSTEM_OUTPUT_TAIL = `【系统输出与安全规范（不可覆盖）】
 2. 严禁臆造未在工具返回中亲眼看到的文件路径、符号名或行号。
 3. 当证据足够或达到预算上限停止调用工具时，最终回复**只输出一个合法 JSON 对象**（不要附加多余解释文字），格式如下：
 {
+  "conclusion": "结论性文字：说明根因判断、影响面与建议方向，不超过 300 字；不要粘贴代码块；若证据不足就输出空字符串",
   "candidates": [
     {
       "file": "相对目标根目录的文件路径，如 src/auth/guard.ts",
@@ -482,6 +483,7 @@ export async function consumeDailyQuota(
 }
 
 function parseJsonSummary(text: string): {
+  conclusion: string | null;
   candidates: Array<{ file: string; line: number; endLine?: number; why: string; confidence: number }>;
   unconfirmed: string[];
 } | null {
@@ -495,6 +497,14 @@ function parseJsonSummary(text: string): {
   if (start < 0 || end <= start) return null;
   try {
     const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
+    /*
+     * 结论：只收字符串；剥掉代码围栏（结论区是文字层，不该出现代码），
+     * 截断 2000 字防模型整段复述工具输出；空串归 null（前端据此整块不渲染）。
+     */
+    const rawConclusion = parsed.conclusion;
+    const conclusion = typeof rawConclusion === 'string'
+      ? (rawConclusion.replace(/```[\s\S]*?```/g, '').trim().slice(0, 2000) || null)
+      : null;
     const rawCands = Array.isArray(parsed.candidates) ? parsed.candidates : [];
     const candidates: Array<{ file: string; line: number; endLine?: number; why: string; confidence: number }> = [];
     for (const item of rawCands) {
@@ -518,7 +528,7 @@ function parseJsonSummary(text: string): {
     const unconfirmed = Array.isArray(parsed.unconfirmed)
       ? parsed.unconfirmed.map((u) => String(u ?? '').trim()).filter(Boolean)
       : [];
-    return { candidates, unconfirmed };
+    return { conclusion, candidates, unconfirmed };
   } catch {
     return null;
   }
@@ -641,6 +651,7 @@ export async function startEventAnalysis(
     status: 'running',
     targetDir: realRoot,
     commit,
+    conclusion: null,
     candidates: [],
     unconfirmed: [],
     steps: [contextStep],
@@ -1046,6 +1057,7 @@ async function executeAnalysisBackground(input: {
       status: finalStatus,
       ...(errorCode ? { errorCode } : {}),
       ...(errorMessage ? { errorMessage } : {}),
+      conclusion: parsed?.conclusion ?? null,
       candidates: verifiedCandidates,
       unconfirmed: [...new Set(unconfirmed)],
       steps: [...steps],

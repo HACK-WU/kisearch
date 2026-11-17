@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { GOVERNANCE_CODE_NUMBERS } from '../src/lib/governance-errors.js';
+import { GOVERNANCE_CODE_NUMBERS, GovernanceError } from '../src/lib/governance-errors.js';
 import {
   resolveLifecycle,
   validateLifecycleInput,
@@ -229,5 +229,18 @@ describe('⑤ 过期查询与回收站设置', () => {
       'preset_builtin_temp7',
       'preset_builtin_temp30',
     ]);
+  });
+});
+
+/**
+ * 追问（B2）四个新码的 HTTP 状态：编号表只校验唯一性，不校验状态，
+ * 漏登记 HTTP_STATUS 会静默回退 400（正是设计里列的那个风险）。
+ */
+describe("追问（B2）错误码状态映射", () => {
+  it("1615~1618 的 err.status 与契约一致", () => {
+    assert.equal(new GovernanceError("ANALYSIS_ASK_QUESTION_TOO_LONG", "x").status, 400);
+    assert.equal(new GovernanceError("ANALYSIS_ASK_RATE_LIMITED", "x").status, 429);
+    assert.equal(new GovernanceError("ANALYSIS_ASK_BUSY", "x").status, 429);
+    assert.equal(new GovernanceError("ANALYSIS_ASK_TIMEOUT", "x").status, 504);
   });
 });
