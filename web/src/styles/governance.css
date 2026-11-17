@@ -738,7 +738,10 @@
 .gov-dd { position: relative; display: inline-block; }
 .gov-dd__menu {
   position: absolute;
-  right: 0;
+  /* 浮层向左展开还是向右展开，取决于按钮在页面哪一侧：现在下拉都在**左端**（事件页过滤器），
+     仍用 `right: 0` 会从按钮右缘往左溢出视口。改左对齐；若将来把这套下拉放到右端，
+     记得在这里加一条 `right: 0; left: auto` 的变体，而不是直接改回来。 */
+  left: 0;
   top: calc(100% + 6px);
   min-width: 132px;
   padding: 4px;
@@ -1056,6 +1059,20 @@
 .gov-ev__title { gap: 8px; }
 .gov-ev__meta { color: var(--ki-color-text-subtle); font-size: 12px; gap: 5px; }
 .gov-ev__vis { display: inline-flex; align-items: center; gap: 4px; }
+
+/**
+ * 已收口事件：整行灰底降权，但**不禁用**——收口后还要能点开复盘，灰底 ≠ 不可操作。
+ * 与 `.gov-ev--active` 同为 (0,1,0)，谁生效靠先后顺序，所以本段必须留在选中态之后；
+ * 再补一条 (0,2,0) 的联合选择器，防止「已收口 + 选中」时灰底吃掉主色底与左侧竖条。
+ * hover 用 hover-strong：普通 `.gov-ev:hover` 只有 4.5% 不透明度，叠在灰底上几乎看不出变化。
+ */
+.gov-ev--closed { background: var(--ki-color-bg-muted); }
+.gov-ev--closed .gov-ev__name { color: var(--ki-color-text-muted); }
+.gov-ev--closed:hover { background: var(--ki-color-hover-strong); }
+/* 只覆盖底色：左侧竖条由 `.gov-ev.gov-ev--active` 的 box-shadow 提供，
+   这里再写一次会与它抢值（曾写成 3px，和普通选中行的 2px 对不上）。
+   `--ki-color-hover-strong` 在灰底上仍可辨，普通 hover 的 4.5% 几乎看不出。 */
+.gov-ev--closed.gov-ev--active { background: var(--ki-color-primary-soft); }
 
 .gov-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
 .gov-dot--solid { background: var(--ki-color-primary); }

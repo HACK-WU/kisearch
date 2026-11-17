@@ -37,26 +37,43 @@ export class GovernanceApiError extends Error {
   }
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  });
-  let payload: Record<string, unknown> = {};
+async function req<T>(path: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
+  /**
+   * 可取消 + 可超时（REQ-20261116-005）：深度查找要等 10–45s，
+   * 没有 signal 的话"关弹窗 / 点停止"根本中断不了请求，用户只能干等。
+   *
+   * 超时与主动 abort **必须可区分**：超时要提示（可能改用快速查找），
+   * 主动取消要静默（用户已经决定不要了）。
+   */
+  const { timeoutMs, ...rest } = init ?? {};
+  const ctrl = new AbortController();
+  const timer = timeoutMs ? setTimeout(() => ctrl.abort(new DOMException('timeout', 'TimeoutError')), timeoutMs) : null;
+  const incoming = rest.signal;
+  const signal = incoming ? AbortSignal.any([incoming, ctrl.signal]) : ctrl.signal;
   try {
-    payload = (await res.json()) as Record<string, unknown>;
-  } catch {
-    // 非 JSON 响应（网关/代理错误页）按状态码报错
+    const res = await fetch(path, {
+      ...rest,
+      signal,
+      headers: { 'Content-Type': 'application/json', ...(rest.headers ?? {}) },
+    });
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = (await res.json()) as Record<string, unknown>;
+    } catch {
+      // 非 JSON 响应（网关/代理错误页）按状态码报错
+    }
+    if (!res.ok || payload.ok === false) {
+      throw new GovernanceApiError(
+        String(payload.error ?? `HTTP ${res.status}`),
+        res.status,
+        typeof payload.code === 'string' ? payload.code : undefined,
+        payload.details,
+      );
+    }
+    return payload as T;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  if (!res.ok || payload.ok === false) {
-    throw new GovernanceApiError(
-      String(payload.error ?? `HTTP ${res.status}`),
-      res.status,
-      typeof payload.code === 'string' ? payload.code : undefined,
-      payload.details,
-    );
-  }
-  return payload as T;
 }
 
 // ─── 分类 ─────────────────────────────────────────────
@@ -164,6 +181,8 @@ export interface EventView {
   stageIndex: number;
   closedAt: number | null;
   revision: number;
+  /** 创建时间（列表按创建时间排序时使用；后端 `...item.event` 一直有下发，此前前端未声明） */
+  createdAt?: number;
   /** 最后更新时间（列表第二行显示「N 小时前」） */
   updatedAt?: number;
   stage?: { key: string; name: string; index: number; visibility: Visibility };
@@ -555,10 +574,14 @@ export function removeConfirmedCodeLocation(
 export interface RefItem {
   group: string;
   name: string;
+  /** 文档实际所在库；缺省 = 事件所在库（老数据） */
+  sourceScope?: string;
   addedBy: 'ai' | 'manual';
   addedAt: number;
   score?: number;
   stale: boolean;
+  /** stale 的原因：doc-deleted = 文档被删；scope-missing = 源库已不存在或无权限 */
+  staleReason?: 'doc-deleted' | 'scope-missing';
   visibility: Visibility;
 }
 
@@ -590,11 +613,24 @@ export type RefSearchResult = RefSearchResultDto & { ok: true; scope: string };
 export function findRefCandidates(
   scope: string,
   eventId: string,
-  opts: { topK?: number; limit?: number } = {},
+  opts: {
+    /** `fast`（缺省）= 确定性五步；`deep` = LLM 深度查找（服务端未上线时 400） */
+    mode?: 'fast' | 'deep';
+    topK?: number;
+    limit?: number;
+    threshold?: number;
+    /** 可取消：关弹窗 / 点停止 / 切模式 */
+    signal?: AbortSignal;
+    /** 客户端超时。fast 缺省 15s；deep 应传服务端 `find.timeoutMs` + 10s 余量 */
+    timeoutMs?: number;
+  } = {},
 ): Promise<RefSearchResult> {
+  const { signal, timeoutMs, ...body } = opts;
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs/search`, {
     method: 'POST',
-    body: JSON.stringify({ scope, ...opts }),
+    body: JSON.stringify({ scope, ...body }),
+    ...(signal ? { signal } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
   });
 }
 
@@ -622,7 +658,7 @@ export function searchRefDocs(
 export function addRefs(
   scope: string,
   eventId: string,
-  docs: Array<{ group: string; name: string; score?: number }>,
+  docs: Array<{ sourceScope?: string; group: string; name: string; score?: number }>,
   addedBy: 'ai' | 'manual' = 'manual',
 ): Promise<{ ok: true; added: number; skipped: string[] }> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs`, {
@@ -631,7 +667,20 @@ export function addRefs(
   });
 }
 
-export function removeRef(scope: string, eventId: string, group: string, name: string): Promise<{ ok: true }> {
+/**
+ * 删除一条引用。
+ *
+ * `sourceScope` 缺省 = 事件库（老后端 / 老数据兼容）；跨库引用必须带上，
+ * 否则同 group 同名的另一库文档会被误删。
+ */
+export function removeRef(
+  scope: string,
+  eventId: string,
+  group: string,
+  name: string,
+  sourceScope?: string,
+): Promise<{ ok: true }> {
   const params = new URLSearchParams({ scope, group, name });
+  if (sourceScope) params.set('sourceScope', sourceScope);
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs?${params.toString()}`, { method: 'DELETE' });
 }

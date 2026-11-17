@@ -34,6 +34,17 @@ import {
 
 type Status = 'open' | 'closed' | 'all';
 type Tab = 'list' | 'types';
+/**
+ * 排序键（2026-11-17）：后端固定按 `updatedAt` 降序返回，前端只在此结果集内重排。
+ * 保持「最近更新」为默认值 = 升级前后默认视图完全一致，不让人莫名多一次认知重排。
+ */
+type SortKey = 'updated-desc' | 'created-desc' | 'created-asc';
+
+const SORT_LABEL: Record<SortKey, string> = {
+  'updated-desc': '最近更新',
+  'created-desc': '最新创建',
+  'created-asc': '最早创建',
+};
 
 const VIS_TEXT: Record<string, string> = {
   full: '语义+全文',
@@ -73,6 +84,8 @@ export function EventsPage(): JSX.Element {
   const scope = useScopeValue();
   const [tab, setTab] = useState<Tab>('list');
   const [status, setStatus] = useState<Status>('open');
+  /** 列表排序（默认「最近更新」降序 = 后端返回顺序；仅重排已取回的当前页，不改请求） */
+  const [sort, setSort] = useState<SortKey>('updated-desc');
   const [keyword, setKeyword] = useState('');
   const [events, setEvents] = useState<EventView[]>([]);
   const [types, setTypes] = useState<EventTypeView[]>([]);
@@ -262,6 +275,29 @@ export function EventsPage(): JSX.Element {
     }
   };
 
+  /**
+   * 排序只在**已取回的当前页**内进行：后端 `listEvents` 固定 `updatedAt` 降序且不接排序参数，
+   * 前端一次取 `limit:100`（当前事件量远小于此，无差异）。将来事件破百要真排序，
+   * 应给 `/governance/events` 加 `sort` 参数在服务端排 —— 否则第 101 条起永远排不进来。
+   */
+  const sortedEvents = useMemo(() => {
+    const arr = [...events];
+    // `createdAt` 在 `EventRecord` 里是必填，但 `readAllEvents` 只校验 id/stageKey，
+    // 2026-11 之前手工写入的老文件可能没有 → 回退到 updatedAt，避免整批沉到末尾。
+    const created = (e: EventView): number => e.createdAt ?? e.updatedAt ?? 0;
+    if (sort === 'created-desc') arr.sort((a, b) => created(b) - created(a));
+    else if (sort === 'created-asc') arr.sort((a, b) => created(a) - created(b));
+    else arr.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    return arr;
+  }, [events, sort]);
+
+  /**
+   * 第二行时间标签跟着排序键走：按创建时间排却显示「更新于」会让人以为排序坏了。
+   * 按更新时间排时保留原样（只一个相对时间），不额外加前缀词。
+   */
+  const listTimeText = (e: EventView): string =>
+    sort === 'updated-desc' ? relTime(e.updatedAt) : `创建 ${relTime(e.createdAt ?? e.updatedAt)}`;
+
   const closed = active?.closedAt !== null && active?.closedAt !== undefined;
   const stageIdx = type && active ? type.stages.findIndex((s) => s.key === active.stageKey) : -1;
   const stageVis = stageIdx >= 0 ? type!.stages[stageIdx].visibility : 'full';
@@ -278,6 +314,12 @@ export function EventsPage(): JSX.Element {
           ) : null}
         </p>
         <div className="gov-head__actions">
+          {/* 视图切换挪到主操作左侧：它切的是整页内容（列表 / 类型），属页面级，
+              放在下一行左端会与「列表过滤器」混成一条，看起来像在过滤自己 */}
+          <div className="gov-seg" role="group" aria-label="视图">
+            <button aria-pressed={tab === 'list'} onClick={() => setTab('list')}>事件列表</button>
+            <button aria-pressed={tab === 'types'} onClick={() => setTab('types')}>事件类型</button>
+          </div>
           <button
             className="gov-btn gov-btn--sm"
             disabled={!canWrite}
@@ -289,13 +331,10 @@ export function EventsPage(): JSX.Element {
         </div>
       </header>
 
-      <div className="gov-toolbar">
-        <div className="gov-seg">
-          <button aria-pressed={tab === 'list'} onClick={() => setTab('list')}>事件列表</button>
-          <button aria-pressed={tab === 'types'} onClick={() => setTab('types')}>事件类型</button>
-        </div>
-        <span className="gov-toolbar__spacer" />
-        <>
+      {/* 过滤器贴左：它只作用于下方的左侧列表，顶到视口右端会跨 1000px 才建立因果。
+          只在「事件列表」视图渲染 —— 「事件类型」页没有事件可过滤，留着是空转控件。 */}
+      {tab === 'list' ? (
+        <div className="gov-toolbar">
           <DropdownFilter
             label="类型"
             value={typeFilter}
@@ -312,8 +351,18 @@ export function EventsPage(): JSX.Element {
             ]}
             onChange={(v) => setStatus(v as Status)}
           />
-          </>
-      </div>
+          <DropdownFilter
+            label={SORT_LABEL[sort]}
+            value={sort}
+            options={[
+              { value: 'updated-desc', label: '最近更新' },
+              { value: 'created-desc', label: '最新创建' },
+              { value: 'created-asc', label: '最早创建' },
+            ]}
+            onChange={(v) => setSort(v as SortKey)}
+          />
+        </div>
+      ) : null}
 
       {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
       {showReadOnlyHint ? (
@@ -469,15 +518,18 @@ export function EventsPage(): JSX.Element {
               <input className="gov-input" style={{ width: '100%' }} placeholder="搜索事件名或编号…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
             <div className="gov-pane__list">
-              {events.map((event) => {
+              {sortedEvents.map((event) => {
                 const t = types.find((x) => x.id === event.typeId);
                 const idx = t ? t.stages.findIndex((s) => s.key === event.stageKey) : -1;
                 const vis = idx >= 0 ? t!.stages[idx].visibility : 'full';
                 const members = event.memberTotal ?? 0;
+                // 已收口 = `closedAt` 非空（收口的唯一权威）。只降视觉权重、不禁用：
+                // 收口事件仍要能点开复盘，灰底 ≠ 不可操作。
+                const isClosed = event.closedAt !== null && event.closedAt !== undefined;
                 return (
                   <div
                     key={event.id}
-                    className={`gov-ev${event.id === activeId ? ' gov-ev--active' : ''}`}
+                    className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}`}
                     onClick={() => setActiveId(event.id)}
                   >
                     <div className="gov-ev__title">
@@ -486,7 +538,7 @@ export function EventsPage(): JSX.Element {
                     </div>
                     <div className="gov-ev__meta">
                       <span>{members} 篇</span>
-                      <span>· {relTime(event.updatedAt)}</span>
+                      <span>· {listTimeText(event)}</span>
                       {vis === 'full' ? null : (
                         <span className="gov-ev__vis">
                           · <i className={`gov-dot${vis === 'hidden' ? ' gov-dot--hollow' : ' gov-dot--solid'}`} />
@@ -817,19 +869,28 @@ export function EventsPage(): JSX.Element {
                     </span>
                   </div>
                   {refs.map((ref) => (
-                    <div className="gov-docline" key={`${ref.group}/${ref.name}`}>
+                    /* key 含源库：跨库同名文档否则会撞 key（React 复用错行） */
+                    <div className="gov-docline" key={`${ref.sourceScope ?? ''}/${ref.group}/${ref.name}`}>
                       {/* stale = 引用指向的文档已被删除/移走：仍允许点，由阅读器给出「未找到 + 路径」的失败态，
                           比禁用按钮更容易让人查清到底哪一篇没了 */}
                       <button
                         type="button"
                         className="gov-docline__main"
-                        title={ref.stale ? `查看「${ref.name}」（文档已不存在）` : `查看「${ref.name}」正文`}
+                        title={ref.stale ? `查看「${ref.name}」（${
+                          ref.staleReason === 'scope-missing' ? '所在库已不存在' : '文档已不存在'
+                        }）` : `查看「${ref.name}」正文`}
                         onClick={() => setDocTarget({ group: ref.group, name: ref.name })}
                       >
                         <span className="gov-docline__name">{ref.name}</span>
                         <span className="gov-docline__meta">
+                          {/* 跨库引用要显示源库；同库引用保持原样（常驻库名是噪声） */}
+                          {ref.sourceScope && ref.sourceScope !== scope ? `${ref.sourceScope} · ` : ''}
                           {ref.group}
-                          {ref.stale ? <span className="gov-error"> · 文档已不存在</span> : null}
+                          {ref.stale ? (
+                            <span className="gov-error">
+                              {ref.staleReason === 'scope-missing' ? ' · 源库已不存在' : ' · 文档已不存在'}
+                            </span>
+                          ) : null}
                         </span>
                       </button>
                       <div className="gov-docline__right">
@@ -842,7 +903,8 @@ export function EventsPage(): JSX.Element {
                           disabled={busy || !canWrite}
                           title={readOnlyHint ?? '移除该参考文档'}
                           onClick={() => void run(async () => {
-                            await removeRef(scope, active.id, ref.group, ref.name);
+                            // 带 sourceScope：不带会去事件库找同名文档，跨库引用删不掉（或删错）
+                            await removeRef(scope, active.id, ref.group, ref.name, ref.sourceScope);
                             return `已移除参考文档「${ref.name}」`;
                           })}
                         >×</button>
