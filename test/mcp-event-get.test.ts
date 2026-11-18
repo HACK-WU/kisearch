@@ -152,12 +152,13 @@ describe('② 结构完整性', () => {
     assert.match(body.hint, /ki_get_module_info/);
   });
 
-  it('事件不存在 → EVENT_NOT_FOUND', async () => {
+  it('事件不存在 → EVENT_NOT_FOUND 且带 available（与其它事件工具同一口径）', async () => {
     const res = await call('ki_event_get', { scope, event: '#999' });
     assert.equal(res.isError, true);
     const body = parse(res);
     assert.equal(body.code, 'EVENT_NOT_FOUND');
-    assert.match(body.error, /ki_event_list/);
+    // 四个入口共用 store.mustFindEvent：错误里必须给可用事件，否则 AI 要多跑一次 list
+    assert.ok(Array.isArray(body.details?.available), 'details.available 缺失');
   });
 });
 
@@ -284,5 +285,57 @@ describe('④ 裁剪参数', () => {
 
     assert.equal(body.refs.total, 0);
     assert.equal(body.analysis.confirmed.total, 0);
+  });
+
+  it('refs_limit=0 且确有引用 → items 空、total 正确、有 note（条数走 readRefs，不解析可见性）', async () => {
+    const ref = seedDoc('裁剪引用');
+    const created = parse(await call('ki_event_create', {
+      scope,
+      title: '裁剪引用测试',
+      type: 'et_1',
+      refs: [{ group: GROUP, name: ref.text }],
+    }));
+    const event = created.event.id as string;
+
+    const body = parse(await call('ki_event_get', { scope, event, refs_limit: 0 }));
+    assert.equal(body.refs.total, 1);
+    assert.deepEqual(body.refs.items, []);
+    assert.match(body.refs.note, /refs_limit=0/);
+  });
+});
+
+describe('⑤ loadEventDetail 的 analysisActive', () => {
+  it('running 草稿超 2 分钟：默认判中断；传 analysisActive 则保持 running（HTTP 详情必须传）', async () => {
+    const { loadEventDetail } = await import('../src/lib/events/event-detail.js');
+    const created = parse(await call('ki_event_create', { scope, title: 'running 草稿', type: 'et_1' }));
+    const event = created.event.id as string;
+    const now = Date.now();
+
+    writeJson(getAnalysisPath(scope, event), {
+      version: 1,
+      eventId: event,
+      draft: {
+        runId: 'run-live',
+        status: 'running',
+        targetDir: '/tmp/p',
+        commit: 'c0ffee',
+        conclusion: null,
+        unconfirmed: [],
+        candidates: [],
+        steps: [],
+        stats: {},
+        startedAt: now - 600_000,
+        updatedAt: now - 300_000,
+      },
+      confirmed: [],
+      updatedAt: now - 300_000,
+    } as unknown as Record<string, unknown>);
+
+    const stale = loadEventDetail(scope, event, { now });
+    assert.equal(stale.analysis.draft?.status, 'failed');
+    assert.equal(stale.analysis.draft?.errorCode, 'ANALYSIS_INTERRUPTED');
+
+    const alive = loadEventDetail(scope, event, { now, analysisActive: true });
+    assert.equal(alive.analysis.draft?.status, 'running');
   });
 });

@@ -18,7 +18,7 @@ import {
   loadGroupCache, writeGroupCache, writeGroupCacheBatch,
   readAllGroupCaches, type GroupCacheDoc,
 } from '../group-cache.js';
-import { findEventIn, isEventClosed, readAllEvents, writeEvent } from './store.js';
+import { isEventClosed, mustFindEvent, readAllEvents, writeEvent } from './store.js';
 import { getType, resolveStageVisibility } from './type-service.js';
 import { precheckLifecycle } from '../relation-lifecycle.js';
 import {
@@ -97,18 +97,7 @@ function visibilityFlags(mode: Visibility): { mode: Visibility; dense: boolean; 
   return { mode, dense: mode === 'full', fts: mode !== 'hidden' };
 }
 
-function mustFindEvent(scope: string, ref: string): EventRecord {
-  const events = readAllEvents(scope);
-  const event = findEventIn(events, ref);
-  if (!event) {
-    const available = events
-      .filter((e) => !isEventClosed(e))
-      .slice(0, 5)
-      .map((e) => ({ id: e.id, shortId: e.shortId, title: e.title }));
-    throw new GovernanceError('EVENT_NOT_FOUND', `事件「${ref}」不存在`, { available });
-  }
-  return event;
-}
+/** 查找 + 抛错收敛到 `store.ts::mustFindEvent` */
 
 /** `docs` 入参归一化：缺失 / 非数组 / 元素不合法 → `EVENT_DOCS_INVALID`；空数组合法 */
 function normalizeDocs(raw: unknown): MemberRef[] {

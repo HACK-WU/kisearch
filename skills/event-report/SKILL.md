@@ -15,6 +15,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 - 固定字段模板（title / type / stage / description 首行来源行）
 - 建前查重（`ki_event_list`），命中则挂证据不新建
 - 副作用红线：默认只挂 `refs`，不挂 `docs`
+- 读详情（`ki_event_get`）：结论全文 / 未确认点 / 已确认位置 / 引用；`ki_event_list` 只有 120 字预览，**判断"解决了没有"必须用 get**
 - 收口（`ki_event_set_stage`）与召回（接手模块先查未收口）
 - 降级：只读会话 / 无 scope / 无权限 / 类型重名 / 敏感信息
 - 每次上报必有一行对话回执
@@ -67,7 +68,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 |---|---|---|
 | 1 | **不在当前任务范围内**（越界） | 属本次范围 → 直接做 |
 | 2 | **需要有人推进到收口**（有终态、会挂起来） | 只是知识 → 写记忆 |
-| 3 | `ki_event_list(scope, q: "<标题关键词>", status: "open", limit: 10)` **无同事项** | 有命中 → 走 §6 追加，不新建 |
+| 3 | **无同事项**：先 `ki_event_list(scope, q: "<标题关键词>", status: "open", limit: 10)` 找同题，命中后再 `ki_event_get(event: "#N")` **读详情确认是不是同一件事** | 标题相似 ≠ 同一问题（#36「删除后向量残留」与 #37「hidden 仍可召回」标题高度重叠，是两起不同 bug）→ 同一件走 §6 追加；不同件正常新建，描述里注明「与 #N 相关但不同事」 |
 
 ---
 
@@ -86,9 +87,11 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 
 ```
 ① ki_event_type_list(scope)            # 首次用 / 不确定类型时；拿阶段链与 terminalAction
-② ki_event_list(scope, q: 关键词, status: "open", limit: 10)   # 判重（门 3）
-③ 命中 → ki_event_refs(action="add", event="#N", docs: [...])  # 不新建
-   未命中 → ④
+② ki_event_list(scope, q: 关键词, status: "open", limit: 10)   # 找同题（门 3）
+③ ② 命中 → ki_event_get(event: "#N") 读详情，确认是不是同一件事
+     ├─ 同一件 → ki_event_refs(action="add", event="#N", docs: [...])   # 结束，不新建
+     └─ 不同件 → 走 ④（description 里注明「与 #N 相关但不同事」）
+   ② 未命中 → 走 ④
 ④ ki_event_create(scope, title, type, description, refs?)
 ⑤ 回执一行（§10）
 ```
@@ -132,7 +135,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 ## 6. 去重与追加（第二次遇到同一件事）
 
 ```
-已有未收口事件
+已有未收口事件（先用 ki_event_get 确认是不是同一件事，别只看标题）
   ├─ 有新证据      → ki_event_refs(action="add", event="#N", docs: [...])
   ├─ 阶段已推进    → ki_event_set_stage(event="#N", stage: "<下一阶段>", note: "<一句依据>")   # 推进一步，不跳阶
   └─ 发现判断错了  → 不要静默删；告知用户后按需 ki_event_delete（须事件已收口）
@@ -209,6 +212,8 @@ ki_event_list(scope, q: "<模块名>", status: "open", limit: 10)
 - ❌ **把结论也建事件**（"这个库不支持并发写" 属记忆，不属事件）
 - ❌ **代码风格 / 命名 / 措辞建事件**（噪音的主力来源）
 - ❌ **建前不查重**（同标题满屏，事件页失去可读性）
+- ❌ **把 `conclusionPreview` 当结论**（list 只给 120 字预览；判断"解决了没有"、要不要收口，必须 `ki_event_get` 读全文与未确认点）
+- ❌ **只看标题就把新发现挂到旧事件上**（#36 与 #37 标题高度重叠却是两起 bug；必须先 get 读描述与结论再判同一件事）
 - ❌ **挂 `docs`**（把文档打成 `hidden`，检索立刻 0 命中）
 - ❌ **直接从中间阶段起步**（可见性提前放开，且回退要再动一次）
 - ❌ **推到终态前不问用户**（`trash` 类型会把文档送进回收站）
@@ -237,6 +242,7 @@ ki_event_list(scope, q: "<模块名>", status: "open", limit: 10)
 | `ai-codekb-memory` 规则 | 分流表里"结论 / 知识"分支由它执行（`ki_sync_relation` / `ki-upload`）；本 skill 只管"一件事"分支 |
 | `ki-upload` | `--event` 可把文档绑到已存在事件；其文档里"AI 不能创建事件"的说法已过时，**以本 skill 为准** |
 | `code-review` / `debug` / `design-craft` / `auto-review` | 它们的收尾出口检测到越界发现时，调 `use_skill("event-report")` 继续；不复制判据 |
+| `ki_event_list` / `ki_event_get` | **list 用来找**（模糊 + 摘要），**get 用来读**（全文 + 按需裁剪）；判断结论 / 未确认点一律用 get |
 | `plan-track` | 台账记"这件事怎么做"；事件记"这件事有没有收口"。互不替代 |
 | `ki-search` | 上报前若不确定是否已有相关事件 / 相关文档，先查 |
 

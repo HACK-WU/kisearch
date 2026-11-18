@@ -24,7 +24,7 @@ import { getKbDir } from '../scope.js';
 import { readJson, writeJson } from '../store.js';
 import { moveToTrash } from '../trash-service.js';
 import {
-  readAllEvents, findEventIn, isEventClosed, writeEvent, removeEventFile,
+  readAllEvents, isEventClosed, writeEvent, removeEventFile, mustFindEvent,
   allocateShortId, newEventId,
 } from './store.js';
 import { appendStageLog, removeStageLog } from './stage-log.js';
@@ -766,17 +766,7 @@ export async function reopenEvent(scope: string, eventRef: string): Promise<Reop
 // 内部工具
 // ─────────────────────────────────────────────────────────────
 
-function mustFindEvent(scope: string, ref: string): EventRecord {
-  const event = findEventIn(readAllEvents(scope), ref);
-  if (!event) {
-    const available = readAllEvents(scope)
-      .filter((e) => !isEventClosed(e))
-      .slice(0, 5)
-      .map((e) => ({ id: e.id, shortId: e.shortId, title: e.title }));
-    throw new GovernanceError('EVENT_NOT_FOUND', `事件「${ref}」不存在`, { available });
-  }
-  return event;
-}
+/** 查找 + 抛错收敛到 `store.ts::mustFindEvent`（三处业务模块共用，避免各写一份） */
 
 /**
  * 把目标档位登记进 `.visibility-pending.json`（B4 的 visibility-queue 消费）。

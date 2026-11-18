@@ -18,6 +18,7 @@ import path from 'path';
 import { getKbDir, validateScope } from '../scope.js';
 import { readJson } from '../store.js';
 import { walWrite } from '../wal.js';
+import { GovernanceError } from '../governance-errors.js';
 import type { EventRecord, EventTypeRecord, EventTypesDoc, EventsMeta } from './types.js';
 
 export function getEventsDir(scope: string): string {
@@ -173,4 +174,24 @@ export function allocateShortId(scope: string): number {
 export function newEventId(now = Date.now()): string {
   const rand = Math.random().toString(36).slice(2, 8).padEnd(6, '0');
   return `evt_${now.toString(36)}_${rand}`;
+}
+
+/**
+ * 按 ref 找事件，找不到抛 `EVENT_NOT_FOUND`（**带 `available`：前 5 条未收口事件**）。
+ *
+ * 为什么要放在最底层的 store 而不是某个业务模块：`event-service` / `members` /
+ * `refs-service` 三处都要用它，而 `event-service` 已经 import `members`——把这份实现
+ * 放在任一业务模块里，其余模块反向 import 就会成环。store 只依赖 fs 与 types，无环。
+ *
+ * 只读一次 events：`available` 复用同一次快照，不重复扫盘（历史实现里有两次读）。
+ */
+export function mustFindEvent(scope: string, ref: string): EventRecord {
+  const events = readAllEvents(scope);
+  const event = findEventIn(events, ref);
+  if (event) return event;
+  const available = events
+    .filter((e) => !isEventClosed(e))
+    .slice(0, 5)
+    .map((e) => ({ id: e.id, shortId: e.shortId, title: e.title }));
+  throw new GovernanceError('EVENT_NOT_FOUND', `事件「${ref}」不存在`, { available });
 }

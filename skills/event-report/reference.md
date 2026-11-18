@@ -43,6 +43,7 @@
 
 | 返回 | 含义 | 正确处置 |
 |---|---|---|
+| `EVENT_NOT_FOUND` | 事件不存在（`ki_event_get` / `ki_event_list` 定位失败） | 先用 `ki_event_list(q: 关键词)` 找；`event` 三种写法都支持：`evt_…` / `#3` / `3` |
 | `TYPE_NOT_FOUND` + `available` | 类型名不存在或重名 | 改传 id（`et_1`），不猜 |
 | `STAGE_NOT_FOUND` | 阶段名 / key 不对 | 先 `ki_event_type_list` 取真实阶段 |
 | `STAGE_DISABLED` | 阶段已停用 | 换下一个可用阶段或问用户 |

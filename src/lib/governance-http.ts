@@ -37,7 +37,7 @@ import { resolveVisibilityOfRelation } from './visibility-index.js';
 import { readAllGroupCaches } from './group-cache.js';
 import { listTypes, createType, updateType, deleteType } from './events/type-service.js';
 import {
-  listEvents, createEventWithBinding, updateEvent, transitionEvent, deleteEvent, reopenEvent, collectMembers,
+  listEvents, createEventWithBinding, updateEvent, transitionEvent, deleteEvent, reopenEvent,
   type CreateEventOutcome,
 } from './events/event-service.js';
 import { bindMembers, unbindMember, type BindMembersOutcome } from './events/members.js';
@@ -49,7 +49,7 @@ import { defaultFindConfig, readPromptConfig } from './chat/prompt-config.js';
 import { runDeepFindAsSearchResult } from './events/find-service.js';
 import { loadConfig, getScopeImportConfig, resolveImportExtensions } from './config.js';
 import { ALL_SCOPES } from './mcp-token.js';
-import { readStageLogs } from './events/stage-log.js';
+import { loadEventDetail } from './events/event-detail.js';
 import {
   confirmDraftLocations,
   discardAnalysisDraft,
@@ -695,16 +695,36 @@ export async function handleGovernanceRoutes(
       const id = segs[1];
       if (id && method === 'GET' && !segs[2]) {
         const scope = scopeFromQuery();
-        const event = findEventIn(readAllEvents(scope), id);
-        if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
-        const analysisDoc = readNormalizedAnalysisDoc(scope, event.id);
+        // 404 判定保持不变（错误码/状态码不动），找到后再走共用读取
+        const found = findEventIn(readAllEvents(scope), id);
+        if (!found) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+        /**
+         * 读取逻辑与 MCP `ki_event_get` 共用 `loadEventDetail`（单一真源）。
+         * 展示仍按本接口的**旧 DTO**：`event` 保持原形、`analysis.draft` 保留 candidates/steps、
+         * `logs` 保留 eventId —— 前端详情页依赖这些字段，不能换成 MCP 的裁剪版。
+         *
+         * 两个易错点：
+         *   · `analysisActive` 必须传真实值：`ZOMBIE_TIMEOUT_MS` 只有 2 分钟，一次分析常跑几分钟，
+         *     恒传 false 会让正在跑的分析被归一成 failed，详情页误报"分析已中断"；
+         *   · 上面已查过一次事件，若两次之间被删，`loadEventDetail` 会抛 EVENT_NOT_FOUND ——
+         *     这里兜回同一个 404，不退化成 500。
+         */
+        let detail: ReturnType<typeof loadEventDetail>;
+        try {
+          detail = loadEventDetail(scope, found.id, { analysisActive: isAnalysisActive(scope, found.id) });
+        } catch (err) {
+          if (err instanceof GovernanceError && err.code === 'EVENT_NOT_FOUND') {
+            return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          }
+          throw err;
+        }
         return sendJson(res, 200, {
           ok: true,
           scope,
-          event,
-          members: collectMembers(scope, event.id).map((m) => ({ group: m.group, name: m.name })),
-          logs: readStageLogs(scope, event.id),
-          analysis: { draft: analysisDoc.draft, confirmed: analysisDoc.confirmed },
+          event: detail.event,
+          members: detail.members.map((m) => ({ group: m.group, name: m.name })),
+          logs: detail.logs,
+          analysis: { draft: detail.analysis.draft, confirmed: detail.analysis.confirmed },
         });
       }
 

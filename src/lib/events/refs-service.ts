@@ -15,7 +15,7 @@
  */
 
 import { readAllGroupCaches } from '../group-cache.js';
-import { readAllEvents, readEventTypes, findEventIn, isEventClosed } from './store.js';
+import { readAllEvents, readEventTypes, findEventIn, isEventClosed, mustFindEvent } from './store.js';
 import { addRefDocs, readRefs, refKey, removeRefDoc } from './refs-store.js';
 import { listAllScopes } from '../scope.js';
 import { isScopeAccessAllowed } from '../scope-access.js';
@@ -179,16 +179,7 @@ export function extractKeywords(title: string, memberNames: string[]): string[] 
   return [...new Set(tokens)].slice(0, 8);
 }
 
-function mustEvent(scope: string, eventRef: string) {
-  const event = findEventIn(readAllEvents(scope), eventRef);
-  if (!event) {
-    throw new GovernanceError('EVENT_NOT_FOUND', `事件「${eventRef}」不存在`, {
-      available: readAllEvents(scope).filter((e) => !isEventClosed(e)).slice(0, 5)
-        .map((e) => ({ id: e.id, shortId: e.shortId, title: e.title })),
-    });
-  }
-  return event;
-}
+/** 查找 + 抛错收敛到 `store.ts::mustFindEvent`（历史实现多扫了一次 events 取 available） */
 
 /** 库内文档总数（口径：分片里的全部 relation，一个 chunk 行不算） */
 function countAllDocs(caches: ReturnType<typeof readAllGroupCaches>): number {
@@ -209,7 +200,7 @@ export interface ListRefsResult {
  *   合成一个布尔只能给含糊文案。
  */
 export function listRefs(scope: string, eventRef: string): ListRefsResult {
-  const event = mustEvent(scope, eventRef);
+  const event = mustFindEvent(scope, eventRef);
   const refs = readRefs(scope, event.id);
   if (refs.length === 0) return { refs: [] };
 
@@ -260,7 +251,7 @@ export async function searchRefCandidates(
   const started = Date.now();
   const steps: RefSearchStep[] = [];
 
-  const event = mustEvent(scope, eventRef);
+  const event = mustFindEvent(scope, eventRef);
   const type = getType(scope, event.typeId);
   const { visibility } = resolveStageVisibility(type, event.stageKey);
 
@@ -577,7 +568,7 @@ export interface AddRefsInput {
 }
 
 export function addRefs(scope: string, eventRef: string, input: AddRefsInput): { added: number; skipped: string[] } {
-  const event = mustEvent(scope, eventRef);
+  const event = mustFindEvent(scope, eventRef);
   const existing = readRefs(scope, event.id);
   if (existing.length + input.docs.length > REF_LIMIT) {
     throw new GovernanceError(
@@ -692,7 +683,7 @@ export function removeRef(
   const target = typeof targetOrGroup === 'string'
     ? { group: targetOrGroup, name: name ?? '' }
     : targetOrGroup;
-  const event = mustEvent(scope, eventRef);
+  const event = mustFindEvent(scope, eventRef);
   const removed = removeRefDoc(scope, event.id, target, Date.now());
   if (!removed) {
     throw new GovernanceError('REF_NOT_FOUND', `引用不存在：${target.group}/${target.name}`);
@@ -729,7 +720,7 @@ export function searchDocsForAdd(
 
   let excluded: Set<string> | null = null;
   if (opts.eventId) {
-    const event = mustEvent(scope, opts.eventId);   // 事件不存在要显式报错，不静默返回空
+    const event = mustFindEvent(scope, opts.eventId);   // 事件不存在要显式报错，不静默返回空
     excluded = new Set([
       ...collectMembers(scope, event.id).map((m) => `${m.group}\u0000${m.name}`),
       ...readRefs(scope, event.id).map((r) => `${r.group}\u0000${r.name}`),
