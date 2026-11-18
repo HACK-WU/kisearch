@@ -157,6 +157,8 @@ import { isViewRequest, resolveScopeTargets } from './scope-view.js';
 import { isScopeAccessAllowed } from './scope-access.js';
 import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './vector-dimension-snapshot.js';
 import { withTimeoutFallback } from './timeout.js';
+// 上传逐条校验的单一实现（与事件参考文档上传共用；放独立模块避免 governance 反向依赖成环）
+import { sanitizeFileName, validateUploadFile, type UploadFilePolicy } from './import-upload-policy.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -355,6 +357,34 @@ export interface Job {
    * （design S-02 §3.8 推演问题 3）。只有 `/open/v1/import/status` 读它，Web 端零影响。
    */
   waitingForScopeLock?: boolean;
+  /**
+   * 事件参考文档上传通道（REQ-20261118-001）：导入结束后自动建引用的结果。
+   *
+   * 只有 `POST /governance/events/:id/refs/upload` 起的 job 会写该字段（其余 job 恒缺省，
+   * 既有消费方零影响）。`failed` 每一条都表示「文档已入库、但没进参考文档」——
+   * 前端必须原样展示，静默吞掉会让「上传成功」变成一句假话。
+   */
+  refsBinding?: {
+    added: number;
+    /** 已在参考文档里、本次未重复加入的（`group/name` 形式，与 addRefs 的 skipped 同源） */
+    skipped: string[];
+    /**
+     * 因「同 Group 同名已存在」被跳过覆盖的文档（`conflictMode: 'skip'` 的产物）。
+     *
+     * 这些文档**没有被覆盖**，引用会指向库中已有内容 —— 用户必须看得见，
+     * 否则「我上传了新版本却没生效」会变成一个查不出来的谜（R9）。
+     */
+    skippedConflicts: string[];
+    failed: { name: string; error: string }[];
+    /**
+     * **通过校验、已提交导入**的文件数。
+     *
+     * 未通过校验的文件不计入（它们同时出现在接口回执的 `rejected` 与本字段的 `failed` 里），
+     * 因此 `failed` = 未通过校验 + 导入未落库 + 建引用被拒三种，**不能**用
+     * `added + failed.length === expected` 断言；UI 只并列展示这几个数字。
+     */
+    expected: number;
+  };
 }
 
 const jobs = new Map<string, Job>();
@@ -483,14 +513,11 @@ function rejectScopeViolation(res: http.ServerResponse, scope: string, via: stri
   sendJson(res, 403, { ok: false, error: 'Forbidden: 无权访问该 scope' });
 }
 
-export function sanitizeFileName(name: string): string {
-  // 仅允许相对路径文件名（支持子目录），拒绝绝对路径与穿越
-  const normalized = path.normalize(name);
-  if (path.isAbsolute(normalized) || normalized.startsWith('..')) {
-    throw new Error(`非法的文件名（拒绝路径穿越）：${name}`);
-  }
-  return normalized;
-}
+/**
+ * `sanitizeFileName` 的实现已迁到 `import-upload-policy.ts`（事件上传要共用同一判据）。
+ * 这里保留同名导出，`open-api/upload-stream.ts` 等既有消费方零改动。
+ */
+export { sanitizeFileName };
 
 // ─── /api/doc/list 缓存 ───────────────────────────────
 
@@ -2474,12 +2501,14 @@ async function processImportUpload(
   const requestConfig = loadConfig();
   const scope = resolveScope(requestConfig, body.scope);
   const importConfig = getScopeImportConfig(requestConfig, scope);
-  const allowedExtensions = resolveImportExtensions(requestConfig, scope);
-  const allowedExt = new Set(allowedExtensions.map((extension) => extension.toLowerCase()));
-  const assetExt = new Set(ASSET_EXTENSIONS);
-  const assetsEnabled = importConfig?.assets !== false;
-  const maxFileSizeBytes = importConfig?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES;
-  const maxAssetSizeBytes = importConfig?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE;
+  /** 校验口径交给 `import-upload-policy.ts`（与事件参考文档上传同源，勿在此另判一遍） */
+  const uploadPolicy: UploadFilePolicy = {
+    extensions: resolveImportExtensions(requestConfig, scope),
+    assetExtensions: [...ASSET_EXTENSIONS],
+    assetsEnabled: importConfig?.assets !== false,
+    maxFileSizeBytes: importConfig?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES,
+    maxAssetSizeBytes: importConfig?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE,
+  };
 
   const requestedUploadId = body.uploadId?.trim() ?? '';
   const uploadId = requestedUploadId || crypto.randomUUID();
@@ -2542,41 +2571,26 @@ async function processImportUpload(
 
   for (const f of body.files) {
     const name = f.name ?? '';
-    const content = f.content ?? '';
     try {
-      if (!name) throw new Error('缺少文件名');
-      const ext = path.extname(name).toLowerCase();
-      const isDocument = allowedExt.has(ext);
-      const isAsset = assetsEnabled && assetExt.has(ext);
-      if (!isDocument && !isAsset) {
-        const assetHint = assetsEnabled ? `；附件允许 ${[...assetExt].join('/')}` : '';
-        throw new Error(`不支持的扩展名（${ext || '(无)'}），文档仅允许 ${[...allowedExt].join('/')}${assetHint}`);
-      }
-      const buf = Buffer.from(content, 'base64');
-      const maxBytes = isAsset ? maxAssetSizeBytes : maxFileSizeBytes;
-      if (buf.length > maxBytes) {
-        throw new Error(`文件超过大小上限（${Math.round(maxBytes / 1024)}KB）`);
-      }
-      const safeName = sanitizeFileName(name);
-      if (requestPaths.has(safeName)) {
-        throw new Error(`当前请求包含重复相对路径：${safeName}`);
-      }
-      const abs = path.join(dir, safeName);
+      // 判据（扩展名 / 大小 / 净化 / 重名）全在 policy 模块；这里只负责落盘
+      const v = validateUploadFile({ name: f.name, content: f.content }, uploadPolicy, requestPaths);
+      const abs = path.join(dir, v.name);
       if (!abs.startsWith(dir + path.sep)) {
         throw new Error('非法路径');
       }
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       if (fs.existsSync(abs)) {
         const existing = fs.readFileSync(abs);
-        if (!requestedUploadId || !existing.equals(buf)) {
-          throw new Error(`暂存文件已存在且内容不同：${safeName}；请使用新的 uploadId，或重试同一批次的相同内容`);
+        if (!requestedUploadId || !existing.equals(v.buf)) {
+          throw new Error(`暂存文件已存在且内容不同：${v.name}；请使用新的 uploadId，或重试同一批次的相同内容`);
         }
         // 同一 uploadId 的相同内容重试是幂等操作，不重复覆盖已有文件。
       } else {
-        fs.writeFileSync(abs, buf);
+        fs.writeFileSync(abs, v.buf);
       }
-      requestPaths.add(safeName);
-      saved.push({ name: safeName, path: abs, size: buf.length });
+      // 落盘成功后才登记：写失败的同名文件不应被后续条目判成「重复」
+      requestPaths.add(v.name);
+      saved.push({ name: v.name, path: abs, size: v.buf.length });
     } catch (err) {
       errors.push({ name: name || '(未命名)', error: (err as Error).message });
     }
@@ -4723,6 +4737,12 @@ async function handleImportStatus(res: http.ServerResponse, url: URL, authScopes
       errorCode: job.errorCode,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
+      /**
+       * 事件参考文档上传（REQ-20261118-001）：绑定结果**晚于** `state='done'` 写入
+       * （导入落定后才逐篇 addRefs）。前端见「done 但无该字段」应继续短轮询，
+       * 不要立即判定"没挂上"。
+       */
+      ...(job.refsBinding ? { refsBinding: job.refsBinding } : {}),
       // ── S-02/S-03（REQ-20261009-003）：两级完成口径（纯新增字段，既有字段语义不变）──
       // 前端：`usable === true` 即渲染「已完成 · 可用」；`indexState === 'indexing'` 期间显示
       //「索引整理中…」并**继续轮询**；转为 `optimized` 显示「已优化」，`available` 显示重试引导。

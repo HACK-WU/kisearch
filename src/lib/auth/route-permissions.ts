@@ -128,6 +128,8 @@ const RULES: Rule[] = [
   pattern('POST', /^\/governance\/events\/[^/]+\/reopen$/, 'permission', 'knowledge.write'),
   pattern('GET', /^\/governance\/events\/[^/]+\/refs$/, 'permission', 'knowledge.read'),
   pattern('POST', /^\/governance\/events\/[^/]+\/refs$/, 'permission', 'knowledge.write'),
+  // 上传文件并挂为参考文档（REQ-20261118-001）：写操作；漏登记 = 404
+  pattern('POST', /^\/governance\/events\/[^/]+\/refs\/upload$/, 'permission', 'knowledge.write'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/refs$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analyze$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/cancel$/, 'permission', 'knowledge.write'),

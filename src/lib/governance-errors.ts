@@ -88,6 +88,18 @@ export const GOVERNANCE_CODE_NUMBERS = {
   /** 未知查找模式（不是 fast / deep） */
   FIND_MODE_INVALID: 1411,
 
+  // ── 参考文档上传（REQ-20261118-001，1412-1416）──
+  /** 请求里没有文件（`files` 为空或缺失） */
+  REF_UPLOAD_NO_FILE: 1412,
+  /** 单次文件数超上限（10）：显式拒绝而不是截断（截断会让人以为全传了） */
+  REF_UPLOAD_TOO_MANY: 1413,
+  /** 逐个文件校验失败（扩展名 / 大小 / 带路径 / 重名 / 图片附件）；`details.files` 给逐条原因 */
+  REF_UPLOAD_INVALID_FILE: 1414,
+  /** 落点 Group 非法（绝对路径 / `..` / 保留根键 `__root__`） */
+  REF_UPLOAD_GROUP_INVALID: 1415,
+  /** 请求体无法解析或超过 16MB 上限 */
+  REF_UPLOAD_BAD_REQUEST: 1416,
+
   // ── S-03 深度查找门禁与预算（REQ-20261116-005 二期）──
   /** 未配置模型 / 模型不可用 */
   FIND_LLM_UNAVAILABLE: 1420,

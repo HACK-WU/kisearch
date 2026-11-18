@@ -236,6 +236,20 @@ export interface ImportJob {
     unknown?: boolean;
     reason?: string;
   };
+  /**
+   * 事件参考文档上传（REQ-20261118-001）：导入结束后的建引用结果。
+   *
+   * 只有 `POST /governance/events/:id/refs/upload` 起的 job 有该字段；
+   * **它晚于 `state='done'` 写入** —— 见 done 但无该字段时继续短轮询，别急着判"没挂上"。
+   */
+  refsBinding?: {
+    added: number;
+    skipped: string[];
+    /** 同 Group 同名已存在、**未被覆盖**的文档（引用指向库中旧内容） */
+    skippedConflicts: string[];
+    failed: Array<{ name: string; error: string }>;
+    expected: number;
+  };
 }
 
 export interface StatusResponse {

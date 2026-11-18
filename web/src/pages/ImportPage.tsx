@@ -9,6 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useLocation } from 'react-router-dom';
 import { getTasks, activeImportCount } from '@/api/tasksApi';
 import { getImportConfig, getImportStatus, getImportUploadStatus, uploadFiles, fetchTags, cancelImport, runImport, preflightImport, pruneImport, getDocContent, type ImportConfigResponse, type ImportJob, type ImportConflictMode, type ImportPreflightDuplicate, type ImportPruneCandidate, type ImportPrunePlan } from '@/api/httpApi';
+import { fileToBase64 } from '@/lib/fileBase64';
 import { GroupPathSelect } from '@/components/GroupPathSelect';
 import { ScopePathSelect } from '@/components/ScopePathSelect';
 import { WriteTabs } from '@/components/WriteTabs';
@@ -373,15 +374,7 @@ function buildSelections(
   ];
 }
 
-async function fileToBase64(file: File): Promise<string> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  let binary = '';
-  const chunkSize = 0x8000;
-  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
-  }
-  return btoa(binary);
-}
+
 
 interface FileSystemEntryLike {
   isFile: boolean;

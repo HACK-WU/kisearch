@@ -22,6 +22,14 @@ import type {
 
 export type LifecycleKind = 'wiki' | 'temp' | 'event';
 export type Visibility = 'full' | 'fts-only' | 'hidden';
+
+/**
+ * 单事件参考文档上限（与服务端 `src/lib/events/refs-service.ts` 的 `REF_LIMIT` 同口径）。
+ *
+ * 前端只用它做**展示与预检**（「还能加几篇」、禁用提交），真正的拒绝在服务端
+ * （`REF_LIMIT_EXCEEDED`）—— 前端永远不是防线。
+ */
+export const REF_LIMIT = 50;
 export type TrashReason = 'temp-expired' | 'event-closed' | 'event-expired' | 'manual';
 
 export class GovernanceApiError extends Error {
@@ -773,6 +781,46 @@ export function addRefs(
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs`, {
     method: 'POST',
     body: JSON.stringify({ scope, docs, addedBy }),
+  });
+}
+
+/** 上传文件并挂为参考文档（REQ-20261118-001）的 202 回执 */
+export interface EventRefUploadResponse {
+  ok: true;
+  scope: string;
+  eventId: string;
+  shortId: number;
+  /** 本次落点 Group（缺省由服务端算：`事件参考/{短号}-{标题}`） */
+  group: string;
+  jobId: string;
+  uploadId: string;
+  refs: { limit: number; current: number };
+  /** 已通过校验、正在导入的文件（relation = 文件名去扩展名，与导入同源） */
+  accepted: Array<{ name: string; group: string; relation: string }>;
+  /** 未通过校验的文件（格式 / 大小 / 带路径 / 重名 / 图片附件） */
+  rejected: Array<{ name: string; error: string }>;
+  hint?: string;
+}
+
+/**
+ * 上传文件并挂为该事件的参考文档。
+ *
+ * 服务端顺序是「先校验 → 再导入 → 再建引用」（REQ-20261118-001 D1），
+ * 名额/数量/格式被拒时不产生任何文档 —— 前端不要自己先传再补救。
+ *
+ * `timeoutMs`：10 × 1MB 的 base64 请求体可能十几 MB，给一个宽松上限；
+ * 导入本身是异步 job，由调用方轮询 `/api/import/status`。
+ */
+export function uploadEventRefDocs(
+  scope: string,
+  eventId: string,
+  files: Array<{ name: string; content: string }>,
+  opts: { group?: string } = {},
+): Promise<EventRefUploadResponse> {
+  return req<EventRefUploadResponse>(`/api/governance/events/${encodeURIComponent(eventId)}/refs/upload`, {
+    method: 'POST',
+    body: JSON.stringify({ scope, files, ...(opts.group ? { group: opts.group } : {}) }),
+    timeoutMs: 120_000,
   });
 }
 

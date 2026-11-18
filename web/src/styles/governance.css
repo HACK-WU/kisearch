@@ -1848,3 +1848,30 @@
   background: color-mix(in srgb, var(--ki-color-info) 6%, var(--ki-color-surface));
 }
 .gov-confirmed__head { color: color-mix(in srgb, var(--ki-color-info) 55%, var(--ki-color-text-subtle)); }
+
+/* ── 参考文档上传弹窗（REQ-20261118-001）────────────────────────
+   只新增 4 个类，全部复用既有 token：
+   · 选择行沿用按钮组件，不另造样式；列表与文档列表同密度（12px / 6px gap）
+   · 出错行只换描边色（`danger-soft`），不改底色 —— 白底列表里红底会盖住正文 */
+.gov-upload-pick { display: flex; align-items: center; gap: var(--ki-space-2); }
+.gov-upload-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow: auto; }
+.gov-upload-row {
+  display: flex; align-items: center; gap: var(--ki-space-2);
+  padding: 5px 8px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-tag);
+  font-size: var(--ki-font-size-sm);
+}
+.gov-upload-row[data-bad] { border-color: var(--ki-color-danger-soft); }
+.gov-upload-row__name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gov-upload-row__meta { flex: none; color: var(--ki-color-text-subtle); font-size: 11px; }
+/* 逐条错误可能较长：允许换行占满整行，不与文件名抢宽度 */
+.gov-upload-row .gov-error { flex: 1 1 40%; min-width: 0; }
+.gov-upload-progress { display: flex; align-items: center; gap: var(--ki-space-2); }
+/* 落点 Group 行：标签 + 选择器一行（选择器自身是整宽组件，靠 flex 让标签不被压缩） */
+.gov-upload-group { display: flex; align-items: center; gap: var(--ki-space-2); }
+.gov-upload-group > span { flex: none; }
+.gov-upload-group > *:last-child { flex: 1 1 auto; min-width: 0; }

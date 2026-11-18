@@ -20,6 +20,7 @@ import { useAuth } from '@/lib/authContext';
 import { aiSettingsHref } from '@/lib/aiSettingsUrl';
 import { FindRefPanel } from '@/components/governance/FindRefPanel';
 import { DocPickerModal, type DocPickerRef } from '@/components/governance/DocPickerModal';
+import { EventRefUploadModal } from '@/components/governance/EventRefUploadModal';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { EventSummaryCard } from '@/components/governance/event-detail/EventSummaryCard';
 import { EventAnalysisCard } from '@/components/governance/event-detail/EventAnalysisCard';
@@ -30,6 +31,7 @@ import {
   addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
   listEventTypes, listEvents, listRefs, removeConfirmedCodeLocation, removeMember, removeRef,
   reopenEvent, setEventStage, updateEvent, updateEventType,
+  REF_LIMIT,
   GovernanceApiError,
   type EventAnalysis, type EventDetail, type EventTypeView, type EventView, type RefItem, type StagePatch,
   type Visibility,
@@ -109,6 +111,8 @@ export function EventsPage(): JSX.Element {
   /** 「删除事件」两步确认（会清空阶段日志，不可恢复） */
   const [delConfirm, setDelConfirm] = useState(false);
   const [addRefOpen, setAddRefOpen] = useState(false);
+  /** 「上传文件」弹窗（REQ-20261118-001）：上传成功即成为本事件参考文档 */
+  const [uploadRefOpen, setUploadRefOpen] = useState(false);
   /** 「＋ 添加」关联文档（与参考文档同款搜索弹窗，mode='member'） */
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   /** 关联文档行内二次确认（点一次变「确认」，再点才真解绑） */
@@ -156,6 +160,13 @@ export function EventsPage(): JSX.Element {
     setStartSignal(0);
   }, [scope, activeId]);
 
+  /**
+   * 上传弹窗（REQ-20261118-001）单独收回：它带着上一个事件的 `eventId`、名额与已选文件，
+   * 切 scope / 切事件后继续开着，就会把 A 的文件传进 B 事件。
+   * 不复用上面那个 effect：那条路径有「首句必须是 setDocTarget(null)」的既有契约测试钉着。
+   */
+  useEffect(() => { setUploadRefOpen(false); }, [scope, activeId]);
+
   // 页面只判 capability，不判 role（authContext 的约定）
   const { can, status: authStatus } = useAuth();
   const canWrite = can('knowledge.write');
@@ -197,6 +208,16 @@ export function EventsPage(): JSX.Element {
   }, [scope, status, keyword, typeFilter]);
 
   useEffect(() => { void loadList(); }, [loadList]);
+
+  /**
+   * 操作提示自动收（2026-11-18）：成功 2.6s 自隐 —— 它已是 fixed 浮层、不占布局，
+   * 但长期悬在右上角会挡视线。**失败不自动消失**：错误原因被自动收掉等于用户没看到。
+   */
+  useEffect(() => {
+    if (!message || message.tone === 'err') return undefined;
+    const t = window.setTimeout(() => setMessage(null), 2600);
+    return () => window.clearTimeout(t);
+  }, [message]);
 
   const loadDetail = useCallback(async (id: string) => {
     try {

@@ -14,8 +14,19 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'http';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import { readJson } from './store.js';
 import { GovernanceError, httpStatusFor } from './governance-errors.js';
+// 大体积请求体（事件参考文档上传）走限长版本：本文件的 `readJsonBody` 无上限，
+// 那是既有路由的历史现状（P3-B 决定不搭车改），新端点必须自己带闸。
+import { readJsonBody as readApiJsonBody, MAX_API_BODY } from './http-body.js';
+// 上传判据与 /api/import/upload 同源（见 import-upload-policy.ts 头注释）
+import { validateUploadFile, type UploadFilePolicy } from './import-upload-policy.js';
+import { ASSET_EXTENSIONS, DEFAULT_MAX_FILE_SIZE_BYTES, DEFAULT_MAX_ASSET_SIZE } from './import.js';
+import { isUserAssignableGroup, deriveGroupPath, relationOfPath } from './import-path.js';
+import { readRefs } from './events/refs-store.js';
 import {
   readGovernance, writeGovernance, validateTrashSettings, validatePresetKind, BUILTIN_PRESETS, TRASH_KEEP_DAYS,
   type GovernanceConfig, type LifecyclePreset,
@@ -30,13 +41,13 @@ import {
   type CreateEventOutcome,
 } from './events/event-service.js';
 import { bindMembers, unbindMember, type BindMembersOutcome } from './events/members.js';
-import { listRefs, addRefs, removeRef, searchRefCandidates, searchDocsForAdd } from './events/refs-service.js';
+import { listRefs, addRefs, removeRef, searchRefCandidates, searchDocsForAdd, REF_LIMIT } from './events/refs-service.js';
 import { createSearchAdapter, type RefSearchFn } from './events/refs-search.js';
-import { readAllEvents, findEventIn } from './events/store.js';
+import { readAllEvents, findEventIn, isEventClosed } from './events/store.js';
 import { resolveFindTargets } from './events/find-targets.js';
 import { defaultFindConfig, readPromptConfig } from './chat/prompt-config.js';
 import { runDeepFindAsSearchResult } from './events/find-service.js';
-import { loadConfig } from './config.js';
+import { loadConfig, getScopeImportConfig, resolveImportExtensions } from './config.js';
 import { ALL_SCOPES } from './mcp-token.js';
 import { readStageLogs } from './events/stage-log.js';
 import {
@@ -185,6 +196,250 @@ function str(value: unknown): string | undefined {
 function num(value: unknown): number | undefined {
   const n = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
   return Number.isFinite(n) ? n : undefined;
+}
+
+// ─── 参考文档上传（REQ-20261118-001）────────────────────
+
+/** 单次上传文件数上限（需求 D5：选择即限制，不截断） */
+const EVENT_REF_UPLOAD_MAX_FILES = 10;
+
+/**
+ * 缺省落点 Group：`事件参考/{短号}-{标题}`（需求 D1）。
+ *
+ * 为什么不能沿用导入的缺省（`__root__`）：参考文档行会显示 group 名，沉到「根」
+ * 既看不出这批文档哪来，也会与根目录散落文件混在一起（截图中已有一条落在 `__root__`）。
+ * 标题里的分隔符与控制字符必须剔掉，否则拼出来的 group 本身不合法。
+ */
+function defaultEventRefGroup(event: { shortId: number; title: string }): string {
+  const title = event.title
+    .replace(/[\\/\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 40);
+  return title ? `事件参考/${event.shortId}-${title}` : `事件参考/${event.shortId}`;
+}
+
+/** 上传请求体：限长读取 + 解析失败转成可判别的治理错误 */
+async function readEventRefUploadBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  try {
+    const raw = await readApiJsonBody(req, MAX_API_BODY);
+    return raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+  } catch (err) {
+    throw new GovernanceError(
+      'REF_UPLOAD_BAD_REQUEST',
+      `请求体无法解析（应为 JSON，且不超过 ${Math.round(MAX_API_BODY / 1024 / 1024)}MB）：${(err as Error).message}`,
+    );
+  }
+}
+
+/**
+ * `POST /governance/events/:id/refs/upload` —— 上传文件并挂为该事件的参考文档。
+ *
+ * ★ 顺序是硬约束：**全部校验通过之前一个字节都不落盘** → 起导入 job → job 结束后建引用。
+ *   先导入后校验会留下「文档已入库、却没进参考文档」的孤儿文档，用户无从发现（护栏 #1）。
+ *
+ * ★ 导入内核用 `await import()` 懒加载：`mcp-http-api.ts` 静态 import 本模块，
+ *   这里再静态回引就成环（护栏 #2）。请求期动态 import 命中 ESM 缓存，后续零成本。
+ */
+async function uploadEventRefDocs(args: {
+  res: ServerResponse;
+  scope: string;
+  eventRef: string;
+  body: Record<string, unknown>;
+  authScopes: string[] | null;
+}): Promise<true> {
+  const { res, scope, eventRef, body, authScopes } = args;
+
+  const allEvents = readAllEvents(scope);
+  const event = findEventIn(allEvents, eventRef);
+  if (!event) {
+    throw new GovernanceError('EVENT_NOT_FOUND', `事件「${eventRef}」不存在`, {
+      available: allEvents.filter((e) => !isEventClosed(e)).slice(0, 5)
+        .map((e) => ({ id: e.id, shortId: e.shortId, title: e.title })),
+    });
+  }
+
+  const rawFiles = Array.isArray(body.files) ? body.files : [];
+  const files = rawFiles.map((f) => (f && typeof f === 'object' ? (f as { name?: string; content?: string }) : {}));
+  if (files.length === 0) {
+    throw new GovernanceError('REF_UPLOAD_NO_FILE', '请至少选择一个文件（body: { files: [{ name, content }] }）');
+  }
+  if (files.length > EVENT_REF_UPLOAD_MAX_FILES) {
+    throw new GovernanceError(
+      'REF_UPLOAD_TOO_MANY',
+      `单次最多 ${EVENT_REF_UPLOAD_MAX_FILES} 个文件（本次 ${files.length} 个），请分批上传`,
+      { limit: EVENT_REF_UPLOAD_MAX_FILES, received: files.length },
+    );
+  }
+
+  const requestedGroup = str(body.group);
+  if (requestedGroup !== undefined && !isUserAssignableGroup(requestedGroup)) {
+    throw new GovernanceError(
+      'REF_UPLOAD_GROUP_INVALID',
+      `落点 Group「${requestedGroup}」非法：不能是绝对路径、不能含「..」、不能是保留根键`,
+      { group: requestedGroup },
+    );
+  }
+  const group = requestedGroup ?? defaultEventRefGroup(event);
+
+  /**
+   * 名额预检**必须在这里**（不是等 addRefs 抛）：`addRefs` 是整批校验全通过才写，
+   * 那时文件早已入库 —— 用户会看到「上传失败」，库里却多出几篇没挂上事件的文档。
+   */
+  const existing = readRefs(scope, event.id);
+  if (existing.length + files.length > REF_LIMIT) {
+    throw new GovernanceError(
+      'REF_LIMIT_EXCEEDED',
+      `参考文档最多 ${REF_LIMIT} 篇（当前 ${existing.length} 篇，本次 ${files.length} 篇），请先清理或减少数量`,
+      { limit: REF_LIMIT, current: existing.length, requested: files.length },
+    );
+  }
+
+  const requestConfig = loadConfig();
+  const importConfig = getScopeImportConfig(requestConfig, scope);
+  const policy: UploadFilePolicy = {
+    extensions: resolveImportExtensions(requestConfig, scope),
+    assetExtensions: [...ASSET_EXTENSIONS],
+    assetsEnabled: importConfig?.assets !== false,
+    maxFileSizeBytes: importConfig?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES,
+    maxAssetSizeBytes: importConfig?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE,
+    // 需求：不能上传目录 —— 名字里带 `/` 或 `\` 一律拒（前端只给文件选择器，接口得自己守住）
+    allowSubdirs: false,
+  };
+
+  const seen = new Set<string>();
+  const accepted: { name: string; buf: Buffer }[] = [];
+  const rejected: { name: string; error: string }[] = [];
+  for (const f of files) {
+    try {
+      const v = validateUploadFile({ name: f.name, content: f.content }, policy, seen);
+      seen.add(v.name);
+      // 图片附件不是可引用文档：传了也会在列表里查无此文，不如当场拒
+      if (v.isAsset) throw new Error('参考文档只接受文档文件，图片等附件请走「知识写入 → 上传导入」');
+      accepted.push({ name: v.name, buf: v.buf });
+    } catch (err) {
+      rejected.push({ name: f.name ?? '(未命名)', error: (err as Error).message });
+    }
+  }
+  if (accepted.length === 0) {
+    throw new GovernanceError('REF_UPLOAD_INVALID_FILE', '所有文件都未通过校验', { files: rejected });
+  }
+
+  const {
+    getUploadsRoot, bindUploadScope, writeUploadSession, createJob, runImportJob,
+  } = await import('./mcp-http-api.js');
+
+  /**
+   * 暂存目录复用 `~/.ki/import-uploads/<uploadId>`（与网页上传同根、同命名）：
+   * 导入结束后它会被登记为 group 的 `source.dir`（后续编辑/同步仍要读原文），
+   * 因此**不能在导入完成后删掉**；TTL 清理见到会话里的 `jobId` 会跳过，与既有上传一致。
+   */
+  const uploadId = crypto.randomUUID();
+  const dir = path.join(getUploadsRoot(), uploadId);
+  fs.mkdirSync(dir, { recursive: true });
+  if (!bindUploadScope(dir, scope)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw new GovernanceError('REF_UPLOAD_INVALID_FILE', '上传暂存目录与当前 scope 不匹配');
+  }
+  for (const f of accepted) fs.writeFileSync(path.join(dir, f.name), f.buf);
+
+  const job = createJob(scope, 'import', requestConfig, {
+    operator: { type: 'user', label: `事件 #${event.shortId} 参考文档上传` },
+  });
+  writeUploadSession(dir, { scope, updatedAt: Date.now(), state: 'importing', jobId: job.id });
+
+  const bindEventId = event.id;
+  const expected = accepted.length;
+  const targets = accepted.map((f) => ({
+    name: f.name,
+    group: deriveGroupPath(group, f.name),
+    relation: relationOfPath(f.name),
+  }));
+
+  /**
+   * 后台串行：导入 → 建引用 → 写 `job.refsBinding`。
+   * `runImportJob` 自己吞异常并落 job 终态（done / failed / cancelled），故这里只需看 `job.state`。
+   */
+  void (async () => {
+    try {
+      await runImportJob(job, {
+        scope,
+        sourceDir: dir,
+        group,
+        // D4：同名默认不覆盖；被 skip 的文档若已在库中，仍然是可引用的目标（下方按库内实际存在判）
+        conflictMode: 'skip',
+        // D3：事件页上传是「补证据」，不得在用户 wiki 目录凭空生成文件
+        wikiWriteback: false,
+      }, requestConfig);
+    } catch (err) {
+      // runImportJob 内部已落 job 终态；这里兜住"连终态都没落下"的极端情况
+      job.state = 'failed';
+      job.error = (err as Error).message;
+    }
+
+    const addedSkipped: string[] = [];
+    const failed: { name: string; error: string }[] = rejected.map((r) => ({ name: r.name, error: r.error }));
+    /**
+     * 同名未覆盖的清单（`conflictMode: 'skip'`）：这些文档保持库中旧内容，
+     * 引用指向的是旧版本 —— 不告诉用户，就会变成「传了新版却没生效」的悬案。
+     */
+    const skippedConflicts = (() => {
+      const conflicts = (job.result as { conflicts?: Array<{ relation?: string; action?: string; skipReason?: string }> } | undefined)?.conflicts;
+      if (!Array.isArray(conflicts)) return [] as string[];
+      return [...new Set(
+        conflicts
+          .filter((c) => c.action === 'skip' && c.skipReason === 'same-name')
+          .map((c) => c.relation ?? '')
+          .filter(Boolean),
+      )];
+    })();
+    let added = 0;
+    try {
+      // 现读一次分片：导入刚写完元数据，不读缓存对象（避免拿到上一步的快照）
+      const caches = readAllGroupCaches(scope);
+      for (const t of targets) {
+        const inLib = caches.get(t.group)?.hot_relations.some((r) => r.text === t.relation) === true;
+        if (!inLib) {
+          failed.push({
+            name: t.name,
+            error: job.state === 'done' ? '导入未完成，文档未落库' : (job.error ?? '导入失败'),
+          });
+          continue;
+        }
+        try {
+          // 逐篇加入：一篇被拒（已关联 / 被已收口事件锁定）不该连累其余文件
+          const r = addRefs(scope, bindEventId, {
+            docs: [{ group: t.group, name: t.relation }],
+            addedBy: 'manual',
+            ...(authScopes ? { tokenScopes: authScopes } : {}),
+          });
+          added += r.added;
+          addedSkipped.push(...r.skipped);
+        } catch (err) {
+          failed.push({ name: t.name, error: (err as Error).message });
+        }
+      }
+    } catch (err) {
+      failed.push({ name: '(全部)', error: `建立引用失败：${(err as Error).message}` });
+    }
+    job.refsBinding = { added, skipped: addedSkipped, skippedConflicts, failed, expected };
+  })();
+
+  return sendJson(res, 202, {
+    ok: true,
+    scope,
+    eventId: event.id,
+    shortId: event.shortId,
+    group,
+    jobId: job.id,
+    uploadId,
+    refs: { limit: REF_LIMIT, current: existing.length },
+    accepted: targets.map((t) => ({ name: t.name, group: t.group, relation: t.relation })),
+    rejected,
+    hint: rejected.length > 0
+      ? `${accepted.length} 个文件已开始导入，${rejected.length} 个未通过校验（见 rejected）；导入完成后自动加入参考文档`
+      : `${accepted.length} 个文件已开始导入，完成后自动加入参考文档`,
+  });
 }
 
 export async function handleGovernanceRoutes(
@@ -837,6 +1092,17 @@ export async function handleGovernanceRoutes(
             ...result,
             ...(skipped.length > 0 ? { skippedTargets: skipped } : {}),
           });
+        }
+        /**
+         * 上传文件并挂为参考文档（REQ-20261118-001）。
+         *
+         * 必须排在通用 POST 之前分流：`refs/upload` 的 body 是 base64 文件（可达 13MB+），
+         * 用本文件的无上限 `readJsonBody` 读它既慢也没有闸门。
+         */
+        if (method === 'POST' && segs[3] === 'upload') {
+          const b = await readEventRefUploadBody(req);
+          const scope = scopeFromBody(b);
+          return await uploadEventRefDocs({ res, scope, eventRef: id, body: b, authScopes: ctx.authScopes });
         }
         if (method === 'POST' && !segs[3]) {
           const b = await body();
