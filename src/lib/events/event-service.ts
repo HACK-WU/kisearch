@@ -590,31 +590,73 @@ export interface DeleteEventInput {
   event: string;
   /** 成员文档去向：改长期保留 / 移入回收站（必选，无默认） */
   docAction?: 'wiki' | 'trash';
+  /**
+   * 强制删除**未收口**事件（默认 false）。定位是清理测试 / 废弃事件。
+   *
+   * 只对**无关联文档**的事件开放，原因是三个副作用都落在本项目出过事故的区域：
+   *   · 未收口事件的成员多半处于 hidden / fts-only，删除后要恢复可见性 → 得改索引；
+   *   · `trash` 去向要搬回收站，而 `moveToTrash` 只写回收站条目、不摘索引；
+   *   · 可见性与索引一旦不同步，就是「hidden 仍可召回」那一类静默故障。
+   * 有成员的场景有明确出路：先 `ki_event_docs remove` 解绑（文档回 wiki），再强制删；
+   * 或走正常收口（`applyTerminalAction` 会把文档与索引一起处理）。
+   */
+  force?: boolean;
+  /** `force` 时必填，且须与事件标题完全一致 —— 逼调用方先读出这条事件的标题 */
+  confirmTitle?: string;
 }
 
 export interface DeleteEventOutcome {
   event: EventRecord;
   docAction: 'wiki' | 'trash';
   affected: { docs: number; failed: number };
+  /** 本次是否为强制删除未收口事件 */
+  forced: boolean;
   shortIdReleased: false;
 }
 
 export async function deleteEvent(scope: string, input: DeleteEventInput): Promise<DeleteEventOutcome> {
   return withScopeWriteLock(scope, 'event-delete', async () => {
     const event = mustFindEvent(scope, input.event);
-    if (!isEventClosed(event)) {
-      throw new GovernanceError(
-        'EVENT_NOT_CLOSED',
-        `事件「#${event.shortId} ${event.title}」尚未收口，不能删除；请先流转到终态阶段`,
-        { stageKey: event.stageKey },
-      );
+    const closed = isEventClosed(event);
+    const members = collectMembers(scope, event.id);
+
+    if (!closed) {
+      if (!input.force) {
+        throw new GovernanceError(
+          'EVENT_NOT_CLOSED',
+          `事件「#${event.shortId} ${event.title}」尚未收口，不能删除；请先流转到终态阶段，或（仅清理测试/废弃事件）传 force 与 confirm_title`,
+          { stageKey: event.stageKey, title: event.title, shortId: `#${event.shortId}` },
+        );
+      }
+      if (!input.confirmTitle) {
+        throw new GovernanceError(
+          'EVENT_FORCE_CONFIRM_REQUIRED',
+          `强制删除未收口事件必须传 confirm_title，且与事件标题完全一致：「#${event.shortId} ${event.title}」`,
+          { title: event.title, shortId: `#${event.shortId}` },
+        );
+      }
+      // 两边都 trim：标题若带首尾空格，只 trim 一侧会让它永远匹配不上（死锁，没有别的出路）
+      if (input.confirmTitle.trim() !== event.title.trim()) {
+        throw new GovernanceError(
+          'EVENT_FORCE_CONFIRM_MISMATCH',
+          `confirm_title 与事件标题不一致：该 #${event.shortId} 的实际标题是「${event.title}」；未删除任何数据`,
+          { title: event.title, shortId: `#${event.shortId}` },
+        );
+      }
+      if (members.length > 0) {
+        throw new GovernanceError(
+          'EVENT_FORCE_NOT_EMPTY',
+          `事件「#${event.shortId} ${event.title}」还有 ${members.length} 篇关联文档，force 只用于清理空事件；`
+            + '请先 ki_event_docs remove 解绑（文档回长期保留），或走正常收口后再删',
+          { members: members.length },
+        );
+      }
     }
     if (!input.docAction) {
       throw new GovernanceError('DOC_ACTION_REQUIRED', '删除事件必须指定成员文档去向：wiki（改长期保留）或 trash（移入回收站）');
     }
 
     const now = Date.now();
-    const members = collectMembers(scope, event.id);
     const byGroup = new Map<string, MemberDoc[]>();
     for (const m of members) {
       const list = byGroup.get(m.group) ?? [];
@@ -670,7 +712,7 @@ export async function deleteEvent(scope: string, input: DeleteEventInput): Promi
     removeRefsFile(scope, event.id);
     removeAnalysisFile(scope, event.id);
 
-    return { event, docAction: input.docAction, affected: { docs: done, failed }, shortIdReleased: false };
+    return { event, docAction: input.docAction, affected: { docs: done, failed }, forced: !closed, shortIdReleased: false };
   });
 }
 

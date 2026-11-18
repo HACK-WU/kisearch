@@ -87,7 +87,7 @@ python scripts/ki_upload.py upload ./incident.md --scope prod --group 故障复�
 ```
 
 > 上传来的文档是**普通文档**：事后可在「知识治理 → 生命周期」页改分类。数据源（目录/Git 同步）来的文档固定长期保留，不受影响。
-> 事件只能由人在 Web「知识治理 → 事件」创建；`--event` 不知道填什么时，先随便传一个再读错误响应里的 `available`（列出可用事件）。
+> 事件由人（Web「知识治理 → 事件」）或 AI（MCP `ki_event_create`，标准做法见 `use_skill("event-report")`）创建，两边写同一个库；`--event` 不知道填什么时，先 `ki_event_list(scope, status: "open")` 取，或传一个再读错误响应里的 `available`（列出可用事件）。
 
 ### 3. 上传整个目录
 
@@ -157,7 +157,7 @@ stdout 一行 JSON：
 | `OPEN_API_SCOPE_READONLY` | 目标库被设成只读：`ki scope readonly <库名> --off` |
 | `FILE_TOO_LARGE_PREFLIGHT` | 本地预检就拦下了：文件超单文件上限，让运维调大 `scopes.<库名>.import.maxFileSize`（默认仅 1MB） |
 | `OPEN_API_INVALID_LIFECYCLE` | 分类参数不合法：`temp` 缺 `--ttl-days`、`wiki` 带了期限/事件、期限不在 1~365、`--lifecycle` 取值不认识。响应 `reason` 给出精确原因（`TTL_REQUIRED` 等） |
-| `OPEN_API_EVENT_NOT_FOUND` | `--event` 指的事件不存在：响应 `available` 列出可用的未收口事件；事件只能在 Web「知识治理 → 事件」创建，AI 不能创建 |
+| `OPEN_API_EVENT_NOT_FOUND` | `--event` 指的事件不存在：响应 `available` 列出可用的未收口事件；事件可由人在 Web 创建，也可由 AI 通过 `ki_event_create` 创建（见 `use_skill("event-report")`） |
 | `OPEN_API_EVENT_CLOSED` | 事件已收口，不能再挂新文档：改挂进行中的事件，或先在页面重开该事件 |
 | `DATASOURCE_LIFECYCLE_LOCKED`（任务失败态，不在上传响应里） | 目标同名文档由数据源同步维护、分类固定为长期保留，这次带分类的文件被跳过且没导入：去掉 `--lifecycle/--ttl-days/--event` 重传（按原口径覆盖），或换个文档名 |
 | `VECTOR_UNAVAILABLE` | 导入阶段失败：该库没有可用的 embedding（未配 `apiKey` 或密钥失效）。**加 `--no-vector`** 先以全文模式入库（正文仍可被全文检索，之后可用 `ki restore <库名> --rebuild-vector` 补齐向量） |

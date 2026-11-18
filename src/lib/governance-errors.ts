@@ -49,6 +49,12 @@ export const GOVERNANCE_CODE_NUMBERS = {
   EVENT_MEMBER_LIMIT_EXCEEDED: 1118,
   /** `docs` 参数非法（缺失/非数组/元素缺字段）；空数组不算错 */
   EVENT_DOCS_INVALID: 1119,
+  /** `ki_event_delete` 传了 `force` 却没带 `confirm_title`（强制删未收口事件必须显式确认标题） */
+  EVENT_FORCE_CONFIRM_REQUIRED: 1120,
+  /** `confirm_title` 与事件标题不一致：防止按错的 id 删掉别的事件（一条数据都没删） */
+  EVENT_FORCE_CONFIRM_MISMATCH: 1121,
+  /** `force` 只开放给**无关联文档**的事件：有成员时必须先收口或先解绑，否则会留下可见性与索引不一致 */
+  EVENT_FORCE_NOT_EMPTY: 1122,
 
   // ── S-03 可见性（1200-1299）──
   VISIBILITY_INVALID: 1201,
@@ -192,6 +198,9 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   TYPE_BUILTIN: 409,
   EVENT_CLOSED: 409,
   EVENT_NOT_CLOSED: 409,
+  EVENT_FORCE_CONFIRM_REQUIRED: 400,
+  EVENT_FORCE_CONFIRM_MISMATCH: 400,
+  EVENT_FORCE_NOT_EMPTY: 409,
   DATASOURCE_LIFECYCLE_LOCKED: 403,
   ANALYSIS_ALREADY_RUNNING: 409,
   ANALYSIS_TARGET_SYNCING: 409,

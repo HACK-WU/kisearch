@@ -212,5 +212,79 @@ describe('⑤ ki_event_delete', () => {
     const body = parse(ok);
     assert.equal(body.ok, true);
     assert.equal(body.docAction, 'wiki');
+    assert.equal(body.forced, false);
+  });
+
+  it('force 未带 confirm_title → EVENT_FORCE_CONFIRM_REQUIRED（附实际标题）', async () => {
+    const created = parse(await call('ki_event_create', { scope, title: '强制删缺少确认', type: 'et_1' }));
+    const event = created.event.id as string;
+
+    const res = await call('ki_event_delete', { scope, event, doc_action: 'wiki', force: true });
+    assert.equal(res.isError, true);
+    const body = parse(res);
+    assert.equal(body.code, 'EVENT_FORCE_CONFIRM_REQUIRED');
+    assert.match(body.error, /强制删缺少确认/);
+  });
+
+  it('confirm_title 与标题不一致 → EVENT_FORCE_CONFIRM_MISMATCH，且一条数据都没删', async () => {
+    const created = parse(await call('ki_event_create', { scope, title: '标题要对得上', type: 'et_1' }));
+    const event = created.event.id as string;
+
+    const res = await call('ki_event_delete', {
+      scope, event, doc_action: 'wiki', force: true, confirm_title: '手滑写错',
+    });
+    assert.equal(parse(res).code, 'EVENT_FORCE_CONFIRM_MISMATCH');
+
+    // 事件仍在：换成正确标题再删一次能成功，说明上一次确实什么也没做
+    const ok = await call('ki_event_delete', {
+      scope, event, doc_action: 'wiki', force: true, confirm_title: '标题要对得上',
+    });
+    assert.equal(ok.isError, undefined);
+    assert.equal(parse(ok).forced, true);
+  });
+
+  it('空事件 + 正确标题 → 强制删除成功（forced=true，未动任何文档）', async () => {
+    const created = parse(await call('ki_event_create', { scope, title: '测试用的空事件', type: 'et_3' }));
+    const event = created.event.id as string;
+
+    const res = await call('ki_event_delete', {
+      scope, event, doc_action: 'wiki', force: true, confirm_title: '测试用的空事件',
+    });
+    assert.equal(res.isError, undefined);
+    const body = parse(res);
+    assert.equal(body.forced, true);
+    assert.equal(body.affected.docs, 0);
+    assert.match(body.hint, /强制删除/);
+  });
+
+  it('带关联文档 → EVENT_FORCE_NOT_EMPTY（给出路：先解绑或先收口）', async () => {
+    const a = seedDoc('强制删带成员');
+    const created = parse(await call('ki_event_create', {
+      scope,
+      title: '带成员不能强删',
+      type: 'et_1',
+      docs: [{ group: GROUP, name: a.text }],
+    }));
+    const event = created.event.id as string;
+
+    const res = await call('ki_event_delete', {
+      scope, event, doc_action: 'wiki', force: true, confirm_title: '带成员不能强删',
+    });
+    assert.equal(res.isError, true);
+    const body = parse(res);
+    assert.equal(body.code, 'EVENT_FORCE_NOT_EMPTY');
+    assert.match(body.error, /ki_event_docs remove/);
+    assert.equal(body.details.members, 1);
+  });
+
+  it('confirm_title 首尾带空格仍可删（输入侧 trim，不因空格卡死）', async () => {
+    const created = parse(await call('ki_event_create', { scope, title: '空格宽容测试', type: 'et_3' }));
+    const event = created.event.id as string;
+
+    const res = await call('ki_event_delete', {
+      scope, event, doc_action: 'wiki', force: true, confirm_title: '  空格宽容测试  ',
+    });
+    assert.equal(res.isError, undefined);
+    assert.equal(parse(res).forced, true);
   });
 });

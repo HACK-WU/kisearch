@@ -32,7 +32,7 @@
 | `ki_edit_relation` | 对大 Relation 多轮按行编辑；`finish` 后一次性更新索引 | `action`（edit/view/finish/cancel）、`scope`、`group`、`relation` |
 | `ki_event_set_stage` | 把事件流转到指定阶段；到终态阶段会按类型设定的收口动作处理关联文档 | `scope`、`event`（`evt_…` 或 `#shortId`）、`stage`（key 或名称）、`note`（可选） |
 | `ki_event_create` | 创建事件，可同时挂关联文档与参考文档；`type` / `stage` 都接受 id/key 或名称 | `title`、`type`（id 或名称）、`stage`（可选）、`docs[]`（≤50）、`refs[]`（≤50） |
-| `ki_event_delete` | 删除**已收口**事件；必须指定关联文档去向 | `event`、`doc_action`（`wiki` 保留 / `trash` 进回收站，必填无默认） |
+| `ki_event_delete` | 删除事件；必须指定关联文档去向。**未收口默认拒绝**（先 `ki_event_set_stage` 到终态） | `event`、`doc_action`（`wiki` 保留 / `trash` 进回收站，必填无默认）、`force`（可选，只对**无关联文档**的事件生效）、`confirm_title`（`force` 时必填，须与标题逐字一致） |
 | `ki_event_docs` | 事件关联文档增删：`add` 挂上（可见性随阶段）/ `remove` 解绑（文档回长期保留，不删除） | `event`、`action`、`docs[]`（≤50） |
 | `ki_event_refs` | 事件参考文档增删：只建引用，不改被引文档的分类与可见性 | `event`、`action`、`docs[]`（≤50） |
 
@@ -46,7 +46,7 @@
 
 ## MCP 未提供的能力
 
-MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需要级联或强制操作时使用 CLI（见 [cli.md](./cli.md)）。
+MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需要级联或强制操作时使用 CLI（见 [cli.md](./cli.md)）。**唯一例外**是 `ki_event_delete` 的 `force`——它只对**无关联文档**的事件生效，且必须带 `confirm_title` 与标题逐字一致，用途是清理测试 / 废弃事件；有成员文档时仍要求先收口（或先 `ki_event_docs remove` 解绑），因为那会牵连文档可见性与索引。
 
 事件相关**不提供**：事件类型的增删改（阶段链、每阶段可见性、收口动作）、事件 AI 源码分析、参考文档的 AI 候选查找（`refs/search` 只有 Web 页面在用）。这些都在 Web「知识治理 → 事件」操作 —— 事件类型是全局元配置，改错会连带所有事件；参考文档候选要人逐个确认，不适合代理自动采纳。
 
