@@ -198,6 +198,8 @@ describe('S-04 异步分析 Pipeline', () => {
       if (callTurn === 1) {
         const userMsg = messages.find((m) => m.role === 'user')?.content ?? '';
         seenFirstUserMessages.push(userMsg);
+        // 思考片段：只用于过程区展示，必须原样落盘（2026-11-18）
+        yield { type: 'reasoning', text: '先看 KB 里记录的现象，再用 grep 定位关键词' };
         yield {
           type: 'tool_calls',
           calls: [
@@ -266,6 +268,19 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.equal(finalDoc.draft?.candidates.length, 1, '幻觉文件与越界行号必须被二次校验剔除');
     assert.equal(finalDoc.draft?.candidates[0]!.file, 'src/login.ts');
     assert.equal(finalDoc.draft?.candidates[0]!.line, 3);
+    // ── 调用明细：入参 / 返回 / 思考（2026-11-18，MCP 与本地工具同一条路径）──
+    const toolSteps = (finalDoc.draft?.steps ?? []).filter((s) => (s.calls?.length ?? 0) > 0);
+    assert.ok(toolSteps.length >= 2, '应有至少两轮带工具调用的步骤');
+    const mcpCall = toolSteps[0]!.calls!.find((c) => c.name === 'ki_get_module_info');
+    assert.ok(mcpCall, 'MCP 工具调用必须出现在过程里');
+    assert.match(mcpCall!.args ?? '', /排查记录/, 'MCP 调用入参必须落盘');
+    assert.ok((mcpCall!.response ?? '').length > 0, 'MCP 工具返回必须落盘（用户要能查看）');
+    assert.equal(typeof mcpCall!.responseChars, 'number', '必须记录返回原文长度，供 UI 标「已截断」');
+    assert.ok(
+      (finalDoc.draft?.steps ?? []).some((s) => s.thinking?.includes('先看 KB')),
+      '模型思考片段必须落盘到 steps[].thinking',
+    );
+
     assert.ok(finalDoc.draft?.unconfirmed.some((u) => u.includes('src/ghost.ts')));
     assert.ok(finalDoc.draft?.unconfirmed.some((u) => u.includes('999')));
   });

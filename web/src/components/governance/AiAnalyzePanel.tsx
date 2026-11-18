@@ -11,6 +11,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ThinkingBlock, ToolCallRow } from './ToolCallRow';
+import { StepMetrics } from './StepMetrics';
 import {
   cancelEventAnalysis,
   confirmEventAnalysis,
@@ -181,10 +183,6 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
   }, [isRunning]);
 
   const candidates = useMemo(() => draft?.candidates ?? [], [draft]);
-  const pickedIds = useMemo(
-    () => candidates.filter((c) => picked.has(c.id)).map((c) => c.id),
-    [candidates, picked],
-  );
 
   /** 已确认态由前端派生（后端无该字段）：本轮候选都能在 confirmed 里按 file+line 命中 */
   const isConfirmedLoc = useCallback(
@@ -192,6 +190,20 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
     [confirmed],
   );
   const committed = candidates.length > 0 && candidates.every(isConfirmedLoc);
+
+  /**
+   * 已确认的候选**不再进候选区**：卡上方已有「已确认的相关位置」唯一清单，
+   * 同一处位置连 why 一起展示两遍是纯重复（真机反馈 2026-11-18）。
+   */
+  const pendingCandidates = useMemo(
+    () => candidates.filter((c) => !isConfirmedLoc(c)),
+    [candidates, isConfirmedLoc],
+  );
+
+  const pickedIds = useMemo(
+    () => pendingCandidates.filter((c) => picked.has(c.id)).map((c) => c.id),
+    [pendingCandidates, picked],
+  );
 
   const toggleCandidate = (id: string): void => {
     setPicked((prev) => {
@@ -395,35 +407,16 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                           {step.calls && step.calls.length > 0 ? (
                             <div className="gov-ai-calls">
                               {step.calls.map((call, ci) => (
-                                <div
-                                  key={`${step.name}-${call.name}-${ci}`}
-                                  className={`ki-chat-tl__node ki-chat-tl__node--${call.kind === 'skill' ? 'skill' : 'tool'}`}
-                                >
-                                  {call.kind === 'skill' ? (
-                                    <span className="ki-chat-tl__skill">{call.name}</span>
-                                  ) : (
-                                    <>
-                                      <span className="ki-chat-tl__act">{call.label}</span>
-                                      <span className="ki-chat-tl__tool">{call.name}</span>
-                                    </>
-                                  )}
-                                  <span className="ki-chat-tl__stat">{formatAnalysisMs(call.ms)}</span>
-                                  {call.note ? <span className="gov-ai-call__note">{call.note}</span> : null}
-                                </div>
+                                <ToolCallRow key={`${step.name}-${call.name}-${ci}`} call={call} />
                               ))}
                             </div>
                           ) : null}
 
+                          {step.thinking ? <ThinkingBlock text={step.thinking} /> : null}
+
                           {expandable && expanded ? (
                             <div className="gov-ai-step__detail">
-                              <dl>
-                                {Object.entries(step.metrics ?? {}).map(([k, v]) => (
-                                  <div key={k}>
-                                    <dt>{k}</dt>
-                                    <dd>{String(v)}</dd>
-                                  </div>
-                                ))}
-                              </dl>
+                              <StepMetrics data={step.metrics ?? {}} />
                             </div>
                           ) : null}
                         </div>
@@ -434,6 +427,22 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
               ) : (
                 <p className="gov-hint" style={{ padding: '10px 12px' }}>正在读取事件上下文…</p>
               )}
+
+              {/*
+               * 结论就近展示：此前只出现在卡片顶部，用户滚到过程区就看不到了（真机反馈）。
+               * 放在滚动容器末尾 → 跟随步骤一起滚，读完过程正好读到结论。
+               */}
+              {!isRunning && draft?.conclusion ? (
+                <div className="gov-ai-final">
+                  <div className="gov-ai-final__head">最终结论</div>
+                  <p className="gov-ai-final__text">{draft.conclusion}</p>
+                  <div className="gov-ai-final__meta">
+                    定位到 {candidates.length} 处候选
+                    {pendingCandidates.length > 0 ? ` · 待确认 ${pendingCandidates.length} 处` : ' · 已全部确认'}
+                    {draft.unconfirmed.length > 0 ? ` · 未确认点 ${draft.unconfirmed.length} 项` : ''}
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </>
@@ -444,25 +453,26 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
        * 已确认（committed）后整块收起，只有点「查看详情」才展开候选 —— 否则确认过的卡片
        * 仍然把一屏候选摊在页面上，"收起"等于没生效（2026-11-17 真机走查）。
        */}
-      {!isRunning && candidates.length > 0 && (!committed || procOpen) ? (
+      {!isRunning && pendingCandidates.length > 0 && (!committed || procOpen) ? (
         <div className="gov-cand-list gov-cand-list--embed">
-          {candidates.map((c, ci) => {
+          {/* 与上方过程区分层：灰底卡片 + 明确标题（此前两块都白底，几乎分不出） */}
+          <div className="gov-candlist__head">待确认的代码位置 · <b>{pendingCandidates.length}</b> 处</div>
+          {pendingCandidates.map((c, ci) => {
             const checked = picked.has(c.id);
             const peek = openCands.includes(c.id);
             return (
               <label
                 key={c.id}
-                className={`gov-cand gov-cand--ai${committed ? ' is-committed' : ''}`}
+                className="gov-cand gov-cand--ai"
                 style={{ ['--i' as string]: ci }}
               >
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={!canWrite || committed}
+                  disabled={!canWrite}
                   onChange={() => toggleCandidate(c.id)}
                 />
                 <span>
-                  {committed ? <span className="gov-cand__done">已确认</span> : null}
                   <span className="gov-cand__name gov-codeloc__path">
                     {c.file}:{c.line}{c.endLine ? `-${c.endLine}` : ''}
                   </span>

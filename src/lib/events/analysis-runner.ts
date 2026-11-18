@@ -805,6 +805,8 @@ async function executeAnalysisBackground(input: {
       }
 
       let roundContent = '';
+      /** 本轮模型的思考片段（reasoning 流）：只给过程区展示，不回喂模型 */
+      let roundThinking = '';
       let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
 
       try {
@@ -825,6 +827,7 @@ async function executeAnalysisBackground(input: {
           llm: llmOpts,
         })) {
           if (part.type === 'content') roundContent += part.text;
+          else if (part.type === 'reasoning') roundThinking += part.text;
           else if (part.type === 'tool_calls') pendingCalls = part.calls;
           else if (part.type === 'usage') {
             tokens += (part.promptTokens ?? 0) + (part.completionTokens ?? 0);
@@ -905,7 +908,14 @@ async function executeAnalysisBackground(input: {
         } catch {
           const errPayload = serializeToolResponse({ error: '工具参数不是合法 JSON' }, ANALYSIS_TOOL_RESPONSE_CHARS);
           messages.push({ role: 'tool', tool_call_id: call.id, content: errPayload.text });
-          calls.push({ kind: 'tool', name: entry.name, label: '参数解析失败', ms: nowFn() - t0, note: 'JSON 非法' });
+          calls.push({
+            kind: 'tool',
+            name: entry.name,
+            label: '参数解析失败',
+            ms: nowFn() - t0,
+            note: 'JSON 非法',
+            args: (call.arguments || '').slice(0, 300),
+          });
           continue;
         }
 
@@ -945,6 +955,10 @@ async function executeAnalysisBackground(input: {
           label: `${desc.label}：${desc.summary}`,
           ms: Math.max(0, nowFn() - t0),
           ...(callErr ? { note: callErr.slice(0, 80) } : {}),
+          args: (call.arguments || '').slice(0, 300),
+          // 返回体已在 serializeToolResponse 里按 10k 截过一次；这里再按展示口径截 2000
+          response: serialized.text.slice(0, 2000),
+          responseChars: serialized.text.length,
         });
       }
 
@@ -953,6 +967,7 @@ async function executeAnalysisBackground(input: {
         name: `round-${round}`,
         title: `第 ${round} 轮探索：${calls.map((c) => c.name).join('、')}`,
         ms: roundMs,
+        ...(roundThinking.trim() ? { thinking: roundThinking.trim().slice(0, 2000) } : {}),
         metrics: {
           calls: calls.length,
           filesRead: fsCtx.filesRead.size,

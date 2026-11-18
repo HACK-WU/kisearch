@@ -11,6 +11,8 @@
  */
 
 import { useEffect, useState } from 'react';
+import { ThinkingBlock, ToolCallRow } from './ToolCallRow';
+import { StepMetrics } from './StepMetrics';
 import type { RefSearchReason, RefSearchStep } from '@/api/governanceApi';
 
 export interface AiProcessContext {
@@ -84,13 +86,6 @@ function numOf(value: number | string | undefined): number {
 /** 亚毫秒步显示 `<1ms`（后端不夹到 1ms，否则就是面板上编数字） */
 function msText(ms: number): string {
   return ms <= 0 ? '<1ms' : `${ms}ms`;
-}
-
-/** `detail` 里的值可能是数组 / 对象，统一压成一行可读文本 */
-function detailText(value: unknown): string {
-  if (Array.isArray(value)) return value.map((v) => String(v)).join(' · ');
-  if (value && typeof value === 'object') return JSON.stringify(value);
-  return String(value);
 }
 
 /** 把一步的 metrics 翻成一句人话（数字全部取自 metrics，不臆造） */
@@ -264,36 +259,17 @@ export function AiProcessPanel(args: AiProcessPanelProps): JSX.Element {
                   */}
                   {step.calls && step.calls.length > 0 ? (
                     <div className="gov-ai-calls">
-                      {step.calls.map((call) => (
-                        <div
-                          key={`${step.name}-${call.name}`}
-                          className={`ki-chat-tl__node ki-chat-tl__node--${call.kind === 'skill' ? 'skill' : 'tool'}`}
-                        >
-                          {call.kind === 'skill' ? (
-                            <span className="ki-chat-tl__skill">{call.name}</span>
-                          ) : (
-                            <>
-                              <span className="ki-chat-tl__act">{call.label}</span>
-                              <span className="ki-chat-tl__tool">{call.name}</span>
-                            </>
-                          )}
-                          <span className="ki-chat-tl__stat">{msText(call.ms)}</span>
-                          {call.note ? <span className="gov-ai-call__note">{call.note}</span> : null}
-                        </div>
+                      {step.calls.map((call, ci) => (
+                        <ToolCallRow key={`${step.name}-${call.name}-${ci}`} call={call} />
                       ))}
                     </div>
                   ) : null}
 
+                  {step.thinking ? <ThinkingBlock text={step.thinking} /> : null}
+
                   {expandable && expanded ? (
                     <div className="gov-ai-step__detail">
-                      <dl>
-                        {Object.entries(step.detail ?? {}).map(([k, v]) => (
-                          <div key={k}>
-                            <dt>{k}</dt>
-                            <dd>{detailText(v)}</dd>
-                          </div>
-                        ))}
-                      </dl>
+                      <StepMetrics data={{ ...(step.metrics ?? {}), ...(step.detail ?? {}) }} />
                     </div>
                   ) : null}
                 </div>

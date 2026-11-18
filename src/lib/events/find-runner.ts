@@ -778,6 +778,7 @@ export async function runDeepFind(
       }
 
       let roundContent = '';
+      let roundThinking = '';
       let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
       try {
         for await (const part of streamFn(messages, {
@@ -788,6 +789,7 @@ export async function runDeepFind(
           llm: llmOpts,
         })) {
           if (part.type === 'content') roundContent += part.text;
+          else if (part.type === 'reasoning') roundThinking += part.text;
           else if (part.type === 'tool_calls') pendingCalls = part.calls;
         }
       } catch (err) {
@@ -837,7 +839,13 @@ export async function runDeepFind(
           } else {
             loadedSkills.add(skill.id);
             messages.push({ role: 'tool', tool_call_id: call.id, content: renderSkillLoadedBlock(skill) });
-            calls.push({ kind: 'skill', name: skill.name, label: '加载 Skill', ms: nowFn() - roundStart });
+            calls.push({
+              kind: 'skill',
+              name: skill.name,
+              label: '加载 Skill',
+              ms: nowFn() - roundStart,
+              args: (call.arguments || '').slice(0, 300),
+            });
           }
           continue;
         }
@@ -852,12 +860,18 @@ export async function runDeepFind(
             content: typeof result === 'string' ? result : result.text,
           });
         }
+        // 展示用：入参截 300、返回截 2000，另记原文长度供 UI 标「已截断」
+        const responseText = typeof result === 'string' ? result : result.text;
+        toolCall.args = (call.arguments || '').slice(0, 300);
+        toolCall.response = responseText.slice(0, 2000);
+        toolCall.responseChars = responseText.length;
         calls.push(toolCall);
       }
 
       steps.push({
         name: 'tools',
         ms: nowFn() - roundStart,
+        ...(roundThinking.trim() ? { thinking: roundThinking.trim().slice(0, 2000) } : {}),
         metrics: { round: rounds, calls: calls.length },
         ...(calls.length > 0 ? { calls } : {}),
       });

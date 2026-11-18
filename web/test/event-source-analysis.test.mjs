@@ -32,6 +32,12 @@ const aiSettingsSrc = fs.readFileSync(path.join(webRoot, 'src/pages/AiSettingsPa
 const layerSrc = fs.readFileSync(path.join(webRoot, 'src/chat/PromptConfigLayer.tsx'), 'utf8');
 const modalSrc = fs.readFileSync(path.join(webRoot, 'src/components/governance/AiAnalyzePanel.tsx'), 'utf8');
 /** 改版后「AI 分析」挂在 event-detail/EventAnalysisCard 上（批 2） */
+const processPanelSrc = fs.readFileSync(
+  path.join(webRoot, 'src/components/governance/AiProcessPanel.tsx'), 'utf8');
+const stepMetricsSrc = fs.readFileSync(
+  path.join(webRoot, 'src/components/governance/StepMetrics.tsx'), 'utf8');
+const toolCallSrc = fs.readFileSync(
+  path.join(webRoot, 'src/components/governance/ToolCallRow.tsx'), 'utf8');
 const analysisCardSrc = fs.readFileSync(
   path.join(webRoot, 'src/components/governance/event-detail/EventAnalysisCard.tsx'), 'utf8');
 /** 2026-11-17 改版：概要卡（含「AI 分析」按钮与描述编辑）已抽到 event-detail/，源码断言改指向新组件 */
@@ -188,5 +194,37 @@ describe('S-05b · 「AI 分析」入口必须真的能启动', () => {
 
   it('切事件时把触发信号归零', () => {
     assert.match(eventsSrc, /setStartSignal\(0\);/, '切 scope/事件必须复位 startSignal');
+  });
+});
+
+/**
+ * 2026-11-18：候选区去重 + 工具调用明细（args/response/thinking）。
+ * 这两条都是真机反馈驱动的，最容易在后续重构里被"顺手"改回去。
+ */
+describe('S-05c · 过程可观测（去重 + 工具明细）', () => {
+  it('候选区不再重复展示已确认位置', () => {
+    assert.match(modalSrc, /const pendingCandidates = useMemo\(/, '必须按 confirmed 过滤候选');
+    assert.match(modalSrc, /pendingCandidates\.map\(/, '候选列表应渲染过滤后的集合');
+    assert.doesNotMatch(modalSrc, /gov-cand__done/, '「已确认」徽标应随去重一起移除');
+  });
+
+  it('分析与查找共用 ToolCallRow，含 MCP/本地标签与截断提示', () => {
+    assert.match(modalSrc, /<ToolCallRow/, '分析面板必须用共用行组件');
+    assert.match(processPanelSrc, /<ToolCallRow/, '查找面板必须用同一个行组件');
+    assert.match(toolCallSrc, /startsWith\('ki_'\)/, 'MCP 判定按 ki_ 前缀');
+    assert.match(toolCallSrc, /已截断（原文/, '截断必须显式告知原文长度');
+  });
+
+  it('思考片段默认收起且两处可见', () => {
+    assert.match(modalSrc, /<ThinkingBlock/, '分析面板要能看思考');
+    assert.match(toolCallSrc, /<summary>模型思考<\/summary>/, '思考块默认折叠');
+  });
+
+  it('步骤明细用中文标签（不再直接铺英文 key）', () => {
+    assert.match(modalSrc, /<StepMetrics/, '分析面板必须用中文标签渲染 metrics');
+    assert.match(processPanelSrc, /<StepMetrics/, '查找面板同');
+    assert.match(stepMetricsSrc, /members: '关联文档'/, 'members → 关联文档');
+    assert.match(stepMetricsSrc, /verified: '保留候选'/, 'verified → 保留候选');
+    assert.match(stepMetricsSrc, /hasDescription: \{ yes: '有', no: '无' \}/, '布尔值要翻成中文');
   });
 });

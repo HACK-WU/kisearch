@@ -145,6 +145,15 @@ export interface AnalysisStepCall {
   label: string;
   ms: number;
   note?: string;
+  /** 调用入参（已截断 300 字；skill 调用可能为空） */
+  args?: string;
+  /** 工具返回（已截断 2000 字；note 记的是错误/降级摘要，不是返回体） */
+  response?: string;
+  /**
+   * 返回长度，用于 UI 标「已截断」。注意序列化层已先按 10k 截过一次，
+   * 所以超过 10k 的返回这里记的是 10k 级别（UI 用「约」表述）。
+   */
+  responseChars?: number;
 }
 
 export interface AnalysisStepRecord {
@@ -153,6 +162,11 @@ export interface AnalysisStepRecord {
   ms: number;
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
+  /**
+   * 这一步里模型的思考片段（reasoning 流），单步截断 2000 字。
+   * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
+   */
+  thinking?: string;
   calls?: AnalysisStepCall[];
 }
 

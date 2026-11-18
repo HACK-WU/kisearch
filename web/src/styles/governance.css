@@ -680,15 +680,7 @@
   line-height: 1.75;
   color: var(--ki-color-text-muted);
 }
-.gov-ai-step__detail dl { margin: 0; display: grid; gap: 3px; }
-.gov-ai-step__detail dl > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; }
-.gov-ai-step__detail dt { color: var(--ki-color-text-subtle); white-space: nowrap; }
-.gov-ai-step__detail dd {
-  margin: 0;
-  font-family: var(--ki-font-mono);
-  color: var(--ki-color-text-muted);
-  overflow-wrap: anywhere;
-}
+/* 原来的 dt/dd 双列表格样式已随 StepMetrics（中文标签 chips）一起删除 */
 
 /* 检索失败：错误条 + 退路（不关弹窗，别让用户丢掉上下文） */
 .gov-ai-error {
@@ -1715,3 +1707,144 @@
   line-height: 1.65;
   overflow-x: auto;
 }
+
+/* ── 过程调用行（分析/查找共用，2026-11-18）：MCP/本地标签 + 入参/返回/思考 ── */
+.gov-trace { border-radius: var(--ki-radius-sm); }
+.gov-trace + .gov-trace { margin-top: 2px; }
+.gov-trace__head {
+  width: 100%;
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 6px;
+  border: 0; background: none;
+  border-radius: var(--ki-radius-sm);
+  text-align: left; cursor: pointer;
+  font-size: 11.5px; color: var(--ki-color-text-muted);
+}
+.gov-trace__head:hover:not(:disabled) { background: var(--ki-color-hover); }
+.gov-trace__head:disabled { cursor: default; }
+.gov-trace__src {
+  flex: none; padding: 0 5px;
+  border-radius: var(--ki-radius-tag);
+  font-size: 10px; font-weight: 600; line-height: 1.6;
+}
+.gov-trace__src--mcp {
+  color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
+}
+.gov-trace__src--local { color: var(--ki-color-text-subtle); background: var(--ki-color-bg-muted); }
+.gov-trace__label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gov-trace__name { flex: none; font-family: var(--ki-font-mono); font-size: 10.5px; color: var(--ki-color-text-subtle); }
+.gov-trace__ms { flex: none; font-size: 10.5px; color: var(--ki-color-text-subtle); }
+.gov-trace__chev { flex: none; transition: transform 140ms ease; }
+.gov-trace.is-open .gov-trace__chev { transform: rotate(180deg); }
+.gov-trace__body { display: flex; flex-direction: column; gap: 4px; padding: 2px 6px 8px 12px; }
+.gov-trace__sub { font-size: 10.5px; font-weight: 600; color: var(--ki-color-text-subtle); }
+.gov-trace__pre {
+  margin: 0; padding: 6px 8px;
+  border-radius: var(--ki-radius-sm);
+  background: #141c18; color: #dfe8e3;
+  font-family: var(--ki-font-mono); font-size: 11px; line-height: 1.5;
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 200px; overflow: auto;
+}
+.gov-trace__cut, .gov-trace__note { font-size: 10.5px; color: var(--ki-color-text-subtle); }
+
+/* 单轮思考（默认收起） */
+.gov-think { margin-top: 4px; }
+.gov-think > summary { cursor: pointer; font-size: 11px; color: var(--ki-color-text-subtle); }
+.gov-think__body {
+  margin: 4px 0 0; padding: 6px 8px;
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-muted);
+  font-size: 11px; line-height: 1.6; white-space: pre-wrap;
+  color: var(--ki-color-text-muted);
+}
+
+/* ── 过程区排版修复（2026-11-18 真机） ── */
+/* 1) 160px 太矮：按视口给高度，长过程仍内滚；窄屏退回自然高度 */
+.gov-ai-embed__scroll { height: clamp(240px, 34vh, 360px); }
+@media (max-width: 640px) {
+  .gov-ai-embed__scroll { height: auto; max-height: 260px; }
+  .gov-ai-embed__scroll--auto { max-height: 260px; }
+}
+
+/* 2) 候选区与过程区视觉分层：灰底 + 标题条（此前两块都是白底，几乎分不出） */
+.gov-cand-list--embed {
+  margin-top: 10px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-secondary);
+  max-height: 260px;
+}
+.gov-candlist__head {
+  display: flex; align-items: center; gap: 4px;
+  margin-bottom: 6px;
+  font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  color: var(--ki-color-text-subtle);
+}
+.gov-candlist__head b { color: var(--ki-color-text-secondary); font-weight: 600; }
+
+/* 3) 过程末尾的「最终结论」：此前结论只在卡顶，看过程时看不到（真机反馈） */
+.gov-ai-final {
+  margin: 10px 2px 4px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--ki-color-purple);
+  border-radius: 0 var(--ki-radius-sm) var(--ki-radius-sm) 0;
+  background: color-mix(in srgb, var(--ki-color-purple) 7%, transparent);
+}
+.gov-ai-final__head { font-size: 11px; font-weight: 600; color: var(--ki-color-purple); margin-bottom: 3px; }
+.gov-ai-final__text {
+  margin: 0; font-size: 12px; line-height: 1.7;
+  color: var(--ki-color-text-secondary); white-space: pre-wrap;
+}
+.gov-ai-final__meta { margin-top: 4px; font-size: 10.5px; color: var(--ki-color-text-subtle); }
+
+/* 4) 渐进显示：已确认位置 / 候选逐条升起，避免"一下子闪出来" */
+@keyframes gov-rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.gov-codelist .gov-codeloc,
+.gov-cand-list .gov-cand,
+.gov-doclist .gov-docline { animation: gov-rise 260ms ease both; }
+.gov-codelist .gov-codeloc:nth-child(2), .gov-cand-list .gov-cand:nth-child(2) { animation-delay: 40ms; }
+.gov-codelist .gov-codeloc:nth-child(3), .gov-cand-list .gov-cand:nth-child(3) { animation-delay: 80ms; }
+.gov-codelist .gov-codeloc:nth-child(4), .gov-cand-list .gov-cand:nth-child(4) { animation-delay: 120ms; }
+.gov-codelist .gov-codeloc:nth-child(5), .gov-cand-list .gov-cand:nth-child(5) { animation-delay: 160ms; }
+.gov-codelist .gov-codeloc:nth-child(6), .gov-cand-list .gov-cand:nth-child(6) { animation-delay: 200ms; }
+.gov-codelist .gov-codeloc:nth-child(7), .gov-cand-list .gov-cand:nth-child(7) { animation-delay: 240ms; }
+.gov-codelist .gov-codeloc:nth-child(8), .gov-cand-list .gov-cand:nth-child(8) { animation-delay: 280ms; }
+.gov-codelist .gov-codeloc:nth-child(n+9), .gov-cand-list .gov-cand:nth-child(n+9) { animation-delay: 320ms; }
+@media (prefers-reduced-motion: reduce) {
+  .gov-codelist .gov-codeloc, .gov-cand-list .gov-cand, .gov-doclist .gov-docline { animation: none; }
+}
+
+/* 步骤展开明细：中文标签 + 值排成一行（原来是 dt/dd 双列英文 key） */
+.gov-step-metrics {
+  display: flex; flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11.5px;
+  color: var(--ki-color-text-muted);
+}
+.gov-step-metric b {
+  margin-right: 4px;
+  font-weight: 600;
+  color: var(--ki-color-text-secondary);
+}
+
+/* ── 代码区与过程区彻底分开（2026-11-18 真机：灰底仍与白底过程太像） ──
+   过程区 = 白底（中性，讲"做了什么"）；代码区 = 淡蓝（讲"落在哪"），
+   颜色只用 info token 混合，暗色主题下自动跟随。 */
+.gov-cand-list--embed {
+  background: color-mix(in srgb, var(--ki-color-info) 8%, var(--ki-color-surface));
+  border-color: color-mix(in srgb, var(--ki-color-info) 24%, var(--ki-color-border));
+}
+.gov-candlist__head { color: color-mix(in srgb, var(--ki-color-info) 60%, var(--ki-color-text-subtle)); }
+.gov-candlist__head b { color: var(--ki-color-info); }
+
+/* 已确认位置同属"代码"，用同一淡蓝系，和过程区不再撞色 */
+.gov-confirmed {
+  padding: 8px 10px 10px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-info) 20%, var(--ki-color-border));
+  border-radius: var(--ki-radius-md);
+  background: color-mix(in srgb, var(--ki-color-info) 6%, var(--ki-color-surface));
+}
+.gov-confirmed__head { color: color-mix(in srgb, var(--ki-color-info) 55%, var(--ki-color-text-subtle)); }

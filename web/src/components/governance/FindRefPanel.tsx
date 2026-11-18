@@ -258,7 +258,7 @@ export function FindRefPanel(args: FindRefPanelProps): JSX.Element | null {
 
       {state === 'done' && candidates.length > 0 ? (
         <>
-          <div className="gov-cand-list">
+          <div className="gov-cand-list gov-cand-list--embed">
             {candidates.map((c) => {
               const key = keyOf(c);
               const checked = picked.has(key);

@@ -239,6 +239,12 @@ export interface RefSearchCallDto {
   label: string;
   ms: number;
   note?: string;
+  /** 调用入参（已截断 300 字；skill 调用可能为空） */
+  args?: string;
+  /** 工具返回（已截断 2000 字；note 记的是错误/降级摘要，不是返回体） */
+  response?: string;
+  /** 返回原文长度（用于 UI 标「已截断（原文 N 字）」）；无 response 时不写 */
+  responseChars?: number;
 }
 
 export interface RefSearchStepDto {
@@ -251,6 +257,11 @@ export interface RefSearchStepDto {
   ms: number;
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
+  /**
+   * 这一步里模型的思考片段（reasoning 流），单步截断 2000 字。
+   * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
+   */
+  thinking?: string;
   calls?: RefSearchCallDto[];
 }
 
@@ -359,6 +370,12 @@ export interface AnalysisStepCallDto {
   label: string;
   ms: number;
   note?: string;
+  /** 调用入参（已截断 300 字；skill 调用可能为空） */
+  args?: string;
+  /** 工具返回（已截断 2000 字；note 记的是错误/降级摘要，不是返回体） */
+  response?: string;
+  /** 返回原文长度（用于 UI 标「已截断（原文 N 字）」）；无 response 时不写 */
+  responseChars?: number;
 }
 
 export interface AnalysisStepDto {
@@ -367,6 +384,11 @@ export interface AnalysisStepDto {
   ms: number;
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
+  /**
+   * 这一步里模型的思考片段（reasoning 流），单步截断 2000 字。
+   * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
+   */
+  thinking?: string;
   calls?: AnalysisStepCallDto[];
 }
 
