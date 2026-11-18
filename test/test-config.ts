@@ -106,12 +106,22 @@ process.env.KI_CONFIG_PATH = TEST_CONFIG_PATH;
  * 注册 scope 到测试配置文件（同步追加）
  * 在创建随机 scope 后调用，确保子进程能找到该 scope
  */
+/**
+ * 本进程注册过的 scope。
+ *
+ * 为什么需要：`dataDir` 指向 `PROJECT_ROOT/kb`（见 buildTestConfig），每个随机 scope
+ * 都会在那里落一个目录；过去只有部分用例自己 rm，其余（gcreate / dr-wiki / scheme-d …）
+ * 跑完就留，长期攒出上千个目录（实测 4375 个 / 175MB）。cleanup 时按 scope 统一清掉。
+ */
+const registeredScopes = new Set<string>();
+
 export function registerTestScope(scope: string): void {
   const config = JSON.parse(fs.readFileSync(TEST_CONFIG_PATH, 'utf-8'));
   if (!config.scopes[scope]) {
     config.scopes[scope] = {};
     fs.writeFileSync(TEST_CONFIG_PATH, JSON.stringify(config), 'utf-8');
   }
+  registeredScopes.add(scope);
 }
 
 /**
@@ -346,6 +356,18 @@ export function embeddingKeyVar(): string {
  * 清理临时配置文件（在 after() 中调用）
  */
 export function cleanupTestConfig(): void {
+  /*
+   * 清理本进程用过的 scope 沙箱目录（`PROJECT_ROOT/kb/<scope>`）。
+   * 防呆：只删 kb 根下的直接子目录，且 scope 名不得含路径分隔符 —— 避免把真实库删掉。
+   */
+  const kbRoot = path.join(PROJECT_ROOT, 'kb');
+  for (const scope of registeredScopes) {
+    if (!scope || scope === '.' || scope === '..' || /[\\/]/.test(scope)) continue;
+    try {
+      fs.rmSync(path.join(kbRoot, scope), { recursive: true, force: true });
+    } catch { /* 已被用例自己删掉 / 权限异常都忽略 */ }
+  }
+  registeredScopes.clear();
   try {
     fs.rmSync(TEST_CONFIG_DIR, { recursive: true, force: true });
   } catch { /* ignore */ }

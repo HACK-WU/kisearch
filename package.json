@@ -35,7 +35,8 @@
     "test:e2e:stage3": "node --test test/e2e/stage3-scale.network.mjs",
     "test:e2e:restore-cancel": "node --test test/e2e/restore-cancel.network.mjs",
     "test:e2e:daemon-routes": "node --test test/e2e/daemon-routes.network.mjs",
-    "build:zvec-engine": "tsc -p tsconfig.src.json"
+    "build:zvec-engine": "tsc -p tsconfig.src.json",
+    "clean:test-kb": "node scripts/clean-test-kb.mjs"
   },
   "keywords": [
     "knowledge",
