@@ -371,8 +371,6 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   // ── AI 分析独立配置（REQ-20261113-003 · S-01）──
   const [analysisDefaultDirText, setAnalysisDefaultDirText] = useState('');
   const [analysisByScopeRows, setAnalysisByScopeRows] = useState<Array<{ scope: string; dir: string }>>([]);
-  const [analysisRoundsText, setAnalysisRoundsText] = useState('');
-  const [analysisFilesText, setAnalysisFilesText] = useState('');
   const [newScopePick, setNewScopePick] = useState('');
   const [newScopeDir, setNewScopeDir] = useState('');
   /** 「保存目录配置」被拦下的原因（逐行文案，空 = 无错） */
@@ -439,7 +437,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   /** 组合提示（场景推演发现）：条数 × 典型单条 ≈1.2K 字符 > 返回上限 ⇒ 多数返回会被截断 */
   const comboWarn = budgetComboWarn(hitsParsed, trParsed);
 
-  // ── AI 分析预算与思考级别（REQ-20261113-003 · S-01）──
+  // ── AI 分析配置与思考级别（REQ-20261113-003 · S-01）──
   const analysisCfg: AnalysisConfig = draft?.analysis ?? data?.defaults.analysis ?? EMPTY_ANALYSIS_CONFIG;
   const analysisDirsConfigured = Boolean(analysisCfg.targetDirs.defaultDir)
     || Object.keys(analysisCfg.targetDirs.byScope).length > 0;
@@ -481,16 +479,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
       : analysisDirsConfigured
         ? { text: '已配置', cls: ' ki-chat-cfg__badge--ok' }
         : { text: '未配置', cls: '' };
-  const analysisRoundsDefault = data?.limits.analysisMaxRoundsDefault ?? 6;
-  const analysisRoundsMax = data?.limits.analysisMaxRoundsMax ?? 12;
-  const analysisFilesDefault = data?.limits.analysisMaxFilesDefault ?? 8;
-  const analysisFilesMax = data?.limits.analysisMaxFilesMax ?? 30;
-  const analysisRoundsParsed = parseStrictInt(analysisRoundsText);
-  const analysisFilesParsed = parseStrictInt(analysisFilesText);
-  const analysisRoundsInvalid = analysisRoundsText.trim() !== '' && (analysisRoundsParsed === null || analysisRoundsParsed < 1 || analysisRoundsParsed > analysisRoundsMax);
-  const analysisFilesInvalid = analysisFilesText.trim() !== '' && (analysisFilesParsed === null || analysisFilesParsed < 1 || analysisFilesParsed > analysisFilesMax);
-  const analysisRoundsOverridden = analysisCfg.maxRounds !== undefined;
-  const analysisFilesOverridden = analysisCfg.maxFiles !== undefined;
+  // 2026-11-18：轮次 / 文件数上限整体取消，相关派生值一并移除
 
   const analysisEffortOverridden = analysisCfg.reasoningEffort !== undefined;
   const analysisEffortCurrent = analysisCfg.reasoningEffort ?? data?.reasoningEffortDefault;
@@ -556,14 +545,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     });
   };
 
-  // ── AI 查找预算 / 思考级别 ──
-  const findRoundsDefault = data?.limits.findMaxRoundsDefault ?? 4;
-  const findRoundsMax = data?.limits.findMaxRoundsMax ?? 8;
-  const findCandDefault = data?.limits.findMaxCandidatesDefault ?? 12;
-  const findCandMax = data?.limits.findMaxCandidatesMax ?? 20;
-  const findTimeoutDefault = (data?.limits.findTimeoutDefaultMs ?? 45000) / 1000;
-  const findTimeoutMin = (data?.limits.findTimeoutMinMs ?? 10000) / 1000;
-  const findTimeoutMax = (data?.limits.findTimeoutMaxMs ?? 60000) / 1000;
+  // ── AI 查找思考级别 ──（2026-11-18：轮次 / 候选数 / 超时上限整体取消，只留思考级别）
   const findEffortCurrent = findCfg.reasoningEffort ?? data?.reasoningEffortDefault;
   const findEffortOptions = useMemo(
     () => buildEffortOptions(data?.reasoningEffortOptions, findEffortCurrent),
@@ -600,44 +582,6 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     }));
   };
 
-  const handleAnalysisRoundsInput = (v: string): void => {
-    setAnalysisRoundsText(v);
-    const parsed = parseStrictInt(v);
-    if (parsed !== null && parsed >= 1 && parsed <= analysisRoundsMax) {
-      mutateAnalysis((a) => ({ ...a, maxRounds: parsed }), true);
-    } else if (v.trim() === '') {
-      mutateAnalysis((a) => {
-        const { maxRounds: _drop, ...rest } = a;
-        return rest;
-      }, true);
-    }
-  };
-  const handleAnalysisRoundsReset = (): void => {
-    setAnalysisRoundsText(String(analysisRoundsDefault));
-    mutateAnalysis((a) => {
-      const { maxRounds: _drop, ...rest } = a;
-      return rest;
-    });
-  };
-  const handleAnalysisFilesInput = (v: string): void => {
-    setAnalysisFilesText(v);
-    const parsed = parseStrictInt(v);
-    if (parsed !== null && parsed >= 1 && parsed <= analysisFilesMax) {
-      mutateAnalysis((a) => ({ ...a, maxFiles: parsed }), true);
-    } else if (v.trim() === '') {
-      mutateAnalysis((a) => {
-        const { maxFiles: _drop, ...rest } = a;
-        return rest;
-      }, true);
-    }
-  };
-  const handleAnalysisFilesReset = (): void => {
-    setAnalysisFilesText(String(analysisFilesDefault));
-    mutateAnalysis((a) => {
-      const { maxFiles: _drop, ...rest } = a;
-      return rest;
-    });
-  };
   const handleAnalysisEffortChange = (v: string): void => {
     mutateAnalysis((a) => {
       if (v === EFFORT_FOLLOW_DEFAULT) {
@@ -861,8 +805,6 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
         setAnalysisDirErrors([]);
       }
     }
-    setAnalysisRoundsText(String(a.maxRounds ?? (data.limits.analysisMaxRoundsDefault ?? 6)));
-    setAnalysisFilesText(String(a.maxFiles ?? (data.limits.analysisMaxFilesDefault ?? 8)));
   }, [data]);
 
   // "已保存"顶部细条：1.2s 自隐
@@ -1519,7 +1461,9 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
 
         {capability === 'analysis' && draft && data && (
           <>
-            {data.limits.analysisMaxRoundsMax === undefined && (
+            {/* 后端未重启的 fail-loud：判据用 `analysisPromptMaxChars`（与 analysis 域同批下发）。
+                2026-11-18 前这里判的是 `analysisMaxRoundsMax`，随预算取消失去了该字段。 */}
+            {data.limits.analysisPromptMaxChars === undefined && (
               <p className="ki-chat-cfg__warn">
                 服务端未返回 AI 分析扩展配置：通常是后端尚未重启，目录与工具配置保存可能不会生效。
               </p>
@@ -1736,72 +1680,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               </button>
             </div>
 
-            {/* 4. 分析预算 */}
-            <div className="ki-chat-cfg__field">
-              <span className="ki-chat-cfg__label">
-                分析预算
-                <em className="ki-chat-cfg__badge">
-                  {analysisRoundsOverridden || analysisFilesOverridden ? '自定义' : `默认 ${analysisRoundsDefault} 轮 / ${analysisFilesDefault} 文件`}
-                </em>
-              </span>
-              <p className="ki-chat-cfg__hint">
-                仅作用于事件「AI 分析」：单次分析受 90 秒总超时与下方轮次/文件上限保护，防止大仓扫描失控。
-              </p>
-              <div className="ki-chat-cfg__ctxrow">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="ki-chat-cfg__ctxinput"
-                  aria-label="最大工具轮次（轮）"
-                  disabled={readOnly}
-                  aria-invalid={analysisRoundsInvalid || undefined}
-                  value={analysisRoundsText}
-                  onChange={(e) => handleAnalysisRoundsInput(e.target.value)}
-                  onBlur={flushPending}
-                />
-                <span className="ki-chat-cfg__ctxunit">轮（1–{analysisRoundsMax}）</span>
-                <span className="ki-chat-cfg__ctxsp" />
-                <button
-                  type="button"
-                  className="ki-chat-btn ki-chat-btn--ghost"
-                  disabled={readOnly || !analysisRoundsOverridden}
-                  onClick={handleAnalysisRoundsReset}
-                >
-                  恢复默认
-                </button>
-              </div>
-              <div className="ki-chat-cfg__ctxrow">
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="ki-chat-cfg__ctxinput"
-                  aria-label="最多读取文件数（个）"
-                  disabled={readOnly}
-                  aria-invalid={analysisFilesInvalid || undefined}
-                  value={analysisFilesText}
-                  onChange={(e) => handleAnalysisFilesInput(e.target.value)}
-                  onBlur={flushPending}
-                />
-                <span className="ki-chat-cfg__ctxunit">个文件（1–{analysisFilesMax}）</span>
-                <span className="ki-chat-cfg__ctxsp" />
-                <button
-                  type="button"
-                  className="ki-chat-btn ki-chat-btn--ghost"
-                  disabled={readOnly || !analysisFilesOverridden}
-                  onClick={handleAnalysisFilesReset}
-                >
-                  恢复默认
-                </button>
-              </div>
-              {analysisRoundsInvalid && (
-                <p className="ki-chat-cfg__warn">最大工具轮次请输入 1–{analysisRoundsMax} 之间的整数。</p>
-              )}
-              {analysisFilesInvalid && (
-                <p className="ki-chat-cfg__warn">最多读取文件数请输入 1–{analysisFilesMax} 之间的整数。</p>
-              )}
-            </div>
-
-            {/* 5. 思考级别 */}
+            {/* 4. 思考级别 */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 思考级别
@@ -1836,7 +1715,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               {analysisEffortView.warn !== null && <p className="ki-chat-cfg__warn">{analysisEffortView.warn}</p>}
             </div>
 
-            {/* 6. 工具与权限（全部只读 · 默认全开） */}
+            {/* 5. 工具与权限（全部只读 · 默认全开） */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">工具与权限</span>
               <p className="ki-chat-cfg__hint">
@@ -2025,91 +1904,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               </div>
             </div>
 
-            {/* 4. 检索预算 */}
-            <div className="ki-chat-cfg__field">
-              <span className="ki-chat-cfg__label">
-                检索预算
-                <em className="ki-chat-cfg__badge">
-                  {findCfg.maxRounds !== undefined || findCfg.maxCandidates !== undefined || findCfg.timeoutMs !== undefined
-                    ? '自定义'
-                    : `默认 ${findRoundsDefault} 轮 / ${findCandDefault} 候选 / ${findTimeoutDefault} 秒`}
-                </em>
-              </span>
-              <p className="ki-chat-cfg__hint">
-                仅作用于深度查找：轮次防模型空转、候选防列表过长、超时防久等。清空 = 跟随默认。
-              </p>
-              <div className="ki-chat-cfg__ctxrow">
-                <span className="ki-chat-cfg__sublabel">最大轮次</span>
-                <input
-                  type="text"
-                  className="ki-chat-cfg__dirinput"
-                  aria-label="AI 查找最大轮次"
-                  placeholder={String(findRoundsDefault)}
-                  disabled={readOnly}
-                  value={findCfg.maxRounds ?? ''}
-                  onChange={(e) => {
-                    const v = parseStrictInt(e.target.value);
-                    mutateFind(
-                      (f) => ({ ...f, maxRounds: v !== null && v >= 1 && v <= findRoundsMax ? v : undefined }),
-                      true,
-                    );
-                  }}
-                />
-                <span className="ki-chat-cfg__ctxsp" />
-                <span className="ki-chat-cfg__sublabel">候选上限</span>
-                <input
-                  type="text"
-                  className="ki-chat-cfg__dirinput"
-                  aria-label="AI 查找候选上限"
-                  placeholder={String(findCandDefault)}
-                  disabled={readOnly}
-                  value={findCfg.maxCandidates ?? ''}
-                  onChange={(e) => {
-                    const v = parseStrictInt(e.target.value);
-                    mutateFind(
-                      (f) => ({ ...f, maxCandidates: v !== null && v >= 1 && v <= findCandMax ? v : undefined }),
-                      true,
-                    );
-                  }}
-                />
-                <span className="ki-chat-cfg__ctxsp" />
-                <span className="ki-chat-cfg__sublabel">超时（秒）</span>
-                <input
-                  type="text"
-                  className="ki-chat-cfg__dirinput"
-                  aria-label="AI 查找超时（秒）"
-                  placeholder={String(findTimeoutDefault)}
-                  disabled={readOnly}
-                  value={findCfg.timeoutMs !== undefined ? findCfg.timeoutMs / 1000 : ''}
-                  onChange={(e) => {
-                    const v = parseStrictInt(e.target.value);
-                    mutateFind(
-                      (f) => ({
-                        ...f,
-                        timeoutMs: v !== null && v >= findTimeoutMin && v <= findTimeoutMax ? v * 1000 : undefined,
-                      }),
-                      true,
-                    );
-                  }}
-                />
-              </div>
-              <button
-                type="button"
-                className="ki-chat-btn ki-chat-btn--ghost"
-                disabled={readOnly || (findCfg.maxRounds === undefined && findCfg.maxCandidates === undefined && findCfg.timeoutMs === undefined)}
-                onClick={() => mutateFind((f) => {
-                  const n = { ...f };
-                  delete n.maxRounds;
-                  delete n.maxCandidates;
-                  delete n.timeoutMs;
-                  return n;
-                })}
-              >
-                恢复默认
-              </button>
-            </div>
-
-            {/* 5. 思考级别 */}
+            {/* 4. 思考级别 */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 思考级别
@@ -2155,7 +1950,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               {findEffortView.warn !== null && <p className="ki-chat-cfg__warn">{findEffortView.warn}</p>}
             </div>
 
-            {/* 6. 工具与权限 */}
+            {/* 5. 工具与权限 */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 工具与权限

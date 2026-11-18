@@ -46,7 +46,7 @@ const base = () => ({
 });
 
 describe('① 草稿拷贝必须搬运 find（整份替换语义）', () => {
-  it('六个子块全部保留', () => {
+  it('子块全部保留，已取消的预算字段不再搬运', () => {
     const out = clonePromptConfig(base());
     assert.ok(out.find, 'find 域不得丢失');
     assert.deepEqual(out.find.ranges.extraScopes, ['kisearch-docs']);
@@ -54,10 +54,11 @@ describe('① 草稿拷贝必须搬运 find（整份替换语义）', () => {
     assert.equal(out.find.prompt.content, '找文档');
     assert.equal(out.find.skills.length, 1);
     assert.equal(out.find.tools.ki_get_module_info, false);
-    assert.equal(out.find.maxRounds, 4);
-    assert.equal(out.find.maxCandidates, 12);
-    assert.equal(out.find.timeoutMs, 45000);
     assert.equal(out.find.reasoningEffort, 'high');
+    // 2026-11-18：轮次 / 候选 / 超时预算整体取消 —— 草稿即使带着旧值也不再搬运
+    assert.equal('maxRounds' in out.find, false, 'maxRounds 已取消');
+    assert.equal('maxCandidates' in out.find, false, 'maxCandidates 已取消');
+    assert.equal('timeoutMs' in out.find, false, 'timeoutMs 已取消');
   });
 
   it('深拷：改草稿不影响原对象（否则"没保存也生效了"）', () => {

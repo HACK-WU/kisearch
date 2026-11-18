@@ -244,10 +244,8 @@ export interface LlmConfig {
    * agent 问答分组只能回看这段时间内的记录。
    */
   askSessionRetainDays?: number;
-  /**
-   * 事件「AI 分析」单 scope 每日触发上限（1~1000，缺省 50）—— REQ-20261113-003 · S-04。
-   */
-  analysisDailyLimit?: number;
+  // 2026-11-18：`analysisDailyLimit`（AI 分析 / 深度查找每日额度）已取消，字段删除。
+  // 存量 config.yaml 残留该键时由 `config-schema` 的 deprecated 名单告警并忽略。
 }
 
 /** 会话存储目录默认值（S02 §3.1：独立于 kb/ 与 vectorDir，见 D4） */
@@ -679,8 +677,7 @@ function parseAndExpand(configFile: string): KiConfig {
       askSessionTtlMs: rl.askSessionTtlMs !== undefined ? Number(rl.askSessionTtlMs) : undefined,
       // REQ-20261116-003 S-01：短会话保留天数（同上白名单；漏了会"配置写了不生效"）
       askSessionRetainDays: rl.askSessionRetainDays !== undefined ? Number(rl.askSessionRetainDays) : undefined,
-      // REQ-20261113-003 S-04：AI 分析单 scope 每日限流上限（1~1000；缺省 50）
-      analysisDailyLimit: rl.analysisDailyLimit !== undefined ? Number(rl.analysisDailyLimit) : undefined,
+      // 2026-11-18：analysisDailyLimit 已取消，不再从配置读取（残留键由 schema 告警忽略）
     };
   }
 

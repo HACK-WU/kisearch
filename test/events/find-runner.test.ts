@@ -131,8 +131,8 @@ before(() => {
   cfg = {
     dataDir: path.dirname(getKbDir(scope)),
     chatDir: path.join(path.dirname(getKbDir(scope)), 'chat'),
-    // 额度给足：本文件多次调用，避免撞到日配额干扰断言
-    llm: { baseURL: 'http://localhost', model: 'fake-model', apiKey: 'k', analysisDailyLimit: 1_000 },
+    // 2026-11-18：每日额度已整体取消，配置里不再有 analysisDailyLimit
+    llm: { baseURL: 'http://localhost', model: 'fake-model', apiKey: 'k' },
   } as KiConfig;
 });
 
@@ -426,25 +426,26 @@ describe('③b 已用过的文档', () => {
   });
 });
 
-describe('④ 预算', () => {
-  it('轮次用尽 → partial.rounds，仍返回已拿到的候选', async () => {
-    const ev = await createEvent(scope, { title: '轮次预算验证', typeId: 'et_1' });
-    // 第 1 轮走工具（用满唯一额度），第 2 轮被强制收尾 → 直接给候选
+describe('④ 预算已取消（2026-11-18）', () => {
+  it('轮次不再设限：连续 3 轮工具调用仍然跑完，不产生 partial', async () => {
+    const ev = await createEvent(scope, { title: '轮次不设限验证', typeId: 'et_1' });
+    // 旧实现 4 轮封顶；这里连跑 3 轮工具后正常收尾，证明不再有轮次闸门
     const script = scriptedStream([
       { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
+      { calls: [{ name: 'ki_search', args: { query: '回滚 2' } }] },
+      { calls: [{ name: 'ki_search', args: { query: '回滚 3' } }] },
       { text: JSON.stringify([{ sourceScope: scope, group: GROUP, name: ART_B, reason: '命中' }]) },
     ]);
     const result = await runDeepFind(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
       search: async () => ({ results: [] }),
-      config: baseConfig({ maxRounds: 1 }),
     }));
-    assert.equal(result.partial?.reason, 'rounds');
+    assert.equal(result.partial, undefined, '不该因轮次被强制收尾');
     assert.equal(result.candidates.length, 1);
   });
 
-  it('候选上限截断', async () => {
-    const ev = await createEvent(scope, { title: '候选上限验证', typeId: 'et_1' });
+  it('候选不再截断：多条候选全部返回，且没有 truncated 记录', async () => {
+    const ev = await createEvent(scope, { title: '候选不截断验证', typeId: 'et_1' });
     const script = scriptedStream([{
       text: JSON.stringify([
         { sourceScope: scope, group: GROUP, name: ART_A, reason: 'a' },
@@ -453,11 +454,9 @@ describe('④ 预算', () => {
     }]);
     const result = await runDeepFind(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
-      config: baseConfig({ maxCandidates: 1 }),
     }));
-    assert.equal(result.candidates.length, 1);
-    assert.equal(result.unconfirmed[0]?.reason, 'truncated', '超上限的候选要透出，不能静默丢');
-    assert.equal(result.unconfirmedCount, 1);
+    assert.equal(result.candidates.length, 2);
+    assert.equal(result.unconfirmed.length, 0, '不该再产生 truncated 记录');
   });
 });
 
@@ -476,7 +475,8 @@ describe('⑤ 超时', () => {
       await assert.rejects(
         () => runDeepFind(scope, ev.id, deps({
           stream: { stream: hang as never, status: () => okStatus() },
-          config: baseConfig({ timeoutMs: 1_000 }),
+          // 超时已不可配：走单测注入口把 45s 缩到 1s
+          hardTimeoutMs: 1_000,
         })),
         (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_TIMEOUT',
       );
@@ -530,10 +530,10 @@ describe('⑥ 服务层形状（与快速通道同形，前端一套渲染）', 
   });
 });
 
-describe('⑦ auto-review 修复锁（预算语义 / 名次 / excluded 口径）', () => {
-  it('预算不被 llm.requestTimeoutMs 夹取；库内名次按分数降序；excluded 只给文档名', async () => {
+describe('⑦ auto-review 修复锁（硬超时语义 / 名次 / excluded 口径）', () => {
+  it('硬超时恒为 45s，不被 llm.requestTimeoutMs 夹取；库内名次按分数降序；excluded 只给文档名', async () => {
     const ev = await createEvent(scope, {
-      title: '预算与名次验证',
+      title: '超时与名次验证',
       typeId: 'et_1',
       docs: [{ group: GROUP, name: ART_A }],
     });
@@ -543,8 +543,8 @@ describe('⑦ auto-review 修复锁（预算语义 / 名次 / excluded 口径）
     ]);
     const r = await runDeepFindAsSearchResult(scope, ev.id, {
       targets: [scope],
-      config: baseConfig({ timeoutMs: 45_000 }),
-      // 单轮请求上限配得很小：不得因此把整次查找的总预算也压到 5s
+      config: baseConfig(),
+      // 单轮请求上限配得很小：不得因此把整次查找的硬超时也压到 5s
       kiConfig: {
         ...cfg,
         llm: { ...(cfg.llm as object), requestTimeoutMs: 5_000 } as KiConfig['llm'],
@@ -560,7 +560,7 @@ describe('⑦ auto-review 修复锁（预算语义 / 名次 / excluded 口径）
     });
 
     const understand = r.steps.find((x) => x.name === 'understand')!;
-    assert.equal(understand.metrics.timeoutMs, 45_000, '总预算取 find.timeoutMs，不被 llm.requestTimeoutMs 夹取');
+    assert.equal(understand.metrics.timeoutMs, 45_000, '硬超时硬编码 45s，不被 llm.requestTimeoutMs 夹取');
     assert.equal(r.candidates[0]?.rankInScope, 1, '名次按分数降序算，不是命中出现顺序');
     assert.deepEqual(r.excluded.associated, [ART_A], 'excluded 与快速通道同口径：只给文档名');
   });

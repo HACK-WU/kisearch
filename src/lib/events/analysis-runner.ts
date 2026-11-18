@@ -27,8 +27,6 @@ import {
   type ToolDef,
 } from '../chat/llm-client.js';
 import {
-  ANALYSIS_MAX_FILES_DEFAULT,
-  ANALYSIS_MAX_ROUNDS_DEFAULT,
   defaultPromptConfig,
   readPromptConfig,
   resolveAnalysisTargetDir,
@@ -79,7 +77,6 @@ import type {
 
 export const ANALYSIS_HARD_TIMEOUT_MS = 90_000;
 export const ANALYSIS_SOFT_TIMEOUT_MS = 75_000;
-export const ANALYSIS_DAILY_LIMIT_DEFAULT = 50;
 const ANALYSIS_TOOL_RESPONSE_CHARS = 10_000;
 
 interface ActiveRun {
@@ -438,49 +435,10 @@ function isTargetRepoSyncing(config: KiConfig, realRoot: string): boolean {
   return false;
 }
 
-function dayKey(now: number): string {
-  const d = new Date(now);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-/**
- * 消耗当日 AI 额度（与「AI 查找」共用同一份计数与 `llm.analysisDailyLimit`）。
- *
- * 导出给 `find-runner` 复用：两条链路吃的是同一份额度，各记一份会让用户
- * 看到"分析还没用完、查找却停了"的两种口径。错误码可覆盖（查找侧用 `FIND_QUOTA_EXCEEDED`）。
+/*
+ * 2026-11-18：每日额度（原 `consumeDailyQuota` + `llm.analysisDailyLimit`，50 次/日/scope）
+ * 整体取消，`_analysis_usage.json` 不再读写（存量文件可留，不再被消费）。
  */
-export async function consumeDailyQuota(
-  scope: string,
-  limit: number,
-  now: number,
-  onExceeded?: () => GovernanceError,
-): Promise<void> {
-  const hash = crypto.createHash('sha256').update(scope).digest('hex').slice(0, 24);
-  await withScopeWriteLock(`\u0000analysis-usage:${hash}`, 'analysis-quota', async () => {
-    const dir = getEventsDir(scope);
-    const file = path.join(dir, '_analysis_usage.json');
-    const today = dayKey(now);
-    let data: { date: string; count: number } = { date: today, count: 0 };
-    try {
-      const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as { date?: string; count?: number };
-      if (parsed.date === today && typeof parsed.count === 'number' && Number.isFinite(parsed.count)) {
-        data = { date: today, count: parsed.count };
-      }
-    } catch { /* missing or corrupt -> reset today */ }
-    if (data.count >= limit) {
-      throw onExceeded?.() ?? new GovernanceError(
-        'ANALYSIS_RATE_LIMITED',
-        `今日 AI 分析次数已达上限（${limit} 次/日），请明日再试或调整 llm.analysisDailyLimit`,
-        { limit, date: today },
-      );
-    }
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify({ date: today, count: data.count + 1 }, null, 2), 'utf8');
-  });
-}
 
 function parseJsonSummary(text: string): {
   conclusion: string | null;
@@ -623,9 +581,7 @@ export async function startEventAnalysis(
     );
   }
 
-  const dailyLimit = cfg.llm?.analysisDailyLimit ?? ANALYSIS_DAILY_LIMIT_DEFAULT;
   const startedAt = nowFn();
-  await consumeDailyQuota(scope, dailyLimit, startedAt);
 
   const commit = await probeGitShortCommit(realRoot);
   const members = collectMembers(scope, event.id).map((m) => ({ group: m.group, name: m.name }));
@@ -715,14 +671,12 @@ async function executeAnalysisBackground(input: {
   const hardTimeoutMs = deps?.hardTimeoutMs ?? ANALYSIS_HARD_TIMEOUT_MS;
   const softTimeoutMs = deps?.softTimeoutMs ?? ANALYSIS_SOFT_TIMEOUT_MS;
 
-  const maxRounds = analysisCfg.maxRounds ?? ANALYSIS_MAX_ROUNDS_DEFAULT;
-  const maxFiles = analysisCfg.maxFiles ?? ANALYSIS_MAX_FILES_DEFAULT;
   const reasoningEffort = analysisCfg.reasoningEffort ?? cfg.llm?.reasoningEffort;
 
+  // 2026-11-18：文件数不再设限；`filesRead` 仍记账（统计用 + 命中集合去重）
   const fsCtx: FsSandboxContext = {
     rawRoot: realRoot,
     realRoot,
-    maxFiles,
     filesRead: new Set(),
     signal: controller.signal,
   };
@@ -756,7 +710,6 @@ async function executeAnalysisBackground(input: {
   let tokens = 0;
   let finalText = '';
   let timedOut = false;
-  let roundsExhausted = false;
   let fatalError: string | null = null;
   /** 用户主动停止（与超时共用 abort，靠 activeRuns 上的标记区分） */
   let canceledByUser = false;
@@ -791,16 +744,15 @@ async function executeAnalysisBackground(input: {
         break;
       }
       const elapsed = nowFn() - startedAt;
+      // 2026-11-18：轮次上限取消，只剩软超时一条收尾触发线（90s 硬超时在下面兜底 abort）
       const reachedSoft = elapsed >= softTimeoutMs;
-      const reachedRoundLimit = round >= maxRounds;
-      const forceFinalize = reachedSoft || reachedRoundLimit;
-      if (reachedRoundLimit) roundsExhausted = true;
+      const forceFinalize = reachedSoft;
       if (reachedSoft) timedOut = true;
 
-      if (forceFinalize) {
+      if (reachedSoft) {
         messages.push({
           role: 'system',
-          content: '已达到分析轮次或时间上限，不再提供任何工具。请立即基于已获得的证据输出最终 JSON（candidates + unconfirmed）。',
+          content: '已达到分析时间上限，不再提供任何工具。请立即基于已获得的证据输出最终 JSON（candidates + unconfirmed）。',
         });
       }
 
@@ -1012,9 +964,6 @@ async function executeAnalysisBackground(input: {
       }
     }
 
-    if (roundsExhausted) {
-      unconfirmed.push(`已达到工具轮次上限（${maxRounds} 轮），结果可能不完整`);
-    }
     if (timedOut) {
       unconfirmed.push('已达到 90s 分析时间预算，已返回当前阶段可确认结论');
     }
@@ -1063,8 +1012,6 @@ async function executeAnalysisBackground(input: {
       finalStatus = 'partial';
       errorCode = 'NO_RESULT';
       errorMessage = '未定位到可证实的候选代码位置';
-    } else if (roundsExhausted) {
-      finalStatus = 'partial';
     }
 
     await updateDraftIfMatch(scope, event.id, runId, (cur) => ({

@@ -42,8 +42,7 @@ export const clonePromptConfig = (c: PromptConfig): PromptConfig => ({
           prompt: { ...c.analysis.prompt },
           skills: c.analysis.skills.map((s) => ({ ...s })),
           tools: { ...c.analysis.tools },
-          ...(c.analysis.maxRounds !== undefined ? { maxRounds: c.analysis.maxRounds } : {}),
-          ...(c.analysis.maxFiles !== undefined ? { maxFiles: c.analysis.maxFiles } : {}),
+          // 2026-11-18：maxRounds / maxFiles 预算取消，不再作为配置字段搬运
           ...(c.analysis.reasoningEffort !== undefined ? { reasoningEffort: c.analysis.reasoningEffort } : {}),
         },
       }
@@ -62,9 +61,7 @@ export const clonePromptConfig = (c: PromptConfig): PromptConfig => ({
           prompt: { ...c.find.prompt },
           skills: c.find.skills.map((s) => ({ ...s })),
           tools: { ...c.find.tools },
-          ...(c.find.maxRounds !== undefined ? { maxRounds: c.find.maxRounds } : {}),
-          ...(c.find.maxCandidates !== undefined ? { maxCandidates: c.find.maxCandidates } : {}),
-          ...(c.find.timeoutMs !== undefined ? { timeoutMs: c.find.timeoutMs } : {}),
+          // 2026-11-18：maxRounds / maxCandidates / timeoutMs 预算取消，不再搬运
           ...(c.find.reasoningEffort !== undefined ? { reasoningEffort: c.find.reasoningEffort } : {}),
         },
       }

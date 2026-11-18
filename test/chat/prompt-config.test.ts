@@ -654,14 +654,10 @@ describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
         prompt: { content: '自定义分析提示' },
         skills: [{ id: 'builtin-code-locate', name: 'code-locate', description: 'd', content: 'c', enabled: true }],
         tools: { fs_read: true, fs_grep: true },
-        maxRounds: 8,
-        maxFiles: 12,
       },
     });
     assert.equal(saved.analysis!.targetDirs.defaultDir, '/tmp/default-repo');
     assert.equal(saved.analysis!.targetDirs.byScope.mem, '/root/knowledge-indexer');
-    assert.equal(saved.analysis!.maxRounds, 8);
-    assert.equal(saved.analysis!.maxFiles, 12);
 
     assert.throws(
       () => savePromptConfig(cfg, { analysis: { targetDirs: { defaultDir: 'relative/path', byScope: {} } } }),
@@ -671,6 +667,23 @@ describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
       () => savePromptConfig(cfg, { analysis: { targetDirs: { byScope: { mem: '/proc/1' } } } }),
       (err: unknown) => err instanceof PromptConfigError && err.issues.some((i) => i.path === 'analysis.targetDirs.byScope.mem'),
     );
+  });
+
+  it('已取消的预算字段（maxRounds / maxFiles）静默忽略：提交不报错、不落盘', () => {
+    const dirty = {
+      analysis: {
+        targetDirs: { byScope: {} },
+        prompt: { content: '旧配置残留预算字段' },
+        skills: [],
+        tools: {},
+        maxRounds: 8,
+        maxFiles: 12,
+      },
+    } as unknown as Parameters<typeof savePromptConfig>[1];
+    const saved = savePromptConfig(cfg, dirty);
+    const persisted = saved.analysis as Record<string, unknown>;
+    assert.equal(persisted.maxRounds, undefined, '旧字段不得写回磁盘');
+    assert.equal(persisted.maxFiles, undefined);
   });
 
   it('读取老配置（仅 analysisPrompt 无 analysis）平滑承接；analysis 字段损坏只降级对应项', () => {

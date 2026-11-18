@@ -99,7 +99,7 @@ export const GOVERNANCE_CODE_NUMBERS = {
   FIND_TOOLS_ALL_DISABLED: 1423,
   /** 同一事件已有深度查找在跑（**直接拒绝不复用**：查找是一次性交互） */
   FIND_BUSY: 1424,
-  /** 日配额用尽（与 AI 分析共用 `llm.analysisDailyLimit`） */
+  /** 日配额用尽 —— @deprecated 2026-11-18 每日额度取消，本码**不再抛出**（保留仅为码表稳定） */
   FIND_QUOTA_EXCEEDED: 1425,
   /** 硬超时且无候选（有候选时走 200 + `partial`） */
   FIND_TIMEOUT: 1426,
@@ -133,6 +133,7 @@ export const GOVERNANCE_CODE_NUMBERS = {
   ANALYSIS_ASK_BUSY: 1617,
   /** 追问：硬超时（45s）且未产出任何内容 */
   ANALYSIS_ASK_TIMEOUT: 1618,
+  /** @deprecated 2026-11-18 每日额度取消，本码**不再抛出**（保留仅为码表稳定） */
   ANALYSIS_RATE_LIMITED: 1608,
   ANALYSIS_TARGET_SYNCING: 1609,
   ANALYSIS_DRAFT_NOT_FOUND: 1610,

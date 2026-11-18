@@ -174,12 +174,10 @@ export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
 /** 全部合法工具名（校验用；顺序按分组展开） */
 export const MCP_TOOL_NAMES: readonly string[] = MCP_TOOL_GROUPS.flatMap((g) => [...g.names]);
 
-// ─── AI 分析专属配置常数与工具分组（REQ-20261113-003 · S-01）────────
-
-export const ANALYSIS_MAX_ROUNDS_DEFAULT = 6;
-export const ANALYSIS_MAX_ROUNDS_LIMIT = 12;
-export const ANALYSIS_MAX_FILES_DEFAULT = 8;
-export const ANALYSIS_MAX_FILES_LIMIT = 30;
+// ─── AI 分析专属工具分组（REQ-20261113-003 · S-01）────────
+//
+// 2026-11-18：轮次 / 文件数预算整体取消（用户拍板"直接取消"），
+// 仅保留 `analysis-runner` 内硬编码的 90s 总超时作为防挂死兜底 —— 不可配、不进设置页。
 
 export interface AnalysisToolGroup {
   key: 'code-read' | 'kb-read';
@@ -227,15 +225,10 @@ function defaultAnalysisTools(): Record<string, boolean> {
   return out;
 }
 
-// ─── AI 查找专属配置常数与工具分组（REQ-20261116-005）──────────────
-
-export const FIND_MAX_ROUNDS_DEFAULT = 4;
-export const FIND_MAX_ROUNDS_LIMIT = 8;
-export const FIND_MAX_CANDIDATES_DEFAULT = 12;
-export const FIND_MAX_CANDIDATES_LIMIT = 20;
-export const FIND_TIMEOUT_DEFAULT_MS = 45_000;
-export const FIND_TIMEOUT_MIN_MS = 10_000;
-export const FIND_TIMEOUT_MAX_MS = 60_000;
+// ─── AI 查找专属工具分组（REQ-20261116-005）──────────────
+//
+// 2026-11-18：轮次 / 候选数预算整体取消；检索仍受 `find-runner` 内硬编码的
+// 45s 硬超时保护（防挂死），不可配、不进设置页。
 
 /**
  * 「AI 查找」专属工具分组：只有知识库只读四件套。
@@ -391,8 +384,12 @@ export interface AnalysisConfig {
   prompt: CapabilityPrompt;
   skills: PromptSkill[];
   tools: Record<string, boolean>;
-  maxRounds?: number;
-  maxFiles?: number;
+  /**
+   * 思考级别。
+   *
+   * ⚠️ 2026-11-18：原 `maxRounds` / `maxFiles` 两项预算已**整体取消**，
+   *    旧配置里的这两个键读取时静默忽略（轮次与文件数不再设限，超时由内部 90s 兜底）。
+   */
   reasoningEffort?: string;
 }
 
@@ -430,13 +427,12 @@ export interface FindConfig {
   skills: PromptSkill[];
   /** 工具名 → 是否暴露；键必须是 `FIND_TOOL_GROUPS` 展开后的名字 */
   tools: Record<string, boolean>;
-  /** 深度通道最大工具轮次（缺省 = FIND_MAX_ROUNDS_DEFAULT） */
-  maxRounds?: number;
-  /** 单次查找候选上限（缺省 = FIND_MAX_CANDIDATES_DEFAULT） */
-  maxCandidates?: number;
-  /** 深度通道硬超时（ms，缺省 = FIND_TIMEOUT_DEFAULT_MS） */
-  timeoutMs?: number;
-  /** 思考级别（三级链同 analysis） */
+  /**
+   * 思考级别（三级链同 analysis）。
+   *
+   * ⚠️ 2026-11-18：原 `maxRounds` / `maxCandidates` / `timeoutMs` 三项预算已**整体取消**，
+   *    旧配置里的这些键读取时静默忽略（轮次与候选数不再设限，超时由内部 45s 兜底）。
+   */
   reasoningEffort?: string;
 }
 
@@ -1075,31 +1071,7 @@ function normalizeFindSection(
     }
   }
 
-  // ── 预算三件套 ──
-  if (obj.maxRounds !== undefined) {
-    const v = obj.maxRounds;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > FIND_MAX_ROUNDS_LIMIT) {
-      failField('find.maxRounds', `应为 1–${FIND_MAX_ROUNDS_LIMIT} 的整数（轮）`);
-    } else {
-      out.maxRounds = v;
-    }
-  }
-  if (obj.maxCandidates !== undefined) {
-    const v = obj.maxCandidates;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > FIND_MAX_CANDIDATES_LIMIT) {
-      failField('find.maxCandidates', `应为 1–${FIND_MAX_CANDIDATES_LIMIT} 的整数（条）`);
-    } else {
-      out.maxCandidates = v;
-    }
-  }
-  if (obj.timeoutMs !== undefined) {
-    const v = obj.timeoutMs;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < FIND_TIMEOUT_MIN_MS || v > FIND_TIMEOUT_MAX_MS) {
-      failField('find.timeoutMs', `应为 ${FIND_TIMEOUT_MIN_MS}–${FIND_TIMEOUT_MAX_MS} 的整数（毫秒）`);
-    } else {
-      out.timeoutMs = v;
-    }
-  }
+  // ── 预算三件套（2026-11-18 取消：旧配置里的 maxRounds / maxCandidates / timeoutMs 静默忽略）──
 
   // ── 思考级别（本期只做形状校验；档位清单校验在深度通道接入时与 analysis 对齐）──
   if (obj.reasoningEffort !== undefined) {
@@ -1321,25 +1293,7 @@ function normalizeAnalysisSection(
     }
   }
 
-  // maxRounds
-  if (obj.maxRounds !== undefined) {
-    const v = obj.maxRounds;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > ANALYSIS_MAX_ROUNDS_LIMIT) {
-      failField('analysis.maxRounds', `应为 1–${ANALYSIS_MAX_ROUNDS_LIMIT} 的整数（轮）`);
-    } else {
-      out.maxRounds = v;
-    }
-  }
-
-  // maxFiles
-  if (obj.maxFiles !== undefined) {
-    const v = obj.maxFiles;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > ANALYSIS_MAX_FILES_LIMIT) {
-      failField('analysis.maxFiles', `应为 1–${ANALYSIS_MAX_FILES_LIMIT} 的整数（个）`);
-    } else {
-      out.maxFiles = v;
-    }
-  }
+  // maxRounds / maxFiles（2026-11-18 取消：旧配置里的这两个键静默忽略）
 
   // reasoningEffort
   if (obj.reasoningEffort !== undefined) {

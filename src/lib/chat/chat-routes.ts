@@ -90,22 +90,11 @@ import { projectNextContextChars, runToolLoop } from './retrieval/tool-loop.js';
 import { summarizeForCompaction } from './compaction.js';
 import { chatLog, CHAT_LOG_EVENTS } from './chat-log.js';
 import {
-  ANALYSIS_MAX_FILES_DEFAULT,
-  ANALYSIS_MAX_FILES_LIMIT,
-  ANALYSIS_MAX_ROUNDS_DEFAULT,
-  ANALYSIS_MAX_ROUNDS_LIMIT,
   ANALYSIS_TOOL_GROUPS,
   CAPABILITY_PROMPT_MAX_CHARS,
   CONTEXT_CHARS_MAX,
-  FIND_MAX_CANDIDATES_DEFAULT,
-  FIND_MAX_CANDIDATES_LIMIT,
-  FIND_MAX_ROUNDS_DEFAULT,
-  FIND_MAX_ROUNDS_LIMIT,
   FIND_MAX_TARGETS,
   FIND_SKILL_REQUIRED_TOOLS,
-  FIND_TIMEOUT_DEFAULT_MS,
-  FIND_TIMEOUT_MAX_MS,
-  FIND_TIMEOUT_MIN_MS,
   FIND_TOOL_GROUPS,
   MAX_SKILLS,
   MCP_TOOL_GROUPS,
@@ -668,20 +657,9 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       // 前端不硬编码上限；旧 daemon 不返回这两个字段 → 前端据此判定「后端可能未重启」并 fail-loud
       analysisPromptMaxChars: CAPABILITY_PROMPT_MAX_CHARS,
       findPromptMaxChars: CAPABILITY_PROMPT_MAX_CHARS,
-      // ── AI 分析独立预算上下界（REQ-20261113-003 · S-01）──
-      analysisMaxRoundsDefault: ANALYSIS_MAX_ROUNDS_DEFAULT,
-      analysisMaxRoundsMax: ANALYSIS_MAX_ROUNDS_LIMIT,
-      analysisMaxFilesDefault: ANALYSIS_MAX_FILES_DEFAULT,
-      analysisMaxFilesMax: ANALYSIS_MAX_FILES_LIMIT,
-      // ── AI 查找（REQ-20261116-005）：范围上限与预算上下界，前端一律读这里 ──
+      // ── AI 查找（REQ-20261116-005）：范围上限，前端一律读这里 ──
+      // 2026-11-18：分析 / 检索的轮次·文件·候选·超时预算整体取消，不再下发任何预算上下界
       findMaxTargets: FIND_MAX_TARGETS,
-      findMaxRoundsDefault: FIND_MAX_ROUNDS_DEFAULT,
-      findMaxRoundsMax: FIND_MAX_ROUNDS_LIMIT,
-      findMaxCandidatesDefault: FIND_MAX_CANDIDATES_DEFAULT,
-      findMaxCandidatesMax: FIND_MAX_CANDIDATES_LIMIT,
-      findTimeoutDefaultMs: FIND_TIMEOUT_DEFAULT_MS,
-      findTimeoutMinMs: FIND_TIMEOUT_MIN_MS,
-      findTimeoutMaxMs: FIND_TIMEOUT_MAX_MS,
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,

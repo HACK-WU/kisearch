@@ -197,7 +197,7 @@ export function FindRefPanel(args: FindRefPanelProps): JSX.Element | null {
         </button>
         <span className="gov-hint gov-ai-embed__barhint">
           {mode === 'deep'
-            ? '深度查找会让模型多轮检索与读正文，耗时更长、消耗 AI 配额；随时可停。'
+            ? '深度查找会让模型多轮检索与读正文，耗时更长、产生更多模型调用；随时可停。'
             : '确定性检索：同一事件总能得到同一批候选，可复现。'}
         </span>
       </div>

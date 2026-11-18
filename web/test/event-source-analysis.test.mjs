@@ -74,11 +74,13 @@ describe('S-05 · AiAnalyzeModal 辅助逻辑与前端守卫', () => {
     assert.match(modalSrc, /expectedRunId: draft\.runId/, '确认写入必须携带 expectedRunId 防并发重跑错绑');
   });
 
-  it('AiSettingsPage & PromptConfigLayer：对齐 ops.write 与 AI 分析 6 卡配置', () => {
+  it('AiSettingsPage & PromptConfigLayer：对齐 ops.write 与 AI 分析 5 卡配置', () => {
     assert.match(aiSettingsSrc, /can\('ops\.write'\)/, '设置页写权限应与 route-permissions 的 ops.write 对齐');
     assert.match(layerSrc, /分析目标目录/, 'AI 分析设置栏需展示分析目标目录卡片');
-    assert.match(layerSrc, /分析预算/, 'AI 分析设置栏需展示分析预算卡片');
     assert.match(layerSrc, /analysisToolGroups/, 'AI 分析设置栏需渲染服务端下发只读工具分组');
+    // 2026-11-18：分析预算 / 检索预算整体取消（用户拍板），设置页不得再出现输入框
+    assert.doesNotMatch(layerSrc, /分析预算/, '分析预算卡片已取消');
+    assert.doesNotMatch(layerSrc, /检索预算/, '检索预算卡片已取消');
   });
 });
 

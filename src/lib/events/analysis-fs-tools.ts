@@ -45,7 +45,7 @@ const FORBIDDEN_SYSTEM_ROOTS = new Set(['/', '/proc', '/sys', '/dev']);
 export interface FsSandboxContext {
   rawRoot: string;
   realRoot: string;
-  maxFiles: number;
+  /** 已读文件集合：去重计数用（2026-11-18 起不再作为上限闸门） */
   filesRead: Set<string>;
   signal?: AbortSignal;
 }
@@ -56,7 +56,6 @@ export type FsToolErrorCode =
   | 'NOT_A_FILE'
   | 'NOT_A_DIR'
   | 'INVALID_ARG'
-  | 'FILE_BUDGET_EXCEEDED'
   | 'ABORTED';
 
 export type FsToolResult =
@@ -471,13 +470,7 @@ export async function runFsRead(
   try {
     const stat = await fs.promises.stat(resolved.realPath);
     if (!stat.isFile()) return { ok: false, code: 'NOT_A_FILE', error: `不是文件：${resolved.relPath}` };
-    if (!ctx.filesRead.has(resolved.relPath) && ctx.filesRead.size >= ctx.maxFiles) {
-      return {
-        ok: false,
-        code: 'FILE_BUDGET_EXCEEDED',
-        error: `已达到单次分析读取文件上限（${ctx.maxFiles} 个）：请基于已读取内容汇总或重读已有文件`,
-      };
-    }
+    // 2026-11-18：文件数上限取消，不再因读得多而拒绝（防失控由 90s 总超时兜底）
     if (await isBinaryFile(resolved.realPath)) {
       return { ok: false, code: 'INVALID_ARG', error: `目标为二进制文件，跳过读取：${resolved.relPath}` };
     }

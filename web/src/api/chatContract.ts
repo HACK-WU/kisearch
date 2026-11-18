@@ -481,8 +481,11 @@ export interface AnalysisConfig {
   prompt: CapabilityPrompt;
   skills: PromptSkill[];
   tools: Record<string, boolean>;
-  maxRounds?: number;
-  maxFiles?: number;
+  /**
+   * 思考级别。
+   *
+   * ⚠️ 2026-11-18：原 `maxRounds` / `maxFiles` 预算已整体取消，后端不再读取。
+   */
   reasoningEffort?: string;
 }
 
@@ -517,13 +520,12 @@ export interface FindConfig {
   skills: PromptSkill[];
   /** 工具名 → 是否暴露；键必须是 `findToolGroups` 展开后的名字 */
   tools: Record<string, boolean>;
-  /** 深度通道最大工具轮次（缺省读 `limits.findMaxRoundsDefault`） */
-  maxRounds?: number;
-  /** 单次查找候选上限（缺省读 `limits.findMaxCandidatesDefault`） */
-  maxCandidates?: number;
-  /** 深度通道硬超时（ms，缺省读 `limits.findTimeoutDefaultMs`） */
-  timeoutMs?: number;
-  /** 思考级别（缺省 = 跟随部署默认） */
+  /**
+   * 思考级别（缺省 = 跟随部署默认）。
+   *
+   * ⚠️ 2026-11-18：原 `maxRounds` / `maxCandidates` / `timeoutMs` 预算已整体取消，
+   *    后端不再读取（旧配置残留静默忽略）。
+   */
   reasoningEffort?: string;
 }
 
@@ -558,20 +560,13 @@ export interface PromptConfigLimits {
    */
   analysisPromptMaxChars?: number;
   findPromptMaxChars?: number;
-  /** AI 分析预算上下界（REQ-20261113-003 · S-01） */
-  analysisMaxRoundsDefault?: number;
-  analysisMaxRoundsMax?: number;
-  analysisMaxFilesDefault?: number;
-  analysisMaxFilesMax?: number;
-  /** AI 查找（REQ-20261116-005）：范围上限与预算上下界；缺失 = 旧版 daemon */
+  /**
+   * AI 查找范围上限（REQ-20261116-005）；缺失 = 旧版 daemon。
+   *
+   * ⚠️ 2026-11-18：分析与检索的轮次 / 文件 / 候选 / 超时预算上下界已整体取消，
+   *    服务端不再下发，前端也不再有对应的输入框。
+   */
   findMaxTargets?: number;
-  findMaxRoundsDefault?: number;
-  findMaxRoundsMax?: number;
-  findMaxCandidatesDefault?: number;
-  findMaxCandidatesMax?: number;
-  findTimeoutDefaultMs?: number;
-  findTimeoutMinMs?: number;
-  findTimeoutMaxMs?: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */

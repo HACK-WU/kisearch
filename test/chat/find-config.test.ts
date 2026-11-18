@@ -114,22 +114,26 @@ describe('③ 读取软通道（不整份回退）', () => {
     assert.ok(r.config.find, '不得因 find 非法而整份回退');
     assert.equal(r.config.prompt.content, '我的对话提示词', '对话提示词必须保住');
     assert.deepEqual(r.config.find!.ranges.extraScopes, [], '非法 extraScopes 退化为空数组');
-    assert.equal(r.config.find!.maxRounds, undefined, '非法轮次忽略该字段');
     assert.equal(r.config.find!.tools.ki_search, false, '合法字段照常生效');
     assert.ok(r.issue?.includes('find.ranges.extraScopes'), `应指出被忽略的字段，实际：${r.issue}`);
-    assert.ok(r.issue?.includes('find.maxRounds'));
+    // 2026-11-18：预算取消后 maxRounds 已是未知字段 —— 静默丢弃，不再报 issue
+    assert.equal('maxRounds' in r.config.find!, false, '已取消的预算字段不得读回');
+    assert.equal(r.issue?.includes('find.maxRounds'), false, '已取消字段不再报 issue');
   });
 });
 
 describe('④ 保存严格（400 且不落盘）', () => {
-  it('非法 extraScopes / 未知工具名 / 超时越界 / 轮次越界都抛 PromptConfigError', () => {
+  it('非法 extraScopes / 未知工具名抛 PromptConfigError；已取消的预算字段静默丢弃', () => {
     clearFile();
     assert.throws(() => savePromptConfig(cfg, { find: { ranges: { extraScopes: [''] } } }), PromptConfigError);
     assert.throws(() => savePromptConfig(cfg, { find: { ranges: { extraScopes: [123] } } }), PromptConfigError);
     assert.throws(() => savePromptConfig(cfg, { find: { tools: { bad_tool: true } } }), PromptConfigError);
-    assert.throws(() => savePromptConfig(cfg, { find: { timeoutMs: 1 } }), PromptConfigError);
-    assert.throws(() => savePromptConfig(cfg, { find: { maxRounds: 99 } }), PromptConfigError);
     assert.equal(fs.existsSync(promptConfigPath(cfg)), false, '校验失败不得落盘');
+    // 2026-11-18：timeoutMs / maxRounds 预算已取消 → 带旧值提交不报错、不落盘
+    const legacy = { find: { timeoutMs: 1, maxRounds: 99 } } as unknown as Parameters<typeof savePromptConfig>[1];
+    const saved = savePromptConfig(cfg, legacy);
+    assert.equal('timeoutMs' in (saved.find ?? {}), false, 'timeoutMs 已取消，不得写回');
+    assert.equal('maxRounds' in (saved.find ?? {}), false, 'maxRounds 已取消，不得写回');
   });
 
   it('未提交 find 时沿用磁盘既有值；提交 find 时镜像到 findPrompt', () => {

@@ -29,11 +29,10 @@ let tmpRoot = '';
 let repoDir = '';
 let outsideFile = '';
 
-function makeCtx(maxFiles = 8): FsSandboxContext {
+function makeCtx(): FsSandboxContext {
   return {
     rawRoot: repoDir,
     realRoot: fs.realpathSync(repoDir),
-    maxFiles,
     filesRead: new Set(),
   };
 }
@@ -110,8 +109,8 @@ describe('S-02 专属只读文件沙箱', () => {
     assert.equal(grep.ok && grep.data.skippedBinary, 1, '应统计跳过的二进制文件');
   });
 
-  it('④ fs_read 按行与 64KB 截断并受 maxFiles 预算约束', async () => {
-    const ctx = makeCtx(1);
+  it('④ fs_read 按行与 64KB 截断；文件数不再设上限（2026-11-18 预算取消）', async () => {
+    const ctx = makeCtx();
     const rBig = await runFsRead(ctx, 'src/big.ts', { offset: 1, limit: 200 });
     assert.equal(rBig.ok, true);
     assert.equal(rBig.ok && rBig.data.truncated, true);
@@ -121,13 +120,13 @@ describe('S-02 专属只读文件沙箱', () => {
     const rBig2 = await runFsRead(ctx, 'src/big.ts', { offset: 201, limit: 50 });
     assert.equal(rBig2.ok, true);
 
-    // 新文件超出 maxFiles=1
+    // 换新文件照样可读：不再有 FILE_BUDGET_EXCEEDED
     const rSecond = await runFsRead(ctx, 'src/auth/guard.ts');
-    assert.equal(rSecond.ok, false);
-    assert.equal(rSecond.ok === false && rSecond.code, 'FILE_BUDGET_EXCEEDED');
+    assert.equal(rSecond.ok, true);
+    assert.equal(ctx.filesRead.size, 2, 'filesRead 仍记账（统计用），但不再作为闸门');
 
     // 二进制文件拒绝读取
-    const rBin = await runFsRead(makeCtx(5), 'binary.bin');
+    const rBin = await runFsRead(makeCtx(), 'binary.bin');
     assert.equal(rBin.ok, false);
     assert.equal(rBin.ok === false && rBin.code, 'INVALID_ARG');
   });

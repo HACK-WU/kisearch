@@ -298,8 +298,8 @@ export interface RefSearchResultDto {
    * `false` 表示"模型没给出结果"，前端文案要与"确实没有相关文档"区分。
    */
   parsed?: boolean;
-  /** 提前结束（轮次用尽 / 超时），结果不完整 */
-  partial?: { reason: 'rounds' | 'timeout'; usedRounds: number };
+  /** 提前结束（硬超时），结果不完整；2026-11-18 起轮次不再设限，`reason` 只剩 timeout */
+  partial?: { reason: 'timeout'; usedRounds: number };
   /** 0 候选的原因；有候选时省略。前端据此区分空态文案 */
   reason?: 'no-keywords' | 'empty-scope' | 'no-hits' | 'all-excluded';
   /** 实际检索模式：fulltext = 语义侧不可用已降级，面板必须如实显示 */

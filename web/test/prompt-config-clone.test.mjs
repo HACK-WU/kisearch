@@ -88,7 +88,7 @@ describe('clonePromptConfig · 白名单字段搬运', () => {
     assert.equal(src.tools.ki_search, true);
   });
 
-  it('analysis 独立配置域（targetDirs / prompt / skills / tools / 预算）深拷且不污染基线', () => {
+  it('analysis 独立配置域（targetDirs / prompt / skills / tools）深拷且不污染基线；已取消的预算字段丢弃', () => {
     const src = {
       ...base(),
       analysis: {
@@ -110,8 +110,9 @@ describe('clonePromptConfig · 白名单字段搬运', () => {
     assert.equal(src.analysis.prompt.content, 'p');
     assert.equal(src.analysis.skills[0].enabled, true);
     assert.equal(src.analysis.tools.fs_read, true);
-    assert.equal(draft.analysis.maxRounds, 8);
-    assert.equal(draft.analysis.maxFiles, 10);
+    // 2026-11-18：预算取消，旧值不再搬运（否则会被整份替换原样提交回去）
+    assert.equal('maxRounds' in draft.analysis, false, 'maxRounds 已取消');
+    assert.equal('maxFiles' in draft.analysis, false, 'maxFiles 已取消');
     assert.equal(draft.analysis.reasoningEffort, 'medium');
   });
 });

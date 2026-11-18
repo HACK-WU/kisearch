@@ -730,7 +730,7 @@ export function findRefCandidates(
     threshold?: number;
     /** 可取消：关弹窗 / 点停止 / 切模式 */
     signal?: AbortSignal;
-    /** 客户端超时。fast 缺省 15s；deep 应传服务端 `find.timeoutMs` + 10s 余量 */
+    /** 客户端超时。fast 缺省 15s；deep 应覆盖「排队 20s + 服务端 45s 硬超时」再留余量 */
     timeoutMs?: number;
   } = {},
 ): Promise<RefSearchResult> {

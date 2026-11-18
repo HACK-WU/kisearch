@@ -134,14 +134,6 @@ function askSessionRetainDaysRange(value: unknown, path: string, add: AddFn): vo
   }
 }
 
-const ANALYSIS_DAILY_LIMIT_MAX = 1000;
-function analysisDailyLimitRange(value: unknown, path: string, add: AddFn): void {
-  const n = value as number;
-  if (!Number.isInteger(n) || n < 1 || n > ANALYSIS_DAILY_LIMIT_MAX) {
-    add(path, `应为 1~${ANALYSIS_DAILY_LIMIT_MAX} 之间的整数（AI 分析单 scope 每日上限），实际=${n}`);
-  }
-}
-
 function httpUrl(value: unknown, path: string, add: AddFn): void {
   const s = value as string;
   if (!/^https?:\/\//.test(s)) {
@@ -434,10 +426,14 @@ const CONFIG_SCHEMA: ConfigNode = {
          * 页面「AI 对话」左栏的 agent 问答分组即可回看这段时间内的记录。
          */
         askSessionRetainDays: { type: 'number', validate: askSessionRetainDaysRange },
-        // ── v7（REQ-20261113-003）── AI 分析单 scope 每日限流上限
-        analysisDailyLimit: { type: 'number', validate: analysisDailyLimitRange },
       },
       validate: validateEffortCrossField,
+      // 已知废弃（2026-11-18）：每日额度整体取消（分析与深度查找共用 50 次/日）。
+      // 存量配置残留该字段只告警不阻断 —— 直接删会让升级后的配置在启动阶段 fail-loud。
+      deprecated: {
+        analysisDailyLimit:
+          '已废弃字段（被忽略）：AI 分析与深度查找已取消每日额度限制，可直接删除本行',
+      },
     },
     // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）
     chatDir: { type: 'string' },

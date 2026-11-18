@@ -39,8 +39,8 @@ export interface AiProcessPanelProps {
   skippedTargets?: Array<{ name: string; reason: 'forbidden' | 'missing' | 'view-members-changed' }>;
   /** 部分库检索失败（其余结果仍有效）——「查不了」必须与「没内容」分开说 */
   targetErrors?: Array<{ name: string; error: string }>;
-  /** 深度通道：因轮次 / 超时提前结束（结果不完整，必须让用户知道） */
-  partial?: { reason: 'rounds' | 'timeout'; usedRounds: number };
+  /** 深度通道：因硬超时提前结束（结果不完整，必须让用户知道）；2026-11-18 起轮次不再设限 */
+  partial?: { reason: 'timeout'; usedRounds: number };
   /** 深度通道：模型给出但被校验剔除的条数 */
   unconfirmedCount?: number;
   /** 深度通道：模型输出是否可解析（false = 模型没给出结果，不是"没有相关文档"） */
@@ -197,9 +197,7 @@ export function AiProcessPanel(args: AiProcessPanelProps): JSX.Element {
       ) : null}
       {args.partial !== undefined ? (
         <p className="gov-ai-proc__degraded">
-          {args.partial.reason === 'timeout'
-            ? `深度查找超时（已用 ${args.partial.usedRounds} 轮），下面的候选不完整；可缩小检索范围或改用快速查找。`
-            : `深度查找已用满 ${args.partial.usedRounds} 轮，模型提前收尾，下面的候选不完整。`}
+          {`深度查找超时（已用 ${args.partial.usedRounds} 轮），下面的候选不完整；可缩小检索范围或改用快速查找。`}
         </p>
       ) : null}
       {args.unconfirmedCount !== undefined && args.unconfirmedCount > 0 ? (
