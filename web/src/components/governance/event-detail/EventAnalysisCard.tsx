@@ -41,6 +41,9 @@ function chipOf(analysis: EventAnalysis | null): { tone: ChipTone; text: string 
   if (draft?.status === 'failed') return { tone: 'err', text: '失败' };
   if (draft && draft.candidates.length > 0) return { tone: 'warn', text: `草稿 ${draft.candidates.length} 处` };
   if (confirmed.length > 0) return { tone: 'ok', text: `已确认 ${confirmed.length} 处` };
+  // 跑完但一条候选都没有：说「未定位到」，别让它显示成「未开始」（会让人以为没跑过）。
+  // running 已在第 36 行返回，走到这里 draft.status 必非 running，无需再判。
+  if (draft) return { tone: 'idle', text: '未定位到' };
   return { tone: 'idle', text: '未开始' };
 }
 
@@ -73,11 +76,22 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
       </div>
 
       <div className="gov-dcard__body">
-        {/* 分析结论：B1 未就绪（无值）时整块不渲染，不做占位说明（Q10） */}
+        {/*
+         * 分析结论：未就绪（无草稿）时不渲染；**已跑完但没有结论时必须显式说明**。
+         * 原先只在有 conclusion 时渲染，导致「分析完成但未定位到」时整块空白，
+         * 用户分不清是没跑、还在跑、还是确实没找到。
+         */}
         {draft?.conclusion ? (
           <div className="gov-conclusion">
             <div className="gov-conclusion__head">分析结论</div>
             <p className="gov-conclusion__text">{draft.conclusion}</p>
+          </div>
+        ) : draft && !running && draft.status !== 'failed' ? (
+          <div className="gov-conclusion">
+            <div className="gov-conclusion__head">分析结论</div>
+            <p className="gov-conclusion__text gov-conclusion__text--empty">
+              未定位到可证实的代码位置。已排查的方向与缺的证据记在下方「未确认点」里。
+            </p>
           </div>
         ) : null}
 

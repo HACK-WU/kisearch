@@ -1156,6 +1156,20 @@
   word-break: break-all;
 }
 .gov-codeloc__why { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted); line-height: 1.5; }
+/* 置信度三档（只说人话，数字留在 title 里给排查用） */
+.gov-conf {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.gov-conf--ok { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
+.gov-conf--warn { background: var(--ki-color-surface-muted); border-color: var(--ki-color-border-strong); color: var(--ki-color-text); }
+.gov-conf--muted { background: transparent; border-color: var(--ki-color-border); color: var(--ki-color-text-subtle); }
 .gov-codeloc__snip {
   margin: 6px 0 0;
   padding: 6px 8px;

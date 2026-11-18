@@ -42,6 +42,12 @@ export function CodeLocRow(props: CodeLocRowProps): JSX.Element {
   const hasSnippet = Boolean(loc.snippet && loc.snippet.trim());
   const path = `${loc.file}:${loc.line}${loc.endLine ? `-${loc.endLine}` : ''}`;
   const html = open && loc.snippet ? highlightCodeHtml(loc.snippet, langOfFile(loc.file)) : null;
+  /**
+   * 历史位置可能**没有** `confidence`（早期确认 / 手工录入 / 旧版草稿）。
+   * 类型上是必填，但读盘不做逐字段校验 —— 直接 `.toFixed(2)` 会让整张卡片崩掉，
+   * 所以这里按"不确定就不显示"处理。
+   */
+  const conf = typeof loc.confidence === 'number' ? loc.confidence : null;
 
   return (
     <div className={`gov-codeloc${open ? ' is-open' : ''}`}>
@@ -57,6 +63,15 @@ export function CodeLocRow(props: CodeLocRowProps): JSX.Element {
               onClick={onToggle}
             >
               <span className="gov-codeloc__path">{path}</span>
+              {/* 置信度只说人话：数字留在 title 里给排查用，界面不出现 0.85 这种值 */}
+              {conf !== null ? (
+                <span
+                  className={`gov-conf gov-conf--${conf >= 0.8 ? 'ok' : conf >= 0.5 ? 'warn' : 'muted'}`}
+                  title={`分析时的置信度 ${conf.toFixed(2)}：高 = 读到具体分支与触发条件；中 = 读到调用链但缺最后一环；低 = 只确认了位置`}
+                >
+                  {conf >= 0.8 ? '已证实' : conf >= 0.5 ? '疑似' : '线索'}
+                </span>
+              ) : null}
               {loc.commit ? <span className="gov-badge gov-badge--kb">{loc.commit}</span> : null}
               <span className="gov-codeloc__chev" aria-hidden="true">▾</span>
             </button>
