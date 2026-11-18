@@ -570,9 +570,6 @@ export function EventsPage(): JSX.Element {
             <div className="gov-pane__list">
               {sortedEvents.map((event) => {
                 const t = types.find((x) => x.id === event.typeId);
-                const idx = t ? t.stages.findIndex((s) => s.key === event.stageKey) : -1;
-                const vis = idx >= 0 ? t!.stages[idx].visibility : 'full';
-                const members = event.memberTotal ?? 0;
                 // 已收口 = `closedAt` 非空（收口的唯一权威）。只降视觉权重、不禁用：
                 // 收口事件仍要能点开复盘，灰底 ≠ 不可操作。
                 const isClosed = event.closedAt !== null && event.closedAt !== undefined;
@@ -583,18 +580,18 @@ export function EventsPage(): JSX.Element {
                     onClick={() => setActiveId(event.id)}
                   >
                     <div className="gov-ev__title">
-                      <span className="gov-ev__name">#{event.shortId} {event.title}</span>
-                      {t ? <span className={typeBadgeClass(t.name)}>{t.name}</span> : null}
-                    </div>
-                    <div className="gov-ev__meta">
-                      <span>{members} 篇</span>
-                      <span>· {listTimeText(event)}</span>
-                      {vis === 'full' ? null : (
-                        <span className="gov-ev__vis">
-                          · <i className={`gov-dot${vis === 'hidden' ? ' gov-dot--hollow' : ' gov-dot--solid'}`} />
-                          {members} 篇{vis === 'hidden' ? '不可检索' : '仅全文'}
-                        </span>
-                      )}
+                      <span className="gov-ev__id" title={`事件 #${event.shortId}`} aria-label={`事件 #${event.shortId}`}>
+                        {event.shortId}
+                      </span>
+                      {/* 右列整块与标题左对齐：时间不再挂在编号下方 */}
+                      <div className="gov-ev__main">
+                        <div className="gov-ev__name">{event.title}</div>
+                        {/* 列表只留时间与类型：文档数与可见性点开详情可见，行内不再重复 */}
+                        <div className="gov-ev__meta">
+                          <span>{listTimeText(event)}</span>
+                          {t ? <span className={typeBadgeClass(t.name)}>{t.name}</span> : null}
+                        </div>
+                      </div>
                     </div>
                   </div>
                 );

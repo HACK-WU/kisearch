@@ -798,13 +798,15 @@
 }
 .gov-ev__title {
   display: flex;
-  align-items: center;
+  /* 编号贴顶、右列（标题 + 时间/类型）自成一块，时间才能与标题左边缘对齐 */
+  align-items: flex-start;
   gap: 6px;
   font-size: 13px;
   font-weight: 600;
   color: var(--ki-color-text);
   min-width: 0;
 }
+.gov-ev__main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .gov-ev__meta {
   display: flex;
   align-items: center;
@@ -1047,10 +1049,23 @@
 
 /* ════════ 事件列表行：对齐 demo（选中浅绿 + 左侧绿条、标题加粗、类型徽标三色）════════ */
 .gov-ev--active { background: var(--ki-color-primary-soft); box-shadow: inset 3px 0 0 var(--ki-color-primary); }
+/* 列表侧编号：与详情页同一口径（裸数字 + 弱色），但**不加 chip 框** —— 行内已有类型 badge，
+   再加一个框会两个 badge 争注意力。 */
+.gov-ev__id {
+  /* 标题行是 flex + align-items:center：编号必须显式贴顶，否则多行标题时它停在中间 */
+  align-self: flex-start;
+  margin-top: 2px;
+  margin-right: 4px;
+  color: var(--ki-color-text-subtle);
+  font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
 .gov-ev__name { font-size: 13.5px; font-weight: 700; color: var(--ki-color-text); }
 .gov-ev__title { gap: 8px; }
 .gov-ev__meta { color: var(--ki-color-text-subtle); font-size: 12px; gap: 5px; }
-.gov-ev__vis { display: inline-flex; align-items: center; gap: 4px; }
 
 /**
  * 已收口事件：整行灰底降权，但**不禁用**——收口后还要能点开复盘，灰底 ≠ 不可操作。
@@ -1065,10 +1080,6 @@
    这里再写一次会与它抢值（曾写成 3px，和普通选中行的 2px 对不上）。
    `--ki-color-hover-strong` 在灰底上仍可辨，普通 hover 的 4.5% 几乎看不出。 */
 .gov-ev--closed.gov-ev--active { background: var(--ki-color-primary-soft); }
-
-.gov-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-.gov-dot--solid { background: var(--ki-color-primary); }
-.gov-dot--hollow { border: 1.5px solid var(--ki-color-border-strong); background: transparent; }
 
 /**
  * 类型徽标三色是**语义色**（bug / 性能 / 需求），不属于中性色板，因此单独提成变量：
@@ -1562,6 +1573,24 @@
 
 /* ── 概要卡内部（描述已并入本卡，不再单独成卡） ── */
 .gov-summary__title { font-size: var(--ki-font-size-xl); font-weight: 600; letter-spacing: -.01em; color: var(--ki-color-text); line-height: 1.35; }
+/* 标题行：编号 chip + 标题。编号只显示裸数字（`#` 仅在 title/aria-label 里），
+   因为位置本身已表明这是编号；纯文本流（对话回执 / AGENTS.md / 提交信息）仍用 `#38` 锚定。 */
+.gov-summary__head { display: flex; align-items: flex-start; gap: 8px; }
+.gov-summary__head .gov-summary__title { flex: 1 1 auto; min-width: 0; }
+.gov-summary__id {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  padding: 0 6px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: 4px;
+  background: var(--ki-color-surface-muted);
+  color: var(--ki-color-text-muted);
+  font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.75;
+  font-variant-numeric: tabular-nums;
+}
 .gov-summary__row { display: flex; align-items: center; gap: var(--ki-space-2); flex-wrap: wrap; }
 .gov-summary__meta { display: flex; align-items: center; gap: 6px; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); flex-wrap: wrap; }
 .gov-summary__dot { color: var(--ki-color-border-strong); }

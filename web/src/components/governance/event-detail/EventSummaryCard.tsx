@@ -60,7 +60,18 @@ export function EventSummaryCard(props: EventSummaryCardProps) {
       </div>
 
       <div className="gov-dcard__body">
-        <div className="gov-summary__title">#{event.shortId} {event.title}</div>
+        <div className="gov-summary__head">
+          {/* 编号与标题分离：UI 里只显示裸数字，`#` 退到 title / aria-label，
+              纯文本流仍用 `#38` 以便 AI 与人共同指代同一条事件 */}
+          <span
+            className="gov-summary__id"
+            title={`事件 #${event.shortId}`}
+            aria-label={`事件 #${event.shortId}`}
+          >
+            {event.shortId}
+          </span>
+          <div className="gov-summary__title">{event.title}</div>
+        </div>
         <div className="gov-summary__meta">
           <span>{typeName}</span>
           <span className="gov-summary__dot">·</span>
