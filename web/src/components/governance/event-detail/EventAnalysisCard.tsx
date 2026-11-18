@@ -81,6 +81,22 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
           </div>
         ) : null}
 
+        {/*
+         * 未确认点：独立区块，**不随过程区折叠、也不随已确认消失**（2026-11-18 用户反馈）。
+         * 此前它挂在过程区内且条件是 `!committed || procOpen` —— 确认完再收起过程就彻底看不见了，
+         * 而这些"没找到证据的部分"恰恰是读结论时最需要一起看的信息。
+         */}
+        {draft && draft.status !== 'running' && draft.unconfirmed.length > 0 ? (
+          <div className="gov-unconfirmed">
+            <div className="gov-unconfirmed__head">未确认点 · {draft.unconfirmed.length} 项</div>
+            <ul className="gov-unconfirmed__list">
+              {draft.unconfirmed.map((item, i) => (
+                <li key={`unconfirmed-${i}`}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         {confirmed.length > 0 ? (
           <div className="gov-confirmed">
             <div className="gov-confirmed__head">已确认的相关位置 · {confirmed.length} 处</div>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 /**
  * 过程面板里的一行工具调用（2026-11-18 · 分析/查找共用）。
@@ -82,12 +82,59 @@ export function ToolCallRow(props: ToolCallRowProps): JSX.Element {
   );
 }
 
-/** 单轮思考片段（默认收起，避免过程区被大段文字淹掉） */
-export function ThinkingBlock(props: { text: string }): JSX.Element {
+/**
+ * 单轮思考片段（默认收起，避免过程区被大段文字淹掉）。
+ *
+ * 2026-11-18：**直接复用 AI 对话的思考块**（`.ki-chat-reason*`，ChatPanel 的 `ReasoningBlock`），
+ * 不再自造 `<details className="gov-think">` —— 治理侧此前只给工具行复用了对话样式
+ * （见 AiProcessPanel 里那段注释），思考块仍是原生折叠，视觉与对话页割裂且没有加载动画。
+ *
+ * · 文案与对话一致：`展开思考过程` / `收起思考中 ◐`（`live` = 这一轮仍在生成）；
+ * · 展开态由组件自持：轮询追加 text 时不会把用户已展开的块收起；
+ * · 类名照搬而非复制取值：对话侧调样式，这里自动跟随（与工具行 `.ki-chat-tl__*` 同思路）。
+ */
+export function ThinkingBlock(props: { text: string; live?: boolean; truncated?: number }): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  /** 用户是否还贴着底部（回看时不让流式追加把视图拽回去） */
+  const stickRef = useRef(true);
+  const isTruncated = (props.truncated ?? 0) > props.text.length;
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !props.live) return;
+    if (stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [props.text, props.live]);
+
   return (
-    <details className="gov-think">
-      <summary>模型思考</summary>
-      <pre className="gov-think__body">{props.text}</pre>
-    </details>
+    <div className="ki-chat-reason">
+      <button
+        type="button"
+        className="ki-chat-reason__toggle"
+        aria-expanded={open}
+        title="模型本轮的思考片段，仅本次分析可见"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? '收起' : '展开'}{props.live ? '思考中' : '思考过程'}
+        {props.live ? <span className="ki-chat-reason__spin" aria-hidden="true" /> : null}
+      </button>
+      {open ? (
+        <div
+          className="ki-chat-reason__body"
+          ref={bodyRef}
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 12;
+          }}
+        >
+          {props.text}
+          {isTruncated ? (
+            <p className="ki-chat-reason__truncated">
+              思考内容过长，仅显示前 {props.text.length} 字（原文约 {props.truncated} 字）
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 }

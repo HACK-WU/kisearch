@@ -470,7 +470,7 @@ export async function runFsRead(
   try {
     const stat = await fs.promises.stat(resolved.realPath);
     if (!stat.isFile()) return { ok: false, code: 'NOT_A_FILE', error: `不是文件：${resolved.relPath}` };
-    // 2026-11-18：文件数上限取消，不再因读得多而拒绝（防失控由 90s 总超时兜底）
+    // 2026-11-18：文件数上限取消，不再因读得多而拒绝（总超时也取消，能终止的只有用户「停止」与单轮请求超时）
     if (await isBinaryFile(resolved.realPath)) {
       return { ok: false, code: 'INVALID_ARG', error: `目标为二进制文件，跳过读取：${resolved.relPath}` };
     }

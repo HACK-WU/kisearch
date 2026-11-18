@@ -1282,7 +1282,10 @@
 .gov-conclusion__skip { font-size: 11px; color: var(--ki-color-text-subtle); }
 
 /* 渐进出现：结论打完前**整块塌陷到 0 高**（否则打字期下面是一大片空白），
-   打完再展开 + 子元素按 --i 顺序上浮淡入（整批 ≤ 300ms） */
+   打完再展开 + 子元素按 --i 顺序上浮淡入（整批 ≤ 300ms）
+   ⚠️ 2026-11-18 现状：`.gov-reveal` 在 web/src 里**已无任何 tsx 使用**（demo 遗留死样式）。
+   若将来启用，注意 1296/1300 两条 `animation-delay: calc(var(--i) * ...)` 是「按下标设延迟」，
+   列表增删会让 --i 变化 ⇒ 动画重播 ⇒ 抖动（与已修的 :nth-child 延迟同类，见下方第 4 条注释）。 */
 .gov-reveal {
   display: flex; flex-direction: column; gap: 10px;
   min-height: 0; overflow: hidden;
@@ -1339,7 +1342,9 @@
 }
 
 .gov-doclist .gov-docline {
-  grid-template-columns: 18px minmax(0, 1fr) auto 22px;
+  /* 末列 auto 而非 22px：行尾按钮在二次确认时从「×」变成「确认」（两个字），
+     固定 22px 会让文字溢出/换行把行高顶起来。auto + 按钮不换行 ⇒ 只挤左列，行高不变 */
+  grid-template-columns: 18px minmax(0, 1fr) auto auto;
   gap: var(--ki-space-2);
   padding: 9px var(--ki-space-2);
   border-bottom: 0;
@@ -1372,14 +1377,19 @@
 }
 .gov-vis--pill .gov-vis__dot { width: 5px; height: 5px; }
 
-/* 行尾 × 弱化，hover 行时才提亮（避免一列叉号抢眼） */
-.gov-docline__x { opacity: .38; transition: opacity var(--ki-motion-fast), color var(--ki-motion-fast); }
+/* 行尾 × 弱化，hover 行时才提亮（避免一列叉号抢眼）。
+   固定 min-width + 不换行：二次确认文案（「确认」）与「×」占同一格，切换时行高不跳 */
+.gov-docline__x {
+  opacity: .38; min-width: 22px; white-space: nowrap;
+  transition: opacity var(--ki-motion-fast), color var(--ki-motion-fast);
+}
 .gov-docline:hover .gov-docline__x,
 .gov-codeloc:hover .gov-docline__x { opacity: 1; }
 .gov-docline__x:hover { color: var(--ki-color-danger); }
 
 .gov-codelist .gov-codeloc {
-  grid-template-columns: 18px minmax(0, 1fr) 22px;
+  /* 末列 auto：与文档行同口径，按钮宽度变化（禁用/文案）只挤左列，行高不变 */
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   gap: var(--ki-space-2);
   padding: 9px var(--ki-space-2);
   border-bottom: 0;
@@ -1466,17 +1476,23 @@
 .gov-codeloc__snip .hljs-title { color: var(--hl-func); }
 .gov-codeloc__snip .hljs-punctuation { color: var(--hl-punct); }
 
-/* ── 追问区（针对本次分析的答疑，不是全局对话） ── */
+/* ── 追问区（针对本次分析的答疑，不是全局对话） ──
+   2026-11-18 容器化：原来只有一条虚线分隔，在白色卡片里不像独立功能区，
+   且图标用紫与「分析结论」撞色。改为「主色浅底 + 左竖线 + 圆角」，与结论（紫）/
+   未确认点（amber）/ 已确认位置（蓝）四块色彩语义分开。 */
 .gov-ask {
   display: flex; flex-direction: column; gap: var(--ki-space-2);
-  margin-top: 2px; padding-top: var(--ki-space-3);
-  border-top: 1px dashed var(--ki-color-border);
+  margin-top: var(--ki-space-3);
+  padding: var(--ki-space-3);
+  border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-primary) 5%, var(--ki-color-surface));
+  border-left: 3px solid color-mix(in srgb, var(--ki-color-primary) 45%, transparent);
 }
 .gov-ask__head { display: flex; align-items: center; gap: 6px; }
 .gov-ask__icon {
   flex: none; width: 18px; height: 18px; display: grid; place-items: center;
   border-radius: var(--ki-radius-tag); font-size: 11px; font-weight: 700;
-  color: var(--ki-color-purple); background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent);
+  color: var(--ki-color-primary); background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
 }
 .gov-ask__title { font-size: 12px; font-weight: 600; color: var(--ki-color-text); }
 .gov-ask__hint { font-size: 11px; color: var(--ki-color-text-subtle); }
@@ -1574,6 +1590,26 @@
   background: var(--ki-color-bg-muted); font-family: var(--ki-font-mono); font-size: 11px;
 }
 
+/* ── AI 分析卡的「未确认点」块（2026-11-18）──
+   与「分析结论」（紫）同层并列，用 amber 表达"没找到证据的部分"。
+   必须独立于过程区：确认后收起过程仍要能看到，否则读结论时不知道哪些点没定论。 */
+.gov-unconfirmed {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: var(--ki-space-3);
+  border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-warning) 7%, var(--ki-color-surface));
+  border-left: 3px solid color-mix(in srgb, var(--ki-color-warning) 45%, transparent);
+}
+.gov-unconfirmed__head { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--ki-color-warning); }
+.gov-unconfirmed__list {
+  margin: 0; padding-left: 16px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.gov-unconfirmed__list li {
+  font-size: var(--ki-font-size-sm); line-height: 1.7;
+  color: var(--ki-color-text-muted);
+}
+
 /* 窄屏时时间线/概要动作换行 */
 @media (max-width: 1080px) {
   .gov-dcard__head { flex-wrap: wrap; }
@@ -1585,6 +1621,8 @@
   .gov-dcard__head { padding: 6px 10px; }
   .gov-dcard__body { padding: 10px; }
   .gov-dcard__hint { display: none; }
+  /* 追问区容器化后内宽更窄：标题行只留「图标 + 标题 + 清空」，说明文字在窄屏藏起 */
+  .gov-ask__hint { display: none; }
   .gov-dcard__actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
   .gov-ai-embed__scroll { height: auto; max-height: 160px; }
   .gov-codeloc__snip { font-size: 11px; }
@@ -1749,16 +1787,10 @@
 }
 .gov-trace__cut, .gov-trace__note { font-size: 10.5px; color: var(--ki-color-text-subtle); }
 
-/* 单轮思考（默认收起） */
-.gov-think { margin-top: 4px; }
-.gov-think > summary { cursor: pointer; font-size: 11px; color: var(--ki-color-text-subtle); }
-.gov-think__body {
-  margin: 4px 0 0; padding: 6px 8px;
-  border-radius: var(--ki-radius-sm);
-  background: var(--ki-color-bg-muted);
-  font-size: 11px; line-height: 1.6; white-space: pre-wrap;
-  color: var(--ki-color-text-muted);
-}
+/* 单轮思考：2026-11-18 起直接复用对话侧 `.ki-chat-reason*`（见 ToolCallRow 的 ThinkingBlock），
+   原 `.gov-think` 三条规则随 `<details>` 一起删除 —— 留在这里会让人以为还有第二套思考样式。
+   只补一条间距：对话侧思考块自带 gap，过程区里紧贴上方工具行会挤。 */
+.gov-ai-step__body .ki-chat-reason { margin-top: 4px; }
 
 /* ── 过程区排版修复（2026-11-18 真机） ── */
 /* 1) 160px 太矮：按视口给高度，长过程仍内滚；窄屏退回自然高度 */
@@ -1785,6 +1817,29 @@
 }
 .gov-candlist__head b { color: var(--ki-color-text-secondary); font-weight: 600; }
 
+/* 运行中当前这一轮的思考（2026-11-18 · 流式）：
+   与已完成步骤用**虚线左框**区分 —— 它还没进 steps，内容仍在增长，不该看起来和定稿一样。
+   缩进对齐 .gov-ai-step（13px 标记列 + 7px gap），视觉上仍属于同一条过程流。 */
+.gov-ai-live {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-left: 20px; padding: 4px 0 6px 10px;
+  border-left: 2px dashed color-mix(in srgb, var(--ki-color-purple) 40%, transparent);
+}
+.gov-ai-live__head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--ki-color-text-subtle);
+}
+/* 首包未到的占位转圈：参数与对话侧 `.ki-chat-reason__spin` 一致（10px 圆环 / 0.7s），
+   让"这一轮正在思考"在下一条思考正文出现之前就有可见信号 */
+.gov-ai-live__spin {
+  width: 10px; height: 10px; flex: none;
+  border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: ki-spin 0.7s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .gov-ai-live__spin { animation-duration: 1.6s; } }
+
 /* 3) 过程末尾的「最终结论」：此前结论只在卡顶，看过程时看不到（真机反馈） */
 .gov-ai-final {
   margin: 10px 2px 4px;
@@ -1800,19 +1855,42 @@
 }
 .gov-ai-final__meta { margin-top: 4px; font-size: 10.5px; color: var(--ki-color-text-subtle); }
 
-/* 4) 渐进显示：已确认位置 / 候选逐条升起，避免"一下子闪出来" */
+/* 页内操作提示（成功 / 失败）：fixed 浮层，**不参与布局**。
+   以前它是页面上方的一行文字，删除/保存后"消失→出现"会把下方整块内容上下推一次，
+   用户看到的就是「点删除页面抖一下」（2026-11-18 报障）。 */
+.gov-page-toast {
+  position: fixed;
+  top: 76px; right: 24px;
+  /* 压在内容之上、弹窗/抽屉（998/999）之下；60 会被部分吸顶头部盖住 */
+  z-index: 900;
+  /* 不挡点击：浮层悬在右上，若吃掉 pointer 事件，下面的按钮会点不到 */
+  pointer-events: none;
+  max-width: min(380px, calc(100vw - 32px));
+  margin: 0; padding: 7px 11px;
+  border-radius: var(--ki-radius-sm);
+  border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--ki-color-text) 12%, transparent);
+  font-size: var(--ki-font-size-sm); line-height: 1.55;
+  color: var(--ki-color-text);
+  animation: gov-toast-in .16s ease;
+}
+.gov-page-toast--err {
+  border-color: color-mix(in srgb, var(--ki-color-danger) 42%, var(--ki-color-border));
+  color: var(--ki-color-danger);
+}
+@keyframes gov-toast-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .gov-page-toast { animation: none; } }
+
+/* 4) 渐进显示：已确认位置 / 候选 / 文档逐条升起，避免"一下子闪出来"
+   ⚠️ **不得再用 `:nth-child(N)` 给每行设 animation-delay**（2026-11-18 用户报障「点删除页面抖一下」）：
+   删掉一行后，后面所有行的 nth-child 序号都变 ⇒ animation-delay 变化 ⇒ 浏览器**取消并重启**这行的
+   `gov-rise` 动画 ⇒ 整列表一起从 opacity 0 + translateY(5px) 重新淡入，看起来就是"抖一下"。
+   现在所有行共用同一条 animation（无 delay），删除只会让上面一行平滑补位。 */
 @keyframes gov-rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 .gov-codelist .gov-codeloc,
 .gov-cand-list .gov-cand,
 .gov-doclist .gov-docline { animation: gov-rise 260ms ease both; }
-.gov-codelist .gov-codeloc:nth-child(2), .gov-cand-list .gov-cand:nth-child(2) { animation-delay: 40ms; }
-.gov-codelist .gov-codeloc:nth-child(3), .gov-cand-list .gov-cand:nth-child(3) { animation-delay: 80ms; }
-.gov-codelist .gov-codeloc:nth-child(4), .gov-cand-list .gov-cand:nth-child(4) { animation-delay: 120ms; }
-.gov-codelist .gov-codeloc:nth-child(5), .gov-cand-list .gov-cand:nth-child(5) { animation-delay: 160ms; }
-.gov-codelist .gov-codeloc:nth-child(6), .gov-cand-list .gov-cand:nth-child(6) { animation-delay: 200ms; }
-.gov-codelist .gov-codeloc:nth-child(7), .gov-cand-list .gov-cand:nth-child(7) { animation-delay: 240ms; }
-.gov-codelist .gov-codeloc:nth-child(8), .gov-cand-list .gov-cand:nth-child(8) { animation-delay: 280ms; }
-.gov-codelist .gov-codeloc:nth-child(n+9), .gov-cand-list .gov-cand:nth-child(n+9) { animation-delay: 320ms; }
 @media (prefers-reduced-motion: reduce) {
   .gov-codelist .gov-codeloc, .gov-cand-list .gov-cand, .gov-doclist .gov-docline { animation: none; }
 }

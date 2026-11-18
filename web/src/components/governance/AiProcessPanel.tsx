@@ -263,7 +263,8 @@ export function AiProcessPanel(args: AiProcessPanelProps): JSX.Element {
                     </div>
                   ) : null}
 
-                  {step.thinking ? <ThinkingBlock text={step.thinking} /> : null}
+                  {/* 查找是同步返回（无流式），思考随步骤一次到位 → 不传 live，只带截断原文长度 */}
+                  {step.thinking ? <ThinkingBlock text={step.thinking} truncated={step.thinkingChars} /> : null}
 
                   {expandable && expanded ? (
                     <div className="gov-ai-step__detail">

@@ -75,9 +75,37 @@ import type {
   EventTypeRecord,
 } from './types.js';
 
-export const ANALYSIS_HARD_TIMEOUT_MS = 90_000;
-export const ANALYSIS_SOFT_TIMEOUT_MS = 75_000;
+/**
+ * **单轮上游请求**的超时（不是整次分析的总时长）。
+ *
+ * 2026-11-18 用户拍板取消总时长限制（原 90s 硬超时 + 75s 软收尾）：一次分析该跑多久
+ * 由模型与工具决定，撞 90s 就被掐断只会让长事件的分析结果不完整。
+ *
+ * 取消总超时后，能终止分析的只剩三条，所以"请求永不返回"不会发生：
+ *   ① 用户点「停止」（`cancelEventAnalysis` → abort）；
+ *   ② 单轮请求超时（本常量，或 config 的 `llm.requestTimeoutMs` 覆盖）；
+ *   ③ 首字节超时（`llm.firstByteTimeoutMs`，默认 30s）。
+ * 最坏情况是一轮请求超时后按 `fatalError` 收尾，而不是整次分析被静默砍掉。
+ */
+const ANALYSIS_REQUEST_TIMEOUT_MS = 300_000;
 const ANALYSIS_TOOL_RESPONSE_CHARS = 10_000;
+/**
+ * 运行中思考的增量落盘节流（2026-11-18）。
+ *
+ * 前端 1.5s 轮询一次 draft，写得更频没人看得到；1s 既能让长思考"边跑边涨"，
+ * 也不至于把整个 draft 文件（含候选/步骤）每秒重写十几遍。
+ */
+const LIVE_THINKING_WRITE_MS = 1_000;
+/**
+ * 思考的实际落盘上限 —— **运行中与轮末共用同一个值**。
+ *
+ * 2026-11-18 用户反馈「思考内容没必要截断」：原值 2000 会把一段 2015 字的思考直接砍掉尾巴，
+ * 而思考是纯文本、本来就是给人读的，不存在"结果集过大"的问题（那是工具响应的口径）。
+ * 现在放宽到 20 000 字（≈5K token）——真实推理链几乎碰不到，只作为**异常兜底**：
+ * 单轮模型如果吐出几十万字，1s 一次的增量写盘会把 draft 文件撑到 MB 级。
+ * 刻意不做成"流式时多留、结束后裁短"：那样收尾瞬间正文会突然变短一跳，用户会以为内容丢了。
+ */
+export const THINKING_MAX_CHARS = 20_000;
 
 interface ActiveRun {
   runId: string;
@@ -85,8 +113,8 @@ interface ActiveRun {
   controller: AbortController;
   /**
    * 用户点了「停止」。
-   * 与 90s 硬超时**共用同一个 AbortController**，但终态必须区分：
-   * 超时是 `partial/failed + TIMEOUT`，主动取消是 `cancelled/partial + ANALYSIS_CANCELED`。
+   * 2026-11-18 取消总超时后，这是 `AbortController` 的唯一触发来源，
+   * 终态固定为 `cancelled`（无候选）/ `partial`（已有候选）+ `ANALYSIS_CANCELED`。
    */
   canceledByUser?: boolean;
 }
@@ -127,8 +155,6 @@ export interface AnalysisRunnerDeps {
   resolveLlmStatusFn?: (cfg: KiConfig, configPath: string) => LlmStatus;
   streamChatFn?: typeof streamChat;
   nowFn?: () => number;
-  hardTimeoutMs?: number;
-  softTimeoutMs?: number;
   /** 仅测试：注入 mock KB 工具执行，不连接真实向量库 */
   kbExecutor?: {
     getModuleInfo?: (args: { scope: string; group: string; relation: string; startLine?: number; startChar?: number; maxChars?: number }) => Promise<unknown>;
@@ -668,8 +694,6 @@ async function executeAnalysisBackground(input: {
   } = input;
   const nowFn = deps?.nowFn ?? (() => Date.now());
   const streamFn = deps?.streamChatFn ?? streamChat;
-  const hardTimeoutMs = deps?.hardTimeoutMs ?? ANALYSIS_HARD_TIMEOUT_MS;
-  const softTimeoutMs = deps?.softTimeoutMs ?? ANALYSIS_SOFT_TIMEOUT_MS;
 
   const reasoningEffort = analysisCfg.reasoningEffort ?? cfg.llm?.reasoningEffort;
 
@@ -709,9 +733,8 @@ async function executeAnalysisBackground(input: {
   let turns = 0;
   let tokens = 0;
   let finalText = '';
-  let timedOut = false;
   let fatalError: string | null = null;
-  /** 用户主动停止（与超时共用 abort，靠 activeRuns 上的标记区分） */
+  /** 用户主动停止（2026-11-18 取消总超时后，abort 只剩这一个来源） */
   let canceledByUser = false;
   /*
    * 本次运行的 key：`activeRuns` 要到 finally 才 delete，所以执行期间读得到
@@ -719,12 +742,6 @@ async function executeAnalysisBackground(input: {
    */
   const thisRunKey = runKey(scope, event.id);
   const isCanceledByUser = (): boolean => activeRuns.get(thisRunKey)?.canceledByUser === true;
-
-  const hardTimer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, hardTimeoutMs);
-  hardTimer.unref?.();
 
   const llmOpts = {
     baseURL: cfg.llm?.baseURL ?? '',
@@ -739,27 +756,17 @@ async function executeAnalysisBackground(input: {
     let round = 0;
     while (true) {
       if (controller.signal.aborted) {
+        // 2026-11-18 取消总超时后 abort 只来自用户「停止」；仍读标记做兜底（未来若接外部 signal）
         if (isCanceledByUser()) canceledByUser = true;
-        else timedOut = true;
         break;
-      }
-      const elapsed = nowFn() - startedAt;
-      // 2026-11-18：轮次上限取消，只剩软超时一条收尾触发线（90s 硬超时在下面兜底 abort）
-      const reachedSoft = elapsed >= softTimeoutMs;
-      const forceFinalize = reachedSoft;
-      if (reachedSoft) timedOut = true;
-
-      if (reachedSoft) {
-        messages.push({
-          role: 'system',
-          content: '已达到分析时间上限，不再提供任何工具。请立即基于已获得的证据输出最终 JSON（candidates + unconfirmed）。',
-        });
       }
 
       let roundContent = '';
       /** 本轮模型的思考片段（reasoning 流）：只给过程区展示，不回喂模型 */
       let roundThinking = '';
       let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
+      /** 本轮最后一次增量落盘的时刻（0 = 本轮还没写过，首段 reasoning 立即落一次） */
+      let lastLiveWrite = 0;
 
       try {
         /*
@@ -772,31 +779,54 @@ async function executeAnalysisBackground(input: {
          *   类型上这里本该被 tsc 拦住，但根目录 `tsc --noEmit` 当时没跑。
          */
         for await (const part of streamFn(messages, {
-          tools: forceFinalize ? undefined : toolDefs,
+          tools: toolDefs,
           signal: controller.signal,
-          requestTimeoutMs: cfg.llm?.requestTimeoutMs ?? hardTimeoutMs,
+          requestTimeoutMs: cfg.llm?.requestTimeoutMs ?? ANALYSIS_REQUEST_TIMEOUT_MS,
           firstByteTimeoutMs: cfg.llm?.firstByteTimeoutMs ?? 30_000,
           llm: llmOpts,
         })) {
           if (part.type === 'content') roundContent += part.text;
-          else if (part.type === 'reasoning') roundThinking += part.text;
-          else if (part.type === 'tool_calls') pendingCalls = part.calls;
+          else if (part.type === 'reasoning') {
+            roundThinking += part.text;
+            /*
+             * 增量落盘（2026-11-18）：此前 thinking 只在该轮工具跑完后随 step 一次性写，
+             * 长思考时过程区长时间一动不动（用户看到的是一轮跳一次）。
+             * 这里按 ~1s 节流写 `liveThinking`，由前端边跑边渲染。
+             *
+             * 失败**不能**影响分析本身（写盘异常会掉进外层 catch 变成 fatalError），
+             * 轮末还会随 step 再写一次完整的。
+             */
+            const liveNow = nowFn();
+            if (liveNow - lastLiveWrite >= LIVE_THINKING_WRITE_MS) {
+              lastLiveWrite = liveNow;
+              try {
+                await updateDraftIfMatch(scope, event.id, runId, (cur) => ({
+                  ...cur,
+                  liveThinking: {
+                    round: round + 1,
+                    text: roundThinking.slice(0, THINKING_MAX_CHARS),
+                    chars: roundThinking.length,
+                  },
+                  updatedAt: liveNow,
+                }));
+              } catch { /* 增量落盘是尽力而为，不阻断分析 */ }
+            }
+          } else if (part.type === 'tool_calls') pendingCalls = part.calls;
           else if (part.type === 'usage') {
             tokens += (part.promptTokens ?? 0) + (part.completionTokens ?? 0);
           }
         }
       } catch (err) {
         if (controller.signal.aborted) {
-          // abort 有两种来源：用户点「停止」→ 走 cancelled 终态；90s 硬超时 → 走 TIMEOUT
+          // abort 只来自用户点「停止」（总超时已于 2026-11-18 取消）
           if (isCanceledByUser()) canceledByUser = true;
-          else timedOut = true;
           break;
         }
         fatalError = (err as Error).message;
         break;
       }
 
-      if (forceFinalize || pendingCalls.length === 0) {
+      if (pendingCalls.length === 0) {
         finalText = roundContent;
         break;
       }
@@ -889,8 +919,8 @@ async function executeAnalysisBackground(input: {
          * 别把结果再喂给上游、也别再发下一轮。
          */
         if (controller.signal.aborted) {
+          // 总超时已取消，abort 只剩用户「停止」（这里复查是因为 KB 工具不接 signal，可能晚返回）
           if (isCanceledByUser()) canceledByUser = true;
-          else timedOut = true;
           break;
         }
 
@@ -915,11 +945,18 @@ async function executeAnalysisBackground(input: {
       }
 
       const roundMs = Math.max(0, nowFn() - roundStarted);
+      const trimmedThinking = roundThinking.trim();
       steps.push({
         name: `round-${round}`,
         title: `第 ${round} 轮探索：${calls.map((c) => c.name).join('、')}`,
         ms: roundMs,
-        ...(roundThinking.trim() ? { thinking: roundThinking.trim().slice(0, 2000) } : {}),
+        ...(trimmedThinking
+          ? {
+              thinking: trimmedThinking.slice(0, THINKING_MAX_CHARS),
+              // 原文长度：前端据此提示"已截断"，与工具响应的 responseChars 同口径
+              thinkingChars: trimmedThinking.length,
+            }
+          : {}),
         metrics: {
           calls: calls.length,
           filesRead: fsCtx.filesRead.size,
@@ -931,6 +968,8 @@ async function executeAnalysisBackground(input: {
       const now = nowFn();
       await updateDraftIfMatch(scope, event.id, runId, (cur) => ({
         ...cur,
+        // 本轮思考已并入 steps —— 必须清空实时副本，否则前端会看到同一段思考两遍
+        liveThinking: undefined,
         steps: [...steps],
         stats: { turns, filesRead: fsCtx.filesRead.size, tokens, ms: now - startedAt },
         updatedAt: now,
@@ -962,10 +1001,6 @@ async function executeAnalysisBackground(input: {
           confidence: rawCand.confidence,
         });
       }
-    }
-
-    if (timedOut) {
-      unconfirmed.push('已达到 90s 分析时间预算，已返回当前阶段可确认结论');
     }
 
     steps.push({
@@ -1000,10 +1035,6 @@ async function executeAnalysisBackground(input: {
       finalStatus = 'failed';
       errorCode = 'ANALYSIS_LLM_UNAVAILABLE';
       errorMessage = fatalError;
-    } else if (timedOut) {
-      finalStatus = verifiedCandidates.length > 0 ? 'partial' : 'failed';
-      errorCode = 'TIMEOUT';
-      errorMessage = '分析超时（90s），已保存已完成步骤与可用候选';
     } else if (!parsed && verifiedCandidates.length === 0) {
       finalStatus = 'failed';
       errorCode = 'NO_RESULT';
@@ -1016,6 +1047,8 @@ async function executeAnalysisBackground(input: {
 
     await updateDraftIfMatch(scope, event.id, runId, (cur) => ({
       ...cur,
+      // 收尾：实时思考副本一律清掉（终态不该再出现"思考中"；内容已在 steps 里）
+      liveThinking: undefined,
       status: finalStatus,
       ...(errorCode ? { errorCode } : {}),
       ...(errorMessage ? { errorMessage } : {}),
@@ -1027,7 +1060,6 @@ async function executeAnalysisBackground(input: {
       updatedAt: finishedAt,
     }));
   } finally {
-    clearTimeout(hardTimer);
     activeRuns.delete(runKey(scope, event.id));
   }
 }

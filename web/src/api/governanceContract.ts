@@ -258,10 +258,12 @@ export interface RefSearchStepDto {
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
   /**
-   * 这一步里模型的思考片段（reasoning 流），单步截断 2000 字。
+   * 这一步里模型的思考片段（reasoning 流），上限 20 000 字（2026-11-18 由 2000 放宽，仅作异常兜底）。
    * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
    */
   thinking?: string;
+  /** `thinking` 截断前的原始字符数（2026-11-18）：> thinking.length 时前端提示"已截断" */
+  thinkingChars?: number;
   calls?: RefSearchCallDto[];
 }
 
@@ -385,10 +387,12 @@ export interface AnalysisStepDto {
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
   /**
-   * 这一步里模型的思考片段（reasoning 流），单步截断 2000 字。
+   * 这一步里模型的思考片段（reasoning 流），上限 20 000 字（2026-11-18 由 2000 放宽，仅作异常兜底）。
    * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
    */
   thinking?: string;
+  /** `thinking` 截断前的原始字符数（2026-11-18）：> thinking.length 时前端提示"已截断" */
+  thinkingChars?: number;
   calls?: AnalysisStepCallDto[];
 }
 
@@ -409,6 +413,11 @@ export interface AnalysisDraftDto {
   errorMessage?: string;
   /** 分析结论；旧数据 / 模型未给出时为 null */
   conclusion: string | null;
+  /**
+   * 运行中当前这一轮的思考实时片段（2026-11-18）：后端按 ~1s 节流增量写，
+   * 轮结束/收尾时清空。有值即表示"这一轮还在想"，前端用它渲染流式思考块。
+   */
+  liveThinking?: { round: number; text: string; chars: number };
   candidates: AnalysisCandidateDto[];
   unconfirmed: string[];
   steps: AnalysisStepDto[];

@@ -39,6 +39,8 @@ import { collectMembers } from './members.js';
 import { refKey, readRefs } from './refs-store.js';
 import { findEventIn, isEventClosed, readAllEvents } from './store.js';
 import { getType } from './type-service.js';
+/** 思考展示上限单一真源（与分析侧共用；2026-11-18 由 2000 放宽到 20000） */
+import { THINKING_MAX_CHARS } from './analysis-runner.js';
 import type { RefCandidate, RefSearchCall, RefSearchStep } from './refs-service.js';
 import type { EventRecord, Visibility } from './types.js';
 
@@ -832,7 +834,13 @@ export async function runDeepFind(
       steps.push({
         name: 'tools',
         ms: nowFn() - roundStart,
-        ...(roundThinking.trim() ? { thinking: roundThinking.trim().slice(0, 2000) } : {}),
+        ...(roundThinking.trim()
+          ? {
+              thinking: roundThinking.trim().slice(0, THINKING_MAX_CHARS),
+              // 与 AI 分析同口径：记原文长度，前端据此提示"已截断"
+              thinkingChars: roundThinking.trim().length,
+            }
+          : {}),
         metrics: { round: rounds, calls: calls.length },
         ...(calls.length > 0 ? { calls } : {}),
       });

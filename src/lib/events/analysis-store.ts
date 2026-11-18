@@ -92,6 +92,12 @@ export function normalizeAnalysisDocForRead(
       status: 'failed',
       errorCode: 'ANALYSIS_INTERRUPTED',
       errorMessage: '服务已重启或分析任务意外中断，请重新发起分析',
+      /*
+       * 僵尸态也是"分析已经死了"：不清实时思考的话，前端会拿一个永远转圈的
+       * 「思考中」展示一段再也不会增长的文本（2026-11-18 增量落盘引入）。
+       * 已完成的轮次仍在 steps 里，信息不丢。
+       */
+      liveThinking: undefined,
     },
   };
 }

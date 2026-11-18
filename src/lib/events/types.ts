@@ -163,10 +163,17 @@ export interface AnalysisStepRecord {
   metrics: Record<string, number | string>;
   detail?: Record<string, unknown>;
   /**
-   * 这一步里模型的思考片段（reasoning 流），单步截断 2000 字。
+   * 这一步里模型的思考片段（reasoning 流）。上限见 `THINKING_MAX_CHARS`（20 000 字，
+   * 2026-11-18 由 2000 放宽 —— 思考是纯文本给人读的，只作异常兜底）。
    * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
    */
   thinking?: string;
+  /**
+   * `thinking` 截断前的原始字符数（2026-11-18）。
+   * 与 `AnalysisStepCall.responseChars` 同口径：前端据此提示「已截断（原文 N 字）」，
+   * 避免用户把"截断后的 2000 字"当成模型只想了这么多。
+   */
+  thinkingChars?: number;
   calls?: AnalysisStepCall[];
 }
 
@@ -190,6 +197,14 @@ export interface AnalysisDraft {
    * 旧文件或模型未给出时为 null；解析层硬上限 2000 字（模板要求 ≤300）。
    */
   conclusion: string | null;
+  /**
+   * **运行中当前这一轮**的思考实时片段（2026-11-18）。
+   *
+   * 在此之前 thinking 只在该轮工具跑完后随 step 一次性落盘 —— 用户看到的是"一轮跳一次"，
+   * 长思考时过程区长时间没有动静。这里按 ~1s 节流增量写，供前端边跑边渲染。
+   * 该轮结束（step 入队）与收尾写盘时**必须清空**，否则会与 step.thinking 重复展示。
+   */
+  liveThinking?: { round: number; text: string; chars: number };
   candidates: AnalysisCandidate[];
   unconfirmed: string[];
   steps: AnalysisStepRecord[];

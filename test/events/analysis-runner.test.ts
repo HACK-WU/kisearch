@@ -285,26 +285,33 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.ok(finalDoc.draft?.unconfirmed.some((u) => u.includes('999')));
   });
 
-  it('③ 超时返回 partial/failed + TIMEOUT', async () => {
-    const ev = await createEvent(scope, { title: '超时测试', typeId: 'et_1' });
-    const slowStream = async function* (_messages: ChatTurn[], opts?: StreamChatOptions): AsyncGenerator<StreamPart> {
-      await new Promise((_, reject) => {
-        opts?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
-      });
+  it('③ 总时长不再设限：时间推到 10 分钟也不会被强制收尾', async () => {
+    const ev = await createEvent(scope, { title: '无总超时验证', typeId: 'et_1' });
+    /*
+     * 2026-11-18 用户拍板取消 90s 硬超时 + 75s 软收尾：原来 deps 里能注入 hard/softTimeoutMs
+     * 把分析掐断，现在这两个注入口一并删除。这里用假时钟把"这一轮"推进 10 分钟，
+     * 断言分析照常收尾，不会落 TIMEOUT。
+     */
+    let clock = Date.now();
+    const slowButHealthy = async function* (): AsyncGenerator<StreamPart> {
+      clock += 10 * 60_000;
+      yield { type: 'content', text: JSON.stringify({ conclusion: '十分钟后才给结论', candidates: [], unconfirmed: [] }) };
+      yield { type: 'done', finishReason: 'stop' };
     };
 
     await startEventAnalysis(scope, ev.id, {
       deps: {
         loadConfigFn: () => cfg,
         resolveLlmStatusFn: okLlmStatus,
-        streamChatFn: slowStream as typeof import('../../src/lib/chat/llm-client.js').streamChat,
-        hardTimeoutMs: 60,
-        softTimeoutMs: 500,
+        nowFn: () => clock,
+        streamChatFn: slowButHealthy as typeof import('../../src/lib/chat/llm-client.js').streamChat,
       },
     });
     const doc = await waitDone(scope, ev.id);
-    assert.equal(doc.draft?.status, 'failed');
-    assert.equal(doc.draft?.errorCode, 'TIMEOUT');
+    assert.notEqual(doc.draft?.errorCode, 'TIMEOUT', '不得再有总时长掐断');
+    assert.equal(doc.draft?.conclusion, '十分钟后才给结论', '跑得久也要把结论完整落下来');
+    // 无候选仍走 NO_RESULT（与超时无关的既有语义）
+    assert.equal(doc.draft?.errorCode, 'NO_RESULT');
   });
 
   it('④ 手动停止：running 时 cancel → 落 cancelled（不是 failed），且幂等', async () => {
@@ -372,5 +379,59 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.equal(doc.draft?.errorCode, 'ANALYSIS_CANCELED');
     assert.equal(doc.draft?.candidates.length, 1, '停止不该丢弃已产出的候选');
     assert.equal(doc.draft?.conclusion, null, '模型未给结论时必须落 null（前端据此整块不渲染）');
+  });
+
+  it('⑥ 思考增量落盘：running 期间 liveThinking 可读，轮末并入 step 并清空', async () => {
+    const ev = await createEvent(scope, { title: '思考流式落盘验证', typeId: 'et_1' });
+    /** 20000 字上限之外的尾巴：用于验证 thinkingChars 记录原文长度（2026-11-18 由 2000 放宽） */
+    const longTail = '乙'.repeat(25_000);
+    const seenLive: Array<string | undefined> = [];
+    let callTurn = 0;
+
+    const fakeStream = async function* (): AsyncGenerator<StreamPart> {
+      callTurn += 1;
+      if (callTurn === 1) {
+        /*
+         * 分两段 reasoning。async generator 从 yield 恢复的前提是消费者已处理完上一段
+         * （即 `for await` 的 body 跑完、包含那次节流写盘），所以此刻读到的是"刚写完的"增量。
+         * 节流窗口 1s 内的第二段不会再写 —— 这正是要验证的节流行为。
+         */
+        yield { type: 'reasoning', text: '第一段思考' };
+        seenLive.push(readNormalizedAnalysisDoc(scope, ev.id).draft?.liveThinking?.text);
+        yield { type: 'reasoning', text: longTail };
+        yield {
+          type: 'tool_calls',
+          calls: [{ id: 'c6', name: 'fs_read', arguments: JSON.stringify({ path: 'src/login.ts', offset: 1, limit: 5 }) }],
+        };
+        yield { type: 'done', finishReason: 'tool_calls' };
+        return;
+      }
+      // 第二轮开始：上一轮已并入 steps，实时副本必须已被清空
+      seenLive.push(readNormalizedAnalysisDoc(scope, ev.id).draft?.liveThinking?.text);
+      yield { type: 'content', text: JSON.stringify({ candidates: [], unconfirmed: [] }) };
+      yield { type: 'done', finishReason: 'stop' };
+    };
+
+    await startEventAnalysis(scope, ev.id, {
+      deps: {
+        loadConfigFn: () => cfg,
+        resolveLlmStatusFn: okLlmStatus,
+        streamChatFn: fakeStream as typeof import('../../src/lib/chat/llm-client.js').streamChat,
+      },
+    });
+
+    const finalDoc = await waitDone(scope, ev.id);
+    assert.equal(seenLive[0], '第一段思考', 'running 期间必须能读到增量思考（否则前端仍是"一轮跳一次"）');
+    assert.equal(seenLive[1], undefined, '本轮并入 steps 后必须清空 liveThinking（否则同一段会展示两遍）');
+
+    const thinkingStep = (finalDoc.draft?.steps ?? []).find((s) => s.thinking);
+    assert.ok(thinkingStep, '轮末思考仍要随 step 落盘');
+    assert.ok(thinkingStep!.thinking!.startsWith('第一段思考'));
+    assert.equal(thinkingStep!.thinking!.length, 20_000, '异常兜底上限 20 000 字（2000 字会把正常思考砍尾）');
+    assert.ok(
+      (thinkingStep!.thinkingChars ?? 0) > 20_000,
+      `thinkingChars 要记截断前的原文长度，实际 ${thinkingStep!.thinkingChars}`,
+    );
+    assert.equal(finalDoc.draft?.liveThinking, undefined, '收尾终态不得残留 liveThinking');
   });
 });

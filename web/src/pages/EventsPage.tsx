@@ -295,7 +295,10 @@ export function EventsPage(): JSX.Element {
 
   const run = async (fn: () => Promise<string>): Promise<void> => {
     setBusy(true);
-    setMessage(null);
+    /*
+     * 不先 `setMessage(null)`：提示已是浮层不占布局，但"清空→再填"会让浮层整体卸载重挂
+     * （淡入动画重播 + 一闪），看起来像闪了一下。直接覆盖即可（2026-11-18）。
+     */
     try {
       setMessage({ tone: 'ok', text: await fn() });
       await loadList();
@@ -397,7 +400,21 @@ export function EventsPage(): JSX.Element {
         </div>
       ) : null}
 
-      {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
+      {/*
+       * 提示改成**脱离布局的浮层**（2026-11-18 报障「点删除页面抖一下」）：
+       * 原来这行是普通块级元素，`run()` 里 `setMessage(null)` → 完成后再 `setMessage(ok)`
+       * 会让它消失一次、出现一次 ⇒ 下面整块内容上下各被推一回，整页看起来抖一下。
+       * 现在 fixed 定位、不参与布局，文字替换不再影响任何元素位置。
+       */}
+      {message ? (
+        <p
+          className={`gov-page-toast${message.tone === 'err' ? ' gov-page-toast--err' : ''}`}
+          role="status"
+          aria-live="polite"
+        >
+          {message.text}
+        </p>
+      ) : null}
       {showReadOnlyHint ? (
         <p className="gov-hint">
           当前账号为只读：可以查看事件、阶段与可见性；新建 / 流转 / 删除 / 编辑类型需要写权限。
@@ -765,7 +782,7 @@ export function EventsPage(): JSX.Element {
                       onOpenSettings={() => { setFindRefOpen(false); openAiSettings('find'); }}
                     />
                   ) : null}
-                  emptyText="暂无参考文档：可用「AI 查找」或手动「＋ 添加」"
+                  emptyText="暂无参考文档：可用「AI 查找」、「＋ 添加」或「上传文件」"
                   confirmKey={refConfirmKey}
                   onConfirmChange={setRefConfirmKey}
                   onOpen={(group, name) => setDocTarget({ group, name })}
@@ -790,6 +807,15 @@ export function EventsPage(): JSX.Element {
                         onClick={() => setAddRefOpen(true)}
                       >
                         ＋ 添加
+                      </button>
+                      {/* 上传文件（REQ-20261118-001）：与「＋ 添加」同层级，写权限才可用 */}
+                      <button
+                        className="gov-btn gov-btn--ghost gov-btn--sm"
+                        disabled={busy || !canWrite}
+                        title={readOnlyHint}
+                        onClick={() => setUploadRefOpen(true)}
+                      >
+                        上传文件
                       </button>
                     </>
                   )}
@@ -885,6 +911,30 @@ export function EventsPage(): JSX.Element {
             const skipped = r.skipped.length > 0 ? `，跳过 ${r.skipped.length} 篇（已存在或不可用）` : '';
             return `已加入 ${r.added} 篇参考文档${skipped}`;
           })}
+        />
+      ) : null}
+
+      {uploadRefOpen && active ? (
+        <EventRefUploadModal
+          scope={scope}
+          eventId={active.id}
+          refCount={refs.length}
+          refLimit={REF_LIMIT}
+          defaultGroupHint={`事件参考/${active.shortId}-${active.title.slice(0, 40)}`}
+          onClose={() => {
+            setUploadRefOpen(false);
+            /**
+             * 关窗也刷一次：用户可能在导入中途选「后台继续」，此时 `onFinished` 还没触发，
+             * 不刷新会让列表看起来"什么都没发生"（真实结果要稍后才可见，属预期）。
+             */
+            void loadDetail(active.id);
+          }}
+          onFinished={(text, tone) => {
+            // 导入落定即刷新：参考文档区与「N 篇」计数都要跟着变（R4）
+            setMessage({ tone, text });
+            void loadDetail(active.id);
+            void loadList();
+          }}
         />
       ) : null}
 

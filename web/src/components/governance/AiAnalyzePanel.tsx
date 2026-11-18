@@ -412,7 +412,10 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                             </div>
                           ) : null}
 
-                          {step.thinking ? <ThinkingBlock text={step.thinking} /> : null}
+                          {/* 已完成的轮：思考随 step 一起定稿，这里不再标「思考中」 */}
+                          {step.thinking ? (
+                            <ThinkingBlock text={step.thinking} truncated={step.thinkingChars} />
+                          ) : null}
 
                           {expandable && expanded ? (
                             <div className="gov-ai-step__detail">
@@ -427,6 +430,35 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
               ) : (
                 <p className="gov-hint" style={{ padding: '10px 12px' }}>正在读取事件上下文…</p>
               )}
+
+              {/*
+               * 运行中当前这一轮的思考（2026-11-18）：后端按 ~1s 节流把 reasoning 增量写进
+               * `draft.liveThinking`，轮结束时并入步骤并清空 —— 所以这里与上面的 step 思考不会重复。
+               *
+               * ⚠️ 首包未到也必须占位转圈：只看 step 的话，运行中"最后一步已完成、下一轮还没吐字"
+               * 这段时间过程区底部完全静止，用户会觉得"动画丢了"（2026-11-18 反馈）。
+               */}
+              {draft?.status === 'running' ? (
+                <div className="gov-ai-live">
+                  {draft.liveThinking ? (
+                    <>
+                      <div className="gov-ai-live__head">
+                        第 {draft.liveThinking.round} 轮探索 · 生成中
+                      </div>
+                      <ThinkingBlock
+                        text={draft.liveThinking.text}
+                        live
+                        truncated={draft.liveThinking.chars}
+                      />
+                    </>
+                  ) : (
+                    <div className="gov-ai-live__head">
+                      <span className="gov-ai-live__spin" aria-hidden="true" />
+                      {`第 ${steps.length + 1} 轮探索 · 正在思考…`}
+                    </div>
+                  )}
+                </div>
+              ) : null}
 
               {/*
                * 结论就近展示：此前只出现在卡片顶部，用户滚到过程区就看不到了（真机反馈）。
@@ -502,11 +534,10 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
         </div>
       ) : null}
 
-      {!isRunning && draft && draft.unconfirmed.length > 0 && (!committed || procOpen) ? (
-        <p className="gov-inline-tip" style={{ padding: '0 12px' }}>
-          <b>未确认点：</b>{draft.unconfirmed.join('；')}
-        </p>
-      ) : null}
+      {/*
+       * 未确认点已上移到卡片级独立区块（EventAnalysisCard 的 .gov-unconfirmed）：
+       * 这里原来那段 `(!committed || procOpen)` 的小字会在"确认后收起过程"时整块消失（2026-11-18 反馈）。
+       */}
 
       {actionError ? <span className="gov-error">{actionError}</span> : null}
 

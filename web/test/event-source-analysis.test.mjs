@@ -45,6 +45,7 @@ const summaryCardSrc = fs.readFileSync(
   path.join(webRoot, 'src/components/governance/event-detail/EventSummaryCard.tsx'), 'utf8');
 const scopePickerSrc = fs.readFileSync(path.join(webRoot, 'src/components/ScopeMultiPicker.tsx'), 'utf8');
 const kiCss = fs.readFileSync(path.join(webRoot, 'src/styles/ki.css'), 'utf8');
+const govCss = fs.readFileSync(path.join(webRoot, 'src/styles/governance.css'), 'utf8');
 const pickerCss = fs.readFileSync(path.join(webRoot, 'src/styles/scope-picker.css'), 'utf8');
 
 describe('S-05 · AiAnalyzeModal 辅助逻辑与前端守卫', () => {
@@ -217,9 +218,83 @@ describe('S-05c · 过程可观测（去重 + 工具明细）', () => {
     assert.match(toolCallSrc, /已截断（原文/, '截断必须显式告知原文长度');
   });
 
-  it('思考片段默认收起且两处可见', () => {
+  it('思考片段默认收起，且复用对话侧的思考块样式（2026-11-18）', () => {
     assert.match(modalSrc, /<ThinkingBlock/, '分析面板要能看思考');
-    assert.match(toolCallSrc, /<summary>模型思考<\/summary>/, '思考块默认折叠');
+    assert.match(processPanelSrc, /<ThinkingBlock/, '查找面板同');
+    // 不再自造 <details className="gov-think">：与 AI 对话的 ReasoningBlock 共用 .ki-chat-reason*
+    assert.doesNotMatch(toolCallSrc, /<summary>模型思考<\/summary>/, '不得保留原生的 details/summary 折叠');
+    assert.match(toolCallSrc, /ki-chat-reason__toggle/, '折叠头复用对话侧按钮');
+    assert.match(toolCallSrc, /ki-chat-reason__spin/, '运行中要有旋转动画');
+    assert.match(toolCallSrc, /useState\(false\)/, '默认收起');
+  });
+
+  it('未确认点是卡片级独立区块：不随已确认与过程折叠消失（2026-11-18 走查）', () => {
+    assert.match(analysisCardSrc, /className="gov-unconfirmed"/, '要有独立的未确认点区块');
+    assert.match(analysisCardSrc, /draft\.unconfirmed\.map/, '逐条列出，不再 join 成一行');
+    const start = analysisCardSrc.indexOf('className="gov-unconfirmed"');
+    const end = analysisCardSrc.indexOf('className="gov-confirmed"');
+    assert.ok(start > 0 && end > start, '未确认点应位于已确认位置之前');
+    const block = analysisCardSrc.slice(start, end);
+    // 条件里不得再出现 committed / procOpen —— 那正是"确认后收起过程就看不见"的成因
+    assert.doesNotMatch(block, /committed|procOpen/, '区块条件不得依赖已确认态或过程区展开态');
+    assert.doesNotMatch(modalSrc, /未确认点：/, '面板内那段重复小字应移除');
+    assert.match(govCss, /\.gov-unconfirmed__list/, '未确认点样式随之落地');
+  });
+
+  it('追问区容器化：主色浅底 + 左竖线 + 圆角，图标不与结论撞色', () => {
+    const block = govCss.slice(govCss.indexOf('.gov-ask {'), govCss.indexOf('.gov-ask__head'));
+    assert.match(block, /border-left: 3px solid/, '要有左侧竖线');
+    assert.match(block, /--ki-color-primary/, '用主色，与结论（紫）/未确认点（amber）/已确认位置（蓝）区分');
+    assert.match(block, /border-radius/, '要有圆角');
+    const iconBlock = govCss.slice(govCss.indexOf('.gov-ask__icon {'), govCss.indexOf('.gov-ask__title'));
+    assert.doesNotMatch(iconBlock, /--ki-color-purple/, '图标不得再用紫色（与分析结论撞色）');
+    assert.match(iconBlock, /--ki-color-primary/);
+  });
+
+  it('思考是流式的：running 期间渲染 liveThinking，并贴底跟随（2026-11-18）', () => {
+    assert.match(modalSrc, /draft\.liveThinking/, '分析面板要渲染实时思考');
+    const liveStart = modalSrc.indexOf('className="gov-ai-live"');
+    assert.ok(liveStart > 0, '实时思考要有独立容器（虚线左框，与定稿步骤区分）');
+    const liveBlock = modalSrc.slice(liveStart, liveStart + 1600);
+    assert.match(liveBlock, /text=\{draft\.liveThinking\.text\}/, '渲染增量正文');
+    assert.match(liveBlock, /\n\s*live\b/, '实时块必须标 live（旋转动画）');
+    assert.match(liveBlock, /truncated=\{draft\.liveThinking\.chars\}/, '带原文长度供「已截断」提示');
+    /*
+     * 首包未到（liveThinking 还没写出来）也必须占位转圈：
+     * 只看 step 的话，"最后一步已完成、下一轮还没吐字"这段时间过程区底部完全静止，
+     * 用户会以为动画丢了（2026-11-18 反馈）。
+     */
+    assert.match(liveBlock, /gov-ai-live__spin/, '首包未到要有转圈占位');
+    assert.match(liveBlock, /正在思考…/, '占位文案要说清在等什么');
+    assert.match(govCss, /\.gov-ai-live__spin \{[\s\S]{0,200}animation: ki-spin/, '占位转圈复用对话侧动画');
+
+    assert.match(toolCallSrc, /stickRef/, '流式追加要贴底跟随（回看时不打断）');
+    assert.match(toolCallSrc, /思考内容过长，仅显示前/, '截断必须显式告知原文长度');
+    assert.match(processPanelSrc, /truncated=\{step\.thinkingChars\}/, '查找侧也带截断长度');
+    // 已完成的轮不再标「思考中」：live 只属于 draft.liveThinking 那一块
+    assert.doesNotMatch(modalSrc, /step\.thinking\} live=/, '完成态步骤不得再挂 live');
+  });
+
+  it('删除不再"抖一下"：入场动画不得按 nth-child 设延迟，页内提示不占布局（2026-11-18）', () => {
+    /*
+     * 根因：行列表用 `:nth-child(N) { animation-delay }` 做阶梯入场。删掉一行后，
+     * 后面所有行的序号都变 ⇒ animation-delay 变化 ⇒ 浏览器取消并重启 gov-rise
+     * ⇒ 整个列表从 opacity 0 + translateY(5px) 重新淡入，用户看到"页面抖一下"。
+     */
+    assert.doesNotMatch(
+      govCss,
+      /\.gov-[^\n]*:nth-child\([^)]*\)[^\n]*\{[^}]*animation-delay/,
+      '逐行 animation-delay 会让删除后的行重播入场动画',
+    );
+    assert.match(govCss, /\.gov-page-toast \{[\s\S]{0,300}position: fixed/, '页内提示必须脱离布局，否则出现/消失会推挤下方内容');
+    assert.match(govCss, /\.gov-page-toast \{[\s\S]{0,300}pointer-events: none/, '浮层不得吃掉点击');
+    assert.match(govCss, /\.gov-page-toast \{[\s\S]{0,300}z-index: 900/, '浮层层级要高于内容、低于弹窗');
+    assert.match(eventsSrc, /gov-page-toast/, 'EventsPage 用浮层提示');
+    // 提示从"先清空再填"改成直接覆盖：否则浮层卸载重挂会闪一下
+    assert.doesNotMatch(eventsSrc, /setBusy\(true\);\s*\n\s*setMessage\(null\);/, '操作开始不得清空提示');
+    // 行尾按钮列宽：写死 22px 装不下二次确认的「确认」两字，会把行高顶起来
+    assert.doesNotMatch(govCss, /minmax\(0, 1fr\) auto 22px/, '末列不得写死 22px');
+    assert.match(govCss, /\.gov-docline__x \{[\s\S]{0,200}min-width: 22px/, '行尾按钮固定最小宽度');
   });
 
   it('步骤明细用中文标签（不再直接铺英文 key）', () => {
