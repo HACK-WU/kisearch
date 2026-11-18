@@ -264,6 +264,26 @@ export interface EmbeddingConfig {
   scheduler?: EmbeddingSchedulerConfig;
 }
 
+/**
+ * `ki_recall` 的运行期预算（REQ-20261118-003 · S-02）。
+ *
+ * ⚠️ 刻意**不含检索范围**：范围只由调用方的 `scope` 决定，服务端不设默认库、不做隐式兜底 ——
+ *    否则「这次查了哪个库」无法从入参复盘（2026-11-18 拍板，见设计 D-02-1）。
+ * ⚠️ 也不含提示词：一期确定性通道不读提示词，加一个"改了没反应"的配置项比不加更糟。
+ */
+export interface RecallConfig {
+  /** 检索结果缓存有效期（秒），0 = 关闭，默认 600 */
+  cacheTtlSec?: number;
+  /** 缺省候选数上限（1~20），默认 8 */
+  maxCandidates?: number;
+  /** 进程内并发槽（1~8），默认 4；满了直接 RECALL_BUSY（不排队） */
+  maxConcurrent?: number;
+  /** 每个调用方每分钟上限（1~120），默认 20 */
+  throttlePerMinute?: number;
+  /** 单次硬超时（毫秒，1000~45000），默认 20000 */
+  hardTimeoutMs?: number;
+}
+
 export interface KiConfig {
   dataDir: string;                       // KB 源数据目录
   backupDir: string;                     // 备份目录
@@ -285,6 +305,7 @@ export interface KiConfig {
   mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
   llm?: LlmConfig;                       // 【新增】模型配置段（REQ-20260924-001）；缺失 = 未配置（fail-loud）
   chatDir?: string;                      // 【新增】会话存储根目录（默认 ~/.ki/chat，独立于 kb/）
+  recall?: RecallConfig;                 // 【新增】ki_recall 运行期预算（REQ-20261118-003）
   /** 字段校验告警（废弃字段 / null scope 条目等）：不阻断加载，由 ki doctor 报告 */
   _fieldWarnings?: ConfigIssue[];
   _configPath?: string;                  // 配置文件路径（内部）
@@ -833,8 +854,26 @@ function parseAndExpand(configFile: string): KiConfig {
   // REQ-20261029-001：只读名单归一化（顶层节点；非法项丢弃并告警，不阻断加载）
   const scopeReadonly = normalizeScopeReadonly(raw.scopeReadonly);
 
+  /*
+   * REQ-20261118-003：`ki_recall` 预算段。
+   * ⚠️ 与 `llm` 段同样易踩的坑：这里必须**逐字段白名单拷贝**，类型上有而这里漏了 = 运行时永远 undefined
+   *    （2026-11-13 在 `askMaxRounds` 上实测踩过一次）。
+   */
+  const rawRecall = (raw.recall && typeof raw.recall === 'object' && !Array.isArray(raw.recall))
+    ? raw.recall as Record<string, unknown>
+    : undefined;
+  const recall: RecallConfig | undefined = rawRecall
+    ? {
+        cacheTtlSec: rawRecall.cacheTtlSec !== undefined ? Number(rawRecall.cacheTtlSec) : undefined,
+        maxCandidates: rawRecall.maxCandidates !== undefined ? Number(rawRecall.maxCandidates) : undefined,
+        maxConcurrent: rawRecall.maxConcurrent !== undefined ? Number(rawRecall.maxConcurrent) : undefined,
+        throttlePerMinute: rawRecall.throttlePerMinute !== undefined ? Number(rawRecall.throttlePerMinute) : undefined,
+        hardTimeoutMs: rawRecall.hardTimeoutMs !== undefined ? Number(rawRecall.hardTimeoutMs) : undefined,
+      }
+    : undefined;
+
   return {
-    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, scopeReadonly, vector, mcp, llm, chatDir,
+    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, scopeReadonly, vector, mcp, llm, chatDir, recall,
     _fieldWarnings: fieldWarns,
     _configPath: configFile,
   };

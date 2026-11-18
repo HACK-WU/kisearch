@@ -31,6 +31,7 @@ import { registerEventDeleteTool } from './mcp-tools/event-delete.js';
 import { registerEventDocsTool } from './mcp-tools/event-docs.js';
 import { registerEventRefsTool } from './mcp-tools/event-refs.js';
 import { registerAskTool } from './mcp-tools/ask.js';
+import { registerRecallTool } from './mcp-tools/recall.js';
 import { READ_ONLY_INSTRUCTIONS } from './mcp-tools/tool-access.js';
 import { readKiVersion } from './version-guard.js';
 import { SERVICE_NAME } from './constants.js';
@@ -92,6 +93,13 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
     //    注意读白名单方向：`ki_ask` 不在 READ_ONLY_TOOL_NAMES，只读会话看不见它也调不动
     //    （tools/call 侧另有 mcp-http 的模型消耗型闸门兜住缓存/构造调用）。
     registerAskTool(server, auth?.id ?? 'local');
+    /**
+     * `ki_recall`（REQ-20261118-003）：任务前上下文预取。
+     *
+     * 一期只跑确定性通道（不消耗模型），仍放在本块内 —— 它**按配置可能**触发模型调用
+     * （二期深度通道），准入按「可能消耗」判，与 `ki_ask` 同源，避免二期再改一次注册位置。
+     */
+    registerRecallTool(server, auth?.id ?? 'local');
   }
   return server;
 }

@@ -5,6 +5,7 @@ kisearch 面向 AI Agent 提供三类资产：**检索 Skill**、**记忆行为�
 | 资产 | 位置 | 作用 |
 |---|---|---|
 | `ki-search` | [`skills/ki-search/SKILL.md`](../skills/ki-search/SKILL.md) | 代码知识库检索/写入：四步走查询 + 白名单/黑名单 |
+| `task-recall` | [`skills/task-recall/SKILL.md`](../skills/task-recall/SKILL.md) | 开工前预取：任务画像 → `ki_recall` → 按清单读正文；含触发判据与 6 条禁忌 |
 | 记忆行为总控 | [`rules/ai-codekb-memory.md`](../rules/ai-codekb-memory.md) | 自动沉淀 + 查询三步走 + 归档 + 代码片段记忆 + 禁忌 |
 | `ki-search-first` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-search-first) | 所有任务的记忆前置：先查项目记忆，再进入代码/专家/解决方案路径 |
 | `ki-memory-lookup` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-lookup) | 只读查询 SSOT，按记忆类型选择目录导航或语义检索 |
@@ -43,6 +44,49 @@ ki-memory-write（查重后写入并校验）
    - `ki_delete_relation` 仅在明确要求遗忘时使用；其余情况优先覆盖更新。待生效变更在正式落地后再结账删除。
 
 > 建议写入：稳定的项目约定、历史决策、接口信息、数据流、错误解法、跨模块关联。不要写入：一次性诊断、短期上下文、未经确认的推测。
+
+## 开工前预取：`ki_recall`
+
+拿到新任务 / 需求 / bug，**在动手前先预取一次相关文档**——尤其是不熟悉该模块、只有现象没定位、或改动会跨多个文件时。
+
+```text
+写任务画像（2-3 句：目标 / 涉及 / 现象 / 期望） + scope
+        ↓  ki_recall
+候选清单（why / rankInScope / alsoIn） + nextActions
+        ↓  按 nextActions 读前 1-2 篇（ki_get_module_info）
+开始改码
+```
+
+**调用示例**：
+
+```json
+{
+  "scope": "kisearch-docs",
+  "task": "删除一篇文档以后，用 ki_search 还能把它搜出来，怀疑向量没删干净，要查删除链路的兜底逻辑",
+  "hints": ["delete-relation", "向量残留"],
+  "limit": 8
+}
+```
+
+**四条使用要点**：
+
+| 要点 | 说明 |
+|---|---|
+| `scope` 必填 | 工具**不会**替你挑库；漏传会报错并回「可用库 / 视图清单」，按清单补传即可。本仓常用视图 `kisearch-docs` |
+| 不提问 | `task` 是描述不是问句；`ki_recall` 只找文档，不给结论（要结论用 `ki_ask`） |
+| 结果要消费 | `nextActions` 里是可直接执行的 `ki_get_module_info` 参数；**不读正文就下结论**是最常见的误用 |
+| 不完整要如实说 | `degraded` / `partial` = 结果不完整；`skipped` = 那些库没参与（无权 / 不存在）；二者都不能当成「没有相关文档」 |
+
+**与其他工具的分工**（`ki_recall` 不会替代它们）：
+
+```
+ki_recall          → 只有任务描述，不知道读哪篇
+ki_search          → 知道搜什么词，要片段
+ki_get_module_info → 知道 group + 名称，要读全文
+ki_ask             → 读完了，要一个综合结论
+```
+
+配套 skill：[`skills/task-recall`](../skills/task-recall/SKILL.md)（触发判据、画像模板、消费规则、禁忌）。
 
 ## 安装
 

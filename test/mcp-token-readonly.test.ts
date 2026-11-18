@@ -51,6 +51,8 @@ const WRITE_TOOLS = [
   'ki_group_create',
   'ki_group_delete_empty',
   'ki_delete_relation',
+  // 模型消耗型准入但非写工具（REQ-20261118-003）：与 ki_ask 同块注册，故计入「非只读」清单
+  'ki_recall',
 ];
 
 let tmpDir: string;

@@ -1,8 +1,8 @@
 # MCP 工具参考
 
-`ki mcp` 共暴露 **23 个**工具。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
+`ki mcp` 共暴露 **24 个**工具。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
 
-> 两个例外：`ki_ask` 的 `scope` **必填**且只接受单个具体知识库（不吃视图名、不吃逗号分隔多库）；`ki_ask` 与全部写工具只在**非只读** Token 会话里注册 —— 只读 Token 的 `tools/list` 里看不到它们（`ki_ask` 对库只读，但会消耗模型额度并外发内容，故按写工具的准入处理）。
+> 三个例外：`ki_ask` 的 `scope` **必填**且只接受单个具体知识库（不吃视图名、不吃逗号分隔多库）；`ki_recall` 的 `scope` **同样必填**但接受多个库或知识视图，漏传会直接报错并回可用清单（服务端不设默认库）；`ki_ask` / `ki_recall` 与全部写工具只在**非只读** Token 会话里注册 —— 只读 Token 的 `tools/list` 里看不到它们（两者对库只读，但会按配置可能触发模型调用并外发内容，故按模型消耗型准入处理）。
 
 > 工具定义以 [`src/lib/mcp-tools/`](../src/lib/mcp-tools/) 为准。接入方式见 [mcp-http.md](./mcp-http.md)。
 
@@ -21,6 +21,7 @@
 | `ki_event_type_list` | 列出事件类型及其阶段链（每阶段可见性）与收口动作（只读，不能创建或修改类型） | `scope` |
 | `ki_event_get` | 读单条事件完整详情（只读）：描述全文 / 阶段链与当前可见性 / 关联文档 / 参考文档 / AI 分析结论与未确认点 / 已确认代码位置 / 阶段日志。**找事件用 ki_event_list，读事件用本工具**（list 只有 120 字结论预览与位置预览） | `event`（`evt_…` / `#3` / `3`）、`members_limit`、`refs_limit`、`logs_limit`、`locations_limit`、`location_snippet_limit`（均为 0 时该块不返回，仍给 `total`） |
 | `ki_ask` | **模型消耗型**：让 ki 用它自己的模型 + 指定知识库回答一个问题，内部自动多轮检索再合成，返回答案与来源；默认每次全新问答，追问时把上次的 `contextId` 作为 `context_id` 传回（10 分钟内有效，每次交互顺延）。单次通常 5~30 秒，超 45 秒返回已生成的部分答案（`truncated=true`）。只读 Token 不可见 | `scope`（**必填**，单个具体库）、`question`、`background`（≤2000 字符，只对本轮生效）、`context_id` |
+| `ki_recall` | **开工前预取**（模型消耗型准入，一期只跑确定性通道）：给一段任务画像 + 范围，返回「值得先读的文档清单」（含理由、库内名次、同名提示）+ 可直接执行的 `nextActions`；单次调用、不提问、不写数据。服务端**不设默认库**，漏传 `scope` 会回可用库/视图清单让你一次自愈 | `scope`（**必填**，库名或视图，可多个，上限 6 个 / 展开后 12 个物理库）、`task`（≤2000 字）、`hints`（≤10 条强线索）、`exclude`（已读清单）、`limit`（默认 8）、`mode`（`auto` / `fast` / `deep`，当前版本 `deep` 会明确报不可用） |
 
 ## 写
 

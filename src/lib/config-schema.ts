@@ -134,6 +134,23 @@ function askSessionRetainDaysRange(value: unknown, path: string, add: AddFn): vo
   }
 }
 
+/** `recall.*` 的通用整数区间校验（越界 fail-loud：静默钳制会让"改了没生效"变成难查的问题） */
+function recallIntRange(min: number, max: number, label: string) {
+  return (value: unknown, path: string, add: AddFn): void => {
+    const n = value as number;
+    if (!Number.isInteger(n) || n < min || n > max) {
+      add(path, `应为 ${min}~${max} 之间的整数（${label}），实际=${String(value)}`);
+    }
+  };
+}
+
+/** 秒；0 = 关闭缓存，是合法值 */
+const recallCacheTtlRange = recallIntRange(0, 3600, '检索结果缓存有效期，0=关闭');
+const recallMaxCandidatesRange = recallIntRange(1, 20, '缺省候选数上限');
+const recallMaxConcurrentRange = recallIntRange(1, 8, '进程内并发槽');
+const recallThrottleRange = recallIntRange(1, 120, '每个调用方每分钟上限');
+const recallHardTimeoutRange = recallIntRange(1000, 45_000, '单次硬超时（毫秒）');
+
 function httpUrl(value: unknown, path: string, add: AddFn): void {
   const s = value as string;
   if (!/^https?:\/\//.test(s)) {
@@ -437,6 +454,19 @@ const CONFIG_SCHEMA: ConfigNode = {
     },
     // 【新增】chatDir：会话存储根目录（REQ-20260924-001 · S02 §3.1）
     chatDir: { type: 'string' },
+    // 【新增】recall：`ki_recall` 运行期预算（REQ-20261118-003 · S-02）
+    // ⚠️ 不含检索范围：范围只由调用方 scope 决定（服务端不设默认库），故此处没有 defaultScopes 之类的键。
+    recall: {
+      type: 'object',
+      fields: {
+        /** 0 = 关闭缓存（合法值，别用 `||` 取默认） */
+        cacheTtlSec: { type: 'number', validate: recallCacheTtlRange },
+        maxCandidates: { type: 'number', validate: recallMaxCandidatesRange },
+        maxConcurrent: { type: 'number', validate: recallMaxConcurrentRange },
+        throttlePerMinute: { type: 'number', validate: recallThrottleRange },
+        hardTimeoutMs: { type: 'number', validate: recallHardTimeoutRange },
+      },
+    },
   },
 };
 

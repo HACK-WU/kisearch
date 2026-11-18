@@ -79,7 +79,15 @@ export const SEARCH_TOOL_NAMES: readonly string[] = [
  * 白名单方向仍然安全：只读 Token 的闸门是 `isReadOnlyTool()`，
  * 新工具不登记进 READ_ONLY_TOOL_NAMES 就默认被拒（fail-safe 不变）。
  */
-export const MODEL_CONSUMING_TOOL_NAMES: readonly string[] = ['ki_ask'];
+export const MODEL_CONSUMING_TOOL_NAMES: readonly string[] = ['ki_ask', 'ki_recall'];
+
+/**
+ * ⚠️ 本名单表达的是**准入维度**「可能消耗模型」，不是**计量维度**「本次真的消耗了」。
+ *
+ * `ki_recall` 一期只跑确定性通道（零模型调用），但仍登记在此：它的通道由服务端配置决定，
+ * 二期接上深度通道后就会消耗模型 —— 准入判定不能跟着版本改来改去。
+ * **成本统计请以审计日志的 `channel` 字段为准**，不要按本名单算。
+ */
 
 /** 该工具是否会消耗模型额度（只读 Token 同样不得调用） */
 export function isModelConsumingTool(name: string): boolean {
@@ -101,6 +109,16 @@ export const TOKEN_MODEL_FORBIDDEN = 'TOKEN_MODEL_FORBIDDEN' as const;
  */
 export function modelConsumingRejectMessage(toolName: string, tokenId?: string): string {
   const idText = tokenId ? `（id: ${tokenId}）` : '';
+  /*
+   * `ki_recall` 单独一条文案：它一期并不消耗模型，"会消耗模型额度"这句对它来说是错的，
+   * 会让调用方以为换成读写 Token 就一定会烧钱。原因要说准（`ki_ask` 的文案逐字保持不变）。
+   */
+  if (toolName === 'ki_recall') {
+    return `Forbidden: 该 Token${idText}为只读，不能调用 ${toolName}。`
+      + '它不是写入工具，而是「模型消耗型」：会按服务端配置选择检索通道、可能触发上游模型调用并外发知识库内容，故与 ki_ask 同样按模型型准入。'
+      + '注意：这个工具可能仍出现在你当前会话的工具列表里（列表是建连时的快照），但已被禁用。'
+      + '请改用读写 Token，或由管理员执行 ki mcp token update <id> --read-write 切换为读写。';
+  }
   return `Forbidden: 该 Token${idText}为只读，不能调用会消耗模型额度的工具 ${toolName}。`
     + '注意：这个工具可能仍出现在你当前会话的工具列表里（列表是建连时的快照），但已被禁用。'
     + '它不是写入工具，拒绝原因也不是权限不足，而是"只读 Token 不允许触发上游模型调用"。'

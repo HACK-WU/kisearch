@@ -11,6 +11,11 @@
  *      （判定复用 `scope-access.ts`，不另写一份 —— 两份判定必然漂移成越权口子）。
  *   3. **不自建缓存**：`views.json` 的读取复用 `scope-access` 的 mtime 快照；
  *      自建 TTL 缓存会出现「授权用旧成员、展开用新成员」的越权窗口（见 `scope-access.ts:42-48`）。
+ *
+ * 对外两个入口（**判定逻辑只有一份**，别在调用方重写）：
+ *   - `resolveFindTargets(eventScope, cfg, deps)` —— 「AI 查找」：事件库恒在首位，配置里的额外库逐个判定；
+ *   - `resolveScopeSet(bases, extras, deps)` —— 通用形态（REQ-20261118-003 的 `ki_recall` 复用）；
+ *     两者语义差异只在 `bases`（视为已鉴权）与 `extras`（逐个判定）的划分上。
  */
 
 import { loadConfig, type KiConfig } from '../config.js';
@@ -86,19 +91,34 @@ export interface FindTargetDeps {
 }
 
 /**
- * 解析检索范围。
+ * 解析「一组可信基线 + 一组待判定名称」的检索范围。
  *
- * @param eventScope 事件所在库 —— **恒在范围内**，且由调用方在此之前单独鉴权（事件库无权 → 403）
+ * **两个入参的语义严格不同**（这是本函数存在的理由，也是唯一的契约）：
+ *   - `bases`：**视为已鉴权**，原样纳入，只做去重。谁传谁负责（find 传事件库并由调用方单独鉴权；
+ *     recall 传空数组，把所有请求库都当 extras 走判定）。
+ *   - `extras`：逐个判定 —— 不存在 / 视图无成员 / 无权，各自进 `skipped` 并跳过，
+ *     **不抛错**（配置里写了不可用的名字，不该让整个查找失败）。
+ *
+ * ⚠️ `extras` 为空时**提前返回、不读 views.json / 不列 scope**：
+ *    这是热路径（每次查找都走），且保存期预检（`chat-routes`）依赖它不做多余 IO。
+ *
+ * @param bases 已鉴权的基线（如 find 的事件库）；顺序即结果顺序
+ * @param extras 待判定并附加的名称（配置 / 调用方传入）
  */
-export function resolveFindTargets(
-  eventScope: string,
-  cfg: Pick<FindConfig, 'ranges'> | undefined,
+export function resolveScopeSet(
+  bases: readonly string[],
+  extras: readonly string[],
   deps: FindTargetDeps,
 ): FindTargetResolution {
-  const targets: string[] = [eventScope];
+  const targets: string[] = [];
   const skipped: SkippedTarget[] = [];
-  const extra = cfg?.ranges.extraScopes ?? [];
-  if (extra.length === 0) return { targets, skipped };
+  const seen = new Set<string>();
+  for (const base of bases) {
+    if (seen.has(base)) continue;
+    seen.add(base);
+    targets.push(base);
+  }
+  if (extras.length === 0) return { targets, skipped };
 
   let scopes: string[];
   let views: Record<string, Pick<ViewConfig, 'members'>>;
@@ -117,9 +137,8 @@ export function resolveFindTargets(
 
   const known = new Set([...scopes, ...Object.keys(views)]);
   const viewMembers = (name: string): string[] | null => views[name]?.members ?? null;
-  const seen = new Set<string>([eventScope]);
 
-  for (const raw of extra) {
+  for (const raw of extras) {
     const name = raw.trim();
     if (!name || seen.has(name)) continue;
     if (!known.has(name)) {
@@ -140,4 +159,17 @@ export function resolveFindTargets(
   }
 
   return { targets, skipped };
+}
+
+/**
+ * 解析「AI 查找」的检索范围。
+ *
+ * @param eventScope 事件所在库 —— **恒在范围内**，且由调用方在此之前单独鉴权（事件库无权 → 403）
+ */
+export function resolveFindTargets(
+  eventScope: string,
+  cfg: Pick<FindConfig, 'ranges'> | undefined,
+  deps: FindTargetDeps,
+): FindTargetResolution {
+  return resolveScopeSet([eventScope], cfg?.ranges.extraScopes ?? [], deps);
 }
