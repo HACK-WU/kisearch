@@ -247,12 +247,57 @@
 .gov-tbl th:last-child,
 .gov-tbl td:last-child { text-align: right; }
 
+/**
+ * 文档分类页的列宽。
+ *
+ * 三条踩过的坑：
+ *   1. 列宽是**含 padding 的**（每格左右各 12px），所以给"锁定"按钮 64px 实际只剩 40px → 文字被裁；
+ *   2. `table-layout: fixed` 下固定宽度「短内容留白、长内容换行」两头不讨好 → 只给最稳定的
+ *      文档名按比例，其余按内容需要定宽，**内容最长的事件列吃剩余**；
+ *   3. `text-align` 写在 `<col>` 上无效（col 只认 width/background/border），末列右对齐靠
+ *      `.gov-tbl td:last-child` 那条规则。
+ */
 .gov-col-check { width: 40px; }
-.gov-col-group { width: 200px; }
-.gov-col-cat { width: 86px; }
-.gov-col-term { width: 168px; }
+/* 文档名按比例：它是唯一「内容长度差异极大」的列（archive 8 字 vs 长文档名 40+ 字） */
+.gov-col-name { width: 34%; }
+/* 148px 含左右 padding 24px，内容区 124px ≈ 10 个字（专题记忆/A/对话链路） */
+.gov-col-group { width: 148px; }
+.gov-col-cat { width: 80px; }
+/* 期限/事件列**不设宽度**：它是全表内容最长的一列（#36 + 事件标题 + 阶段），
+   固定值无论给多少都会截断，交给「剩余空间」随窗口宽度伸缩。 */
+/* 92px 含 padding → 装得下最长的「1 个月前」 */
 .gov-col-seen { width: 92px; }
-.gov-col-act { width: 76px; text-align: right; }
+/* 92px 含 padding → 按钮 42px，居中后左右各留约 13px，不贴列边 */
+.gov-col-act { width: 92px; }
+
+/**
+ * 分类页「操作」列**居中**（对齐数据源页 `.ki-scope-table` 的做法：列内居中 + 右侧留白）。
+ *
+ * 全局规则 `.gov-tbl td:last-child { text-align: right }` 会把按钮推到表格最右沿，
+ * 与「最后活跃」之间隔着一整列空白；居中后按钮两侧都有间距，既不离右边界太近，
+ * 也不至于紧贴前一列。只改分类页 —— 回收站页与事件页的末列是「删除/恢复」成组按钮，保持原样。
+ */
+.gov-tbl--docs th:last-child,
+.gov-tbl--docs td:last-child { text-align: center; padding-right: 20px; }
+
+/**
+ * 分类页表格**铺满容器**（2026-11-18 修正：缩成定宽那版会留下一条空白带——
+ * `.gov-card` 的白底仍铺满，表格缩在左边，观感是"表格 + 一块空白"，已回滚）。
+ *
+ * 让「操作」列不贴右沿真正有效的是上面的末列 `text-align: center` + `padding-right`，
+ * 而不是把表格缩窄：缩窄只是把整张表往左挪，按钮仍在表格最右沿。
+ */
+.gov-tbl--docs { width: 100%; }
+
+/* 分类页所有单元格单行 + 省略号：该页列多、内容长，换行会把行高撑乱。
+   ⚠️ 只作用于分类页 —— 回收站页有「删除原因」这类必须换行的长文本。 */
+.gov-tbl--docs td { white-space: nowrap; }
+
+/* 事件列的可跳转链接：hover 出下划线。
+   用 border 而非 text-decoration —— badge 有内边距，underline 会贴着 padding 底边、偏离文字基线。 */
+.gov-eventlink { color: inherit; text-decoration: none; border-bottom: 1px solid transparent; }
+.gov-eventlink:hover { border-bottom-color: currentColor; }
+.gov-eventlink:focus-visible { outline: 2px solid var(--ki-color-primary); outline-offset: 2px; border-radius: 3px; }
 
 .gov-cell-name { font-weight: 600; color: var(--ki-color-text); }
 

@@ -168,7 +168,7 @@ export function LifecyclePage(): JSX.Element {
     // 半选态只能走 DOM 属性（HTML 没有对应 attribute）
     if (selectAllRef.current) selectAllRef.current.indeterminate = pageSomeSelected;
   }, [pageSomeSelected]);
-  // 数据变少（改分类 / 换筛选 / 删文档）后把页码收回，避免停在空白页
+  // 数据变少（编辑分类 / 换筛选 / 删文档）后把页码收回，避免停在空白页
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
@@ -313,7 +313,7 @@ export function LifecyclePage(): JSX.Element {
         </p>
       ) : null}
       {showReadOnlyHint ? (
-        <p className="gov-hint">当前账号为只读：可以查看分类与期限，改分类 / 新建分类入口已禁用。</p>
+        <p className="gov-hint">当前账号为只读：可以查看分类与期限，编辑分类 / 新建分类入口已禁用。</p>
       ) : null}
 
       {selectedDocs.length > 0 ? (
@@ -335,10 +335,10 @@ export function LifecyclePage(): JSX.Element {
       ) : null}
 
       <div className="gov-card">
-        <table className="gov-tbl">
+        <table className="gov-tbl gov-tbl--docs">
           <colgroup>
             <col className="gov-col-check" />
-            <col />
+            <col className="gov-col-name" />
             <col className="gov-col-group" />
             <col className="gov-col-cat" />
             <col className="gov-col-term" />
@@ -409,9 +409,25 @@ export function LifecyclePage(): JSX.Element {
                     </span>
                   ) : doc.lifecycle === 'event' ? (
                     <span className="gov-term">
-                      <span className="gov-badge gov-badge--event">
-                        {doc.event?.shortId ? `#${doc.event.shortId} ${doc.event.title}` : '事件（已删除）'}
-                      </span>
+                      {/*
+                       * 事件名直链：新标签打开事件页并定位到该事件（deep link 走 `?event=`）。
+                       * 事件已删除（无 eventId 或无 shortId）时退化为纯文本，不给死链。
+                       */}
+                      {doc.eventId && doc.event?.shortId ? (
+                        <a
+                          className="gov-badge gov-badge--event gov-eventlink"
+                          href={`/governance/events?event=${encodeURIComponent(doc.eventId)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={`在新标签打开事件 #${doc.event.shortId} ${doc.event.title}`}
+                        >
+                          #{doc.event.shortId} {doc.event.title}
+                        </a>
+                      ) : (
+                        <span className="gov-badge gov-badge--event">
+                          {doc.event?.shortId ? `#${doc.event.shortId} ${doc.event.title}` : '事件（已删除）'}
+                        </span>
+                      )}
                       <span className="gov-days gov-days--calm">· {doc.event?.stageName ?? '未知阶段'}</span>
                     </span>
                   ) : (
@@ -428,7 +444,7 @@ export function LifecyclePage(): JSX.Element {
                       : doc.imported
                         /* 保留分类后「固定 wiki」不再成立：数据源文档也可能是 temp / event */
                         ? '数据源文档的分类由同步保留，不能在这里修改'
-                        : '改分类'}
+                        : '编辑分类'}
                     onClick={() => setEditing({
                       group: doc.group,
                       name: doc.name,
@@ -438,7 +454,7 @@ export function LifecyclePage(): JSX.Element {
                       imported: doc.imported,
                     })}
                   >
-                    {doc.imported ? '锁定' : '改'}
+                    {doc.imported ? '锁定' : '编辑'}
                   </button>
                 </td>
               </tr>
@@ -515,7 +531,7 @@ export function LifecyclePage(): JSX.Element {
         <div className="gov-modal-mask" onClick={() => setEditing(null)}>
           <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
             <div className="gov-modal__head">
-              <span>改分类 · {editing.name}</span>
+              <span>编辑分类 · {editing.name}</span>
               <button className="gov-btn gov-btn--ghost gov-btn--sm" onClick={() => setEditing(null)}>✕</button>
             </div>
             <div className="gov-modal__body">

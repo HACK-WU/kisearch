@@ -13,7 +13,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
@@ -95,6 +95,19 @@ export function EventsPage(): JSX.Element {
   const [events, setEvents] = useState<EventView[]>([]);
   const [types, setTypes] = useState<EventTypeView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  /**
+   * 事件深链：`/governance/events?event=<evt_id 或 #shortId>`。
+   * 文档分类页的「事件」列用它在新标签里直跳；没有参数时行为与从前完全一致。
+   */
+  const [searchParams] = useSearchParams();
+  const deepLinkEvent = searchParams.get('event');
+  /** 深链找不到只提示一次，避免每次列表刷新都弹 */
+  const deepLinkWarned = useRef(false);
+  const matchDeepLink = useCallback((list: readonly EventView[]): string | null => {
+    if (!deepLinkEvent) return null;
+    const raw = deepLinkEvent.replace(/^#/, '');
+    return list.find((e) => e.id === deepLinkEvent || String(e.shortId) === raw)?.id ?? null;
+  }, [deepLinkEvent]);
   const [detail, setDetail] = useState<EventDetail | null>(null);
   const [refs, setRefs] = useState<RefItem[]>([]);
   const [message, setMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
@@ -201,13 +214,47 @@ export function EventsPage(): JSX.Element {
       setEvents(list.events);
       setTypes(typeList.types);
       if (govCounts) setCounts({ open: govCounts.eventsOpen, closed: govCounts.eventsClosed });
-      setActiveId((prev) => prev ?? list.events[0]?.id ?? null);
+      setActiveId((prev) => prev ?? matchDeepLink(list.events) ?? list.events[0]?.id ?? null);
     } catch (err) {
       setMessage({ tone: 'err', text: (err as Error).message });
     }
-  }, [scope, status, keyword, typeFilter]);
+  }, [scope, status, keyword, typeFilter, matchDeepLink]);
 
   useEffect(() => { void loadList(); }, [loadList]);
+
+  /**
+   * 深链：选中后滚到可见（列表可能很长，右栏已切过去但左栏还停在别处）。
+   *
+   * 只滚一次：`activeId` 也会因用户点列表而变，若无条件滚，带 `?event=` 的页面上
+   * 每次点选都会轻微跳一下。`deepLinkScrolled` 保证「深链定位」这件事只做一次。
+   */
+  const deepLinkScrolled = useRef(false);
+  useEffect(() => {
+    if (!deepLinkEvent || !activeId || deepLinkScrolled.current) return;
+    const el = document.querySelector(`[data-event-id="${activeId}"]`);
+    if (!(el instanceof HTMLElement)) return; // 列表还没渲染出来，等下一轮
+    deepLinkScrolled.current = true;
+    el.scrollIntoView({ block: 'nearest' });
+  }, [deepLinkEvent, activeId]);
+
+  /**
+   * 深链指向的事件不在当前列表里。
+   *
+   * 首要原因是**默认只看未收口**（`status='open'`）把它过滤掉了 —— 从文档分类页点进来的
+   * 往往是已收口事件。这种情况不该弹「没找到」，而应**自动切到「全部」再找一次**：
+   * 用户点链接的预期是「看到它」，不是「被要求手动改筛选」。
+   * 切过去仍然找不到，才说明真被删了。
+   */
+  useEffect(() => {
+    if (!deepLinkEvent || deepLinkWarned.current || events.length === 0) return;
+    if (matchDeepLink(events)) return;
+    if (status === 'open') {
+      setStatus('all');
+      return;
+    }
+    deepLinkWarned.current = true;
+    setMessage({ tone: 'err', text: `未找到事件 ${deepLinkEvent}：它可能已被删除` });
+  }, [deepLinkEvent, events, status, matchDeepLink]);
 
   /**
    * 操作提示自动收（2026-11-18）：成功 2.6s 自隐 —— 它已是 fixed 浮层、不占布局，
@@ -576,6 +623,7 @@ export function EventsPage(): JSX.Element {
                 return (
                   <div
                     key={event.id}
+                    data-event-id={event.id}
                     className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}`}
                     onClick={() => setActiveId(event.id)}
                   >

@@ -68,9 +68,15 @@ describe('③ 排序：默认降序，三种口径', () => {
   });
 
   it('排序在已取回的当前页内重排，不改请求参数', () => {
-    // 排序若进入 loadList 的依赖数组，会触发重新请求（后端无 sort 参数，纯浪费）
-    const loadListDeps = page.match(/}, \[scope, status, keyword, typeFilter\]\);/);
-    assert.ok(loadListDeps, 'loadList 依赖不应包含 sort');
+    /*
+     * 原意图：排序若进入 loadList 的依赖数组，会触发重新请求（后端无 sort 参数，纯浪费）。
+     * 断言方式从"硬编码整个依赖数组"改成"提取数组再看是否含 sort"——
+     * 硬编码会在每次新增合法依赖（如深链的 matchDeepLink）时误报。
+     */
+    const m = page.match(/const loadList = useCallback\(async \(\) => \{[\s\S]*?\}, \[([^\]]*)\]\);/);
+    assert.ok(m, '未能定位 loadList 的依赖数组');
+    const deps = m[1].split(',').map((s) => s.trim()).filter(Boolean);
+    assert.ok(!deps.includes('sort'), `loadList 依赖不应包含 sort，实际=${deps.join(',')}`);
   });
 
   it('createdAt 缺失时回退到 updatedAt（老事件文件不整批沉底）', () => {
