@@ -26,6 +26,7 @@
 |---|---|---|---|
 | `ki_event_type_list` | — | — | 只读，返回阶段链 + 收口动作 |
 | `ki_event_list` | — | `status`(open/closed/all) / `type` / `q` / `limit`≤100 / `offset` / `docs_preview_limit`≤10 / `locations_preview_limit`≤10 | 只读 |
+| `ki_event_get` | `event` | `members_limit` / `refs_limit` / `logs_limit` / `locations_limit` / `location_snippet_limit`（均 0 = 不返回该块） | 只读；**list 用来找，get 用来读**。返回描述全文、结论全文、未确认点、已确认位置、文档三元组（scope+group+name，可直接 `ki_get_module_info` 取正文）；过程与候选正文不返回 |
 | `ki_event_create` | `title` / `type` | `description`≤4000 / `stage` / `docs`≤50 / `refs`≤50 | 写事件 + 阶段日志（`by: 'ai'`） |
 | `ki_event_set_stage` | `event` / `stage` | `note` | 唯一的状态写工具；到终态按 `terminalAction` 处理成员文档 |
 | `ki_event_docs` | `event` / `action` / `docs` | `docs`≤50 | **add 会把文档分类改为 `event`，可见性随阶段走** |

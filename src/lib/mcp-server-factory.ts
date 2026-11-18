@@ -24,6 +24,7 @@ import { registerTagListTool } from './mcp-tools/tag-list.js';
 import { registerLifecycleListTool } from './mcp-tools/lifecycle-list.js';
 import { registerEventListTool } from './mcp-tools/event-list.js';
 import { registerEventTypeListTool } from './mcp-tools/event-type-list.js';
+import { registerEventGetTool } from './mcp-tools/event-get.js';
 import { registerEventSetStageTool } from './mcp-tools/event-set-stage.js';
 import { registerEventCreateTool } from './mcp-tools/event-create.js';
 import { registerEventDeleteTool } from './mcp-tools/event-delete.js';
@@ -65,6 +66,8 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
   registerLifecycleListTool(server);
   registerEventListTool(server);
   registerEventTypeListTool(server);
+  /** `ki_event_get`（2026-11-18）：list 用来找、get 用来读；过程与候选正文不返回，见 event-detail.ts 文件头 */
+  registerEventGetTool(server);
   // ── 写工具（13 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
   // ⚠️ 新增写工具必须放在本块内，否则会暴露给只读 Token；
   //    tools/call 侧另有一道白名单拦截（mcp-http.ts::findReadOnlyViolation）兜住缓存/构造调用。

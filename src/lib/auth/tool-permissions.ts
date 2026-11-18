@@ -9,7 +9,7 @@
 import type { Capability } from './capabilities.js';
 
 export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
-  // 读工具（6）
+  // 读工具（10）
   ki_search: 'knowledge.read',
   ki_get_module_info: 'knowledge.read',
   ki_group_list: 'knowledge.read',
@@ -19,6 +19,8 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
   ki_lifecycle_list: 'knowledge.read',
   ki_event_list: 'knowledge.read',
   ki_event_type_list: 'knowledge.read',
+  /** 单事件详情（2026-11-18）：纯读，与 list 同档；不进 CHAT_MCP_TOOLS（事件族整体不在对话工具面） */
+  ki_event_get: 'knowledge.read',
   // 模型消耗型（REQ-20261113-001）：与"读"分离，可单独撤销
   // ⚠️ 本表只服务 **chat 工具循环**；`/mcp` 通道的实际闸门是 scope + readOnly
   //    （`ki_ask` 不进 CHAT_MCP_TOOLS，所以这一行当前是"为将来预留 + 语义完整"）

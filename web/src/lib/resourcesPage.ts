@@ -127,6 +127,11 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_event_list', purpose: '列出事件（编号 / 标题 / 类型 / 当前阶段 / 可见性），按未收口、已收口筛选' },
       { name: 'ki_event_type_list', purpose: '列出事件类型、阶段链（每阶段可见性）与收口动作' },
       {
+        name: 'ki_event_get',
+        purpose: '读单条事件完整详情：描述全文 / 阶段链与当前可见性 / 关联与参考文档（带 group 路径，可直接取正文）/ '
+          + 'AI 分析结论与未确认点 / 已确认代码位置 / 阶段日志；找事件用 ki_event_list',
+      },
+      {
         name: 'ki_ask',
         purpose: '让 ki 用配置的模型回答（内部多轮检索再合成，可用 context_id 追问）；'
           + '消耗模型额度且内容外发上游模型，只读 Token 不可用',

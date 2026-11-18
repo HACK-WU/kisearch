@@ -85,6 +85,8 @@ const READ_MCP_TOOLS = new Set<string>([
   'ki_lifecycle_list',
   'ki_event_list',
   'ki_event_type_list',
+  /** 单事件详情（纯读本地文件：事件 / 分片 / 日志 / 草稿），无 embedding，落 write 串行会被导入阻塞 */
+  'ki_event_get',
   'ki_group_list',
   'ki_search',
   /**

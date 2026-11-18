@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   - TokenRecord.readOnly 的创建 / 兼容 / 严格布尔兜底 / 局部更新
- *   - READ_ONLY_TOOL_NAMES 名单内容与全部工具的关系（读 9 / 写 9 + 1 个模型消耗型 ki_ask）
+ *   - READ_ONLY_TOOL_NAMES 名单内容与全部工具的关系（读 10 / 写见 WRITE_TOOLS + 1 个模型消耗型 ki_ask）
  *   - findReadOnlyViolation：单条、batch、未知工具名（fail-safe）、非 tools/call
  *   - 拒绝文案四要素且不含会误关库级只读的 `ki scope readonly`
  *
@@ -169,12 +169,12 @@ describe('updateToken：scope 与访问模式可独立修改', () => {
 // ─────────────────────────────────────────────
 
 describe('READ_ONLY_TOOL_NAMES：名单内容', () => {
-  it('恰好 9 个读工具，与 9 个写工具互不重叠', () => {
+  it('恰好 10 个读工具，与写工具互不重叠', () => {
     assert.deepEqual(
       [...READ_ONLY_TOOL_NAMES].sort(),
       [
-        'ki_event_list', 'ki_event_type_list', 'ki_get_module_info', 'ki_group_list', 'ki_lifecycle_list',
-        'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list',
+        'ki_event_get', 'ki_event_list', 'ki_event_type_list', 'ki_get_module_info', 'ki_group_list',
+        'ki_lifecycle_list', 'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list',
       ],
     );
     for (const writeTool of WRITE_TOOLS) {
