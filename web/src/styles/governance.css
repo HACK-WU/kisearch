@@ -1641,18 +1641,6 @@
 .gov-ask__title { font-size: 12px; font-weight: 600; color: var(--ki-color-text); }
 .gov-ask__hint { font-size: 11px; color: var(--ki-color-text-subtle); }
 .gov-ask__list { display: flex; flex-direction: column; gap: 8px; }
-.gov-ask__msg { display: flex; }
-.gov-ask__msg--user { justify-content: flex-end; }
-.gov-ask__bubble {
-  max-width: 84%; padding: 7px 10px; border-radius: var(--ki-radius-md);
-  font-size: 12px; line-height: 1.7;
-  background: var(--ki-color-bg-secondary);
-  border: 1px solid var(--ki-color-border);
-  color: var(--ki-color-text);
-}
-.gov-ask__msg--user .gov-ask__bubble {
-  background: var(--ki-color-primary-soft); border-color: transparent; color: var(--ki-color-text);
-}
 /* 追问答案：平铺正文（不套气泡壳 —— 与 AI 对话页助手回答同款呈现） */
 .gov-ask__answer {
   font-size: 12px; line-height: 1.75; color: var(--ki-color-text);
@@ -1677,26 +1665,33 @@
 .gov-ask__answer table { border-collapse: collapse; margin: 6px 0; }
 .gov-ask__answer th, .gov-ask__answer td { border: 1px solid var(--ki-color-border); padding: 3px 7px; }
 
-/* ── 追问过程步骤流（2026-11-19）：平铺、逐步累积、实时滚动（不套气泡壳） ── */
-.gov-ask__steps {
-  max-height: 180px; overflow-y: auto; margin: 2px 0 6px;
-  padding: 2px 0;
-  display: flex; flex-direction: column; gap: 4px;
+/* ── 追问的提问 / 过程（2026-11-19 改版）──
+   过程区**直接复用 AI 分析的排版**（折叠头 `.gov-ai-proc__*` + 步骤 `.gov-ai-step` +
+   思考块 `ThinkingBlock`），回答复用其结论块（`.gov-ai-final`）。
+   这里只补追问侧三件事：提问平铺成一行、过程列表限高内滚、工具结果摘要一行小字。
+   **不套气泡**：追问是卡内执行日志，不是第二个对话页。 */
+.gov-ask__q {
+  display: flex; gap: 7px; align-items: baseline;
+  font-size: 12px; line-height: 1.7; font-weight: 600;
+  color: var(--ki-color-text);
 }
-.gov-ask__step { display: flex; gap: 7px; font-size: 11px; line-height: 1.55; }
-.gov-ask__step-kind {
+.gov-ask__q-mark {
   flex: none; padding: 0 5px; height: 16px; line-height: 16px;
-  border-radius: var(--ki-radius-tag); font-size: 10px; font-weight: 600;
-  color: var(--ki-color-text-subtle); background: var(--ki-color-bg-tertiary);
+  border-radius: var(--ki-radius-tag); font-size: 10px; font-weight: 700;
+  color: var(--ki-color-primary);
+  background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent);
 }
-.gov-ask__step--thinking .gov-ask__step-kind { color: var(--ki-color-primary); }
-.gov-ask__step--tool .gov-ask__step-kind { color: #2e7d32; }
-.gov-ask__step-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.gov-ask__step-label { color: var(--ki-color-text); font-weight: 500; }
-.gov-ask__step-text {
-  color: var(--ki-color-text-subtle); white-space: pre-wrap; word-break: break-word;
-  max-height: 72px; overflow-y: auto;
+.gov-ask__q-text { min-width: 0; word-break: break-word; }
+.gov-ask__proc { display: flex; flex-direction: column; }
+/* 步骤列表限高内滚：长思考不至于把回答挤出可视区（与过程卡同款「内部滚动」） */
+.gov-ask__proc-steps { max-height: 180px; overflow-y: auto; overscroll-behavior: contain; }
+.gov-ask__proc-empty {
+  margin: 0; padding: 5px var(--ki-space-3) 8px;
+  border-top: 1px dashed var(--ki-color-border);
+  font-size: 11px; color: var(--ki-color-text-subtle);
 }
+/* 工具步骤的结果摘要（如「已读取源码片段」）：一行小字，不占思考块的位 */
+.gov-ask__step-text { color: var(--ki-color-text-subtle); word-break: break-word; }
 /* 抽屉遮罩：比弹窗遮罩淡，侧滑抽屉不该像弹窗那样把页面压黑 */
 .gov-drawer-mask {
   position: fixed; inset: 0; z-index: 999;
@@ -1832,7 +1827,6 @@
   .gov-dcard__actions { width: 100%; justify-content: flex-end; flex-wrap: wrap; }
   .gov-ai-embed__scroll { height: auto; max-height: 160px; }
   .gov-codeloc__snip { font-size: 11px; }
-  .gov-ask__msg { max-width: 100%; }
 }
 
 /* ── 批 1 过渡：尚未换成 .gov-dcard__head/__body 的三张卡（代码位置 / 关联 / 参考）
@@ -2411,6 +2405,13 @@
   font-size: 11px; color: var(--ki-color-text-muted);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* 浮层页脚：同文件还有别的确认位置时的提示（不抢 why 的位置，靠右弱色） */
+.gov-peek__siblings {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--ki-color-text-subtle);
+  white-space: nowrap;
+}
 .gov-peek__commit {
   margin-left: auto; flex: none;
   font-family: var(--ki-font-mono); font-size: 10px;
@@ -2425,4 +2426,11 @@
   .gov-chain__kind { grid-column: 2; }
   .gov-chain__body { grid-column: 2; }
   .gov-peek { width: calc(100vw - 24px); }
+}
+/* ── 追问区改版（2026-11-19）：回答块复用 AI 分析「最终结论」的样式 ──
+   必须写在 `.gov-ai-final` 之后：同特异性下后定义才压得住它的外边距与内距；
+   追问是紧跟在过程区后面的回答，不要结论块那圈 10px 上边距。 */
+.gov-ai-final.gov-ask__answer {
+  margin: 2px 0 0;
+  padding: 8px 10px 9px;
 }

@@ -421,6 +421,18 @@ export interface AnalysisStatsDto {
   ms: number;
 }
 
+export type ConclusionNodeKindDto = 'symptom' | 'cause' | 'root' | 'impact' | 'fix';
+
+/** 结论因果链上的一个节点（2026-11-19） */
+export interface ConclusionNodeDto {
+  kind: ConclusionNodeKindDto;
+  text: string;
+  /** `file:line`，仅在指向真实候选时出现 */
+  ref?: string;
+  /** 仅 root 有：触发条件 / 反例 */
+  branches?: string[];
+}
+
 export interface AnalysisDraftDto {
   runId: string;
   bootId?: string;
@@ -429,8 +441,10 @@ export interface AnalysisDraftDto {
   commit: string | null;
   errorCode?: string;
   errorMessage?: string;
-  /** 分析结论；旧数据 / 模型未给出时为 null */
+  /** 分析结论的一句话总结；旧数据 / 模型未给出时为 null */
   conclusion: string | null;
+  /** 结论因果链；旧数据为空数组（此时前端只渲染 conclusion 纯文本） */
+  chain: ConclusionNodeDto[];
   candidates: AnalysisCandidateDto[];
   unconfirmed: string[];
   steps: AnalysisStepDto[];
@@ -467,11 +481,14 @@ export interface AnalysisAskTurnDto {
   /** 硬超时保留部分答案时为 true */
   truncated?: boolean;
   usage?: { promptTokens: number; completionTokens: number };
+  /** 本次追问调用过的工具（去重计数；旧记录无此字段） */
+  toolCalls?: Array<{ name: string; at: number }>;
   context?: {
     conclusionChars: number;
     candidatesUsed: number;
     confirmedUsed: number;
     historyUsed: number;
+    attachedDocsUsed?: { members: number; refs: number };
   };
 }
 

@@ -102,6 +102,15 @@ export const ASK_SOFT_BUDGET_MS = 25_000;
 /** 硬预算：整次问答兜底，到点 abort 上游并用已累积内容作答 */
 export const ASK_HARD_BUDGET_MS = 45_000;
 
+/**
+ * 事件「追问这次分析」的工具循环轮次上限（2026-11-19 追问带工具再调查）。
+ *
+ * 与 `ASK_MAX_ROUNDS_DEFAULT`（`ki_ask`，6 轮）分开：追问是针对**单条已定稿分析**的轻调查，
+ * 5 轮足够；且它的上下文已含结论/候选，不需要像 `ki_ask` 那样穷举。
+ * 达上限走"移除 tools 强制作答"路径（与 tool-loop 的 DSML 收口同口径），不是截断。
+ */
+export const ASK_TOOL_MAX_ROUNDS = 5;
+
 /** `runAsk` 入参 */
 export interface AskInput {
   /** 单个知识库名（S-02 已校验形态与存在性；一期不接受视图名/逗号多库） */

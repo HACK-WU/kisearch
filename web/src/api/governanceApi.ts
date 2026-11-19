@@ -12,6 +12,7 @@
 import type {
   AnalysisAskTurnDto,
   AnalysisDraftDto,
+  ConclusionNodeDto,
   ConfirmedCodeLocationDto,
   EventAnalysisDto,
   RefCandidateDto,
@@ -211,13 +212,15 @@ export interface EventListResponse {
 
 export function listEvents(
   scope: string,
-  opts: { status?: 'open' | 'closed' | 'all'; type?: string; q?: string; limit?: number; offset?: number } = {},
+  opts: { status?: 'open' | 'closed' | 'all'; type?: string; q?: string; limit?: number; offset?: number; includePinned?: boolean } = {},
 ): Promise<EventListResponse> {
   const params = new URLSearchParams({ scope, status: opts.status ?? 'open' });
   if (opts.type) params.set('type', opts.type);
   if (opts.q) params.set('q', opts.q);
   if (opts.limit) params.set('limit', String(opts.limit));
   if (opts.offset) params.set('offset', String(opts.offset));
+  // 置顶免疫状态/类型筛选（2026-11-19）：仅事件页开启，其他调用方不受影响
+  if (opts.includePinned) params.set('includePinned', '1');
   return req<EventListResponse>(`/api/governance/events?${params.toString()}`);
 }
 
@@ -526,6 +529,8 @@ export interface EventDetail {
 
 export type AnalysisDraft = AnalysisDraftDto;
 export type ConfirmedCodeLocation = ConfirmedCodeLocationDto;
+/** 结论因果链节点（2026-11-19）：`draft.chain` 的元素类型 */
+export type ConclusionNode = ConclusionNodeDto;
 export type EventAnalysis = EventAnalysisDto;
 export type AnalysisAskTurn = AnalysisAskTurnDto;
 
@@ -671,9 +676,13 @@ export async function askEventAnalysisStream(
       if (line) {
         try {
           const payload = JSON.parse(line.slice(6)) as {
-            type: string; text?: string; turn?: AnalysisAskTurn; message?: string; code?: string;
+            type: string; text?: string; name?: string; label?: string; step?: AskStep;
+            turn?: AnalysisAskTurn; message?: string; code?: string;
           };
           if (payload.type === 'delta') onDelta(payload.text ?? '');
+          else if (payload.type === 'step' && payload.step && onEvent) onEvent({ type: 'step', step: payload.step });
+          else if (payload.type === 'tool' && onEvent) onEvent({ type: 'tool', name: payload.name ?? '', label: payload.label ?? '' });
+          else if (payload.type === 'thinking' && onEvent) onEvent({ type: 'thinking', text: payload.text ?? '' });
           else if (payload.type === 'done' && payload.turn) doneTurn = payload.turn;
           else if (payload.type === 'error') {
             errMessage = payload.message ?? '追问失败';

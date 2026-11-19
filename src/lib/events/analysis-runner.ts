@@ -46,6 +46,7 @@ import { executeQueryGroup } from '../../query-group.js';
 import { executeTagList } from '../../tag.js';
 import { withTimeout, TOOL_TIMEOUT } from '../mcp-tools/util.js';
 import { collectMembers } from './event-service.js';
+import { normalizeChain, pruneChainRefs } from './conclusion-chain.js';
 import { readRefs } from './refs-store.js';
 import { readStageLogs } from './stage-log.js';
 import { findEventIn, getEventsDir, readAllEvents } from './store.js';
@@ -88,7 +89,15 @@ import type {
  * 最坏情况是一轮请求超时后按 `fatalError` 收尾，而不是整次分析被静默砍掉。
  */
 const ANALYSIS_REQUEST_TIMEOUT_MS = 300_000;
-const ANALYSIS_TOOL_RESPONSE_CHARS = 10_000;
+/** 工具响应序列化上限（2026-11-19 追问 runner 复用，故导出） */
+export const ANALYSIS_TOOL_RESPONSE_CHARS = 10_000;
+/**
+ * 达轮次上限时"移除 tools 强制作答"的收口提示（与 tool-loop 的同义提示一致，2026-11-19 追问复用）。
+ * 引导模型把 DSML 工具调用意图引回正常文本作答，避免答案变成 `<｜｜DSML｜｜invoke>` 标记。
+ */
+export const DSML_FORCE_ANSWER_SYSTEM = '本轮已达到检索轮次上限，**不再提供任何工具**。'
+  + '请立即基于上文已获得的信息直接作答；信息不足时明确说明缺什么。'
+  + '禁止输出工具调用、函数调用或任何自定义标记，只输出给用户看的答案正文。';
 /**
  * 运行中思考的增量落盘节流（2026-11-18）。
  *
@@ -179,9 +188,20 @@ const SYSTEM_OUTPUT_TAIL = `【系统输出与安全规范（不可覆盖）】
 4. confidence 口径：0.9 以上 = 读到具体分支/条件并能复述触发条件；0.7–0.9 = 读到调用链但缺最后一环；
    0.5–0.7 = 只确认符号存在与位置；0.5 以下一律不要写进 candidates，改写成 unconfirmed 的一条。
 5. 当证据足够或达到预算上限停止调用工具时，最终回复**只输出一个合法 JSON 对象**（不要附加多余解释文字）。
-   下方只是**字段示意**，不是「至少一条」的要求：candidates 的条数完全由证据决定，允许为 0。格式如下：
+   下方只是**字段示意**，不是「至少一条」的要求：candidates 的条数完全由证据决定，允许为 0。
+6. chain 与 conclusion 里提到代码位置时，一律用反引号包住**相对路径**（有行号就写 \`src/a.ts:128\`）：
+   前端会把能对上已验证位置的反引号片段渲染成可点开的代码位置，写成裸文本就只是普通文字。
+   \`ref\` 字段可选（只放最相关的一处），正文里提到的其他位置照常写反引号即可。
+   格式如下：
 {
-  "conclusion": "结论性文字：说明根因判断、影响面与建议方向，不超过 300 字；不要粘贴代码块；未定位到时写明已排查方向，不要留空",
+  "conclusion": "一句话总结（≤120 字）：根因是什么、影响多大、往哪修；不要粘贴代码块；未定位到时写明已排查方向，不要留空",
+  "chain": [
+    { "kind": "symptom", "text": "现象：用户看到的具体异常（≤200 字）" },
+    { "kind": "cause", "text": "直接原因：哪段逻辑的什么行为导致的（≤200 字）", "ref": "src/auth/guard.ts:128" },
+    { "kind": "root", "text": "根本原因：为什么会写成这样（≤200 字）", "branches": ["触发条件或反例（≤120 字）"] },
+    { "kind": "impact", "text": "影响面：坏在谁身上、严重到什么程度（≤200 字）" },
+    { "kind": "fix", "text": "建议方向：一到两条，不写完整补丁（≤200 字）" }
+  ],
   "candidates": [
     {
       "file": "相对目标根目录的文件路径，如 src/auth/guard.ts",
@@ -194,7 +214,12 @@ const SYSTEM_OUTPUT_TAIL = `【系统输出与安全规范（不可覆盖）】
   "unconfirmed": [
     "未能证实的线索或缺失调用点说明（若无则空数组）"
   ]
-}`;
+}
+6. **chain 的写法**：2~5 个节点，顺序固定为 symptom（现象）→ cause（直接原因）→ root（根本原因）→ impact（影响面）→ fix（建议）；
+   缺哪一层就跳过（没找到根因就不要硬造一层），最多 5 个。每个节点只用**一句话**，不换行、不写代码块，
+   可以用反引号包裹符号名（如 onDelete）。ref 只能填**本轮 candidates 里的位置**（文件:行号），
+   填不出来就省略整个字段；branches 只有 root 允许，最多 3 条（写触发条件或反例）。
+   完全没定位到时 chain 输出空数组，不要为了凑格式编节点。`;
 
 /**
  * 「运行环境」段：把目标目录与**本次实际可用**的工具告诉模型。
@@ -300,7 +325,11 @@ export function buildLightEventContext(args: {
   ].join('\n');
 }
 
-function buildKbReadToolEntries(
+/**
+ * 知识库只读工具装配（2026-11-19 追问带工具再调查：导出供追问 runner 复用）。
+ * ⚠️ 与 AI 分析共用同一份实现，避免 scope 注入 / OperationCoordinator 细节漂移。
+ */
+export function buildKbReadToolEntries(
   scope: string,
   config: KiConfig,
   deps?: AnalysisRunnerDeps,
@@ -496,6 +525,7 @@ function isTargetRepoSyncing(config: KiConfig, realRoot: string): boolean {
 
 function parseJsonSummary(text: string): {
   conclusion: string | null;
+  chain: ReturnType<typeof normalizeChain>;
   candidates: Array<{ file: string; line: number; endLine?: number; why: string; confidence: number }>;
   unconfirmed: string[];
 } | null {
@@ -517,6 +547,12 @@ function parseJsonSummary(text: string): {
     const conclusion = typeof rawConclusion === 'string'
       ? (rawConclusion.replace(/```[\s\S]*?```/g, '').trim().slice(0, 2000) || null)
       : null;
+    /*
+     * 因果链：模型输出是不可信输入，逐项校验在 conclusion-chain 里统一做
+     * （类型白名单 / 一句话 / ref 形状 / 分支只挂根因 / 节点上限）。
+     * 这里只兜空：`chain` 缺失或全不合法 → `[]`，前端据此回退纯文本结论。
+     */
+    const chain = normalizeChain(parsed.chain);
     const rawCands = Array.isArray(parsed.candidates) ? parsed.candidates : [];
     const candidates: Array<{ file: string; line: number; endLine?: number; why: string; confidence: number }> = [];
     for (const item of rawCands) {
@@ -540,7 +576,7 @@ function parseJsonSummary(text: string): {
     const unconfirmed = Array.isArray(parsed.unconfirmed)
       ? parsed.unconfirmed.map((u) => String(u ?? '').trim()).filter(Boolean)
       : [];
-    return { conclusion, candidates, unconfirmed };
+    return { conclusion, chain, candidates, unconfirmed };
   } catch {
     return null;
   }
@@ -662,6 +698,7 @@ export async function startEventAnalysis(
     targetDir: realRoot,
     commit,
     conclusion: null,
+    chain: [],
     candidates: [],
     unconfirmed: [],
     steps: [contextStep],
@@ -1086,6 +1123,11 @@ async function executeAnalysisBackground(input: {
       ...(errorCode ? { errorCode } : {}),
       ...(errorMessage ? { errorMessage } : {}),
       conclusion: parsed?.conclusion ?? null,
+      /*
+       * 结论链的 ref 必须在**二次校验之后**剪一遍：解析时还不知道哪些候选是幻觉，
+       * 直接落库会留下点开是空的胶囊（见 pruneChainRefs 注释）。
+       */
+      chain: pruneChainRefs(parsed?.chain ?? [], verifiedCandidates),
       candidates: verifiedCandidates,
       unconfirmed: [...new Set(unconfirmed)],
       steps: [...steps],

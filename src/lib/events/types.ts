@@ -204,6 +204,29 @@ export interface AnalysisStats {
   ms: number;
 }
 
+/**
+ * 「分析结论」因果链的节点类型（2026-11-19）。数组顺序即阅读顺序：
+ * 现象 → 直接原因 → 根本原因 → 影响面 → 建议；缺哪层就跳过，不硬造。
+ */
+export type ConclusionNodeKind = 'symptom' | 'cause' | 'root' | 'impact' | 'fix';
+
+/**
+ * 结论链上一个节点。
+ *
+ * 引入原因：`conclusion` 曾是一段 300 字散文（根因 + 影响 + 修复方向揉在一起），
+ * 读者要自己切分，且没有任何位置可以挂代码引用。分层后每层一句话，
+ * 前端的因果链渲染（竖轨 + 类型标签）才有数据可用。
+ */
+export interface ConclusionNode {
+  kind: ConclusionNodeKind;
+  /** 一句话（≤200 字，不含换行）；可用反引号包裹符号名，禁止代码块 */
+  text: string;
+  /** 位置引用 `file:line`（相对 targetDir）；必须指向本轮真实候选，见 pruneChainRefs */
+  ref?: string;
+  /** 只允许挂在 root：触发条件 / 反例（≤3 条，每条 ≤120 字） */
+  branches?: string[];
+}
+
 export interface AnalysisDraft {
   runId: string;
   bootId?: string;
@@ -213,10 +236,16 @@ export interface AnalysisDraft {
   errorCode?: string;
   errorMessage?: string;
   /**
-   * 分析结论（根因判断 + 影响 + 建议方向，不含代码块）。
-   * 旧文件或模型未给出时为 null；解析层硬上限 2000 字（模板要求 ≤300）。
+   * 分析结论的**一句话总结**（根因是什么 + 影响多大 + 往哪修，模板要求 ≤120 字）。
+   * 旧文件或模型未给出时为 null；解析层硬上限 2000 字兜底。
+   * 细节看 `chain`；`chain` 为空时前端仍按纯文本渲染本字段（老事件兼容）。
    */
   conclusion: string | null;
+  /**
+   * 结论的因果链（2026-11-19）：2~5 个节点。
+   * 旧文件没有该字段 → 读盘归一为 `[]`，前端回退渲染 `conclusion` 纯文本。
+   */
+  chain: ConclusionNode[];
   /**
    * **运行中当前这一轮**的思考实时片段（2026-11-18）。
    *
@@ -266,11 +295,15 @@ export interface AnalysisAskTurn {
   /** 硬超时保留部分答案时为 true（有内容就不算失败） */
   truncated?: boolean;
   usage?: { promptTokens: number; completionTokens: number };
+  /** 本次追问调用过的工具（去重计数，仅审计/回看；不落工具响应正文） */
+  toolCalls?: Array<{ name: string; at: number }>;
   context?: {
     conclusionChars: number;
     candidatesUsed: number;
     confirmedUsed: number;
     historyUsed: number;
+    /** 已挂文档清单条数（决策 C 的审计字段） */
+    attachedDocsUsed?: { members: number; refs: number };
   };
 }
 

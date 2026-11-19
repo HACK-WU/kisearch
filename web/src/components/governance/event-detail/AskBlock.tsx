@@ -6,15 +6,22 @@ import {
   GovernanceApiError,
   listEventAnalysisAsk,
   type AnalysisAskTurn,
+  type AskStep,
 } from '@/api/governanceApi';
+import { MarkdownPreview } from '@/components/MarkdownPreview';
+import { ThinkingBlock } from '../ToolCallRow';
 
 /**
  * 追问这次分析（2026-11-17 · 批 6 / B2 前端，真机走查后补：流式输出）。
+ * 2026-11-19 改版：**过程与回答直接复用 AI 分析的展示与逻辑**，不再用对话气泡。
  *
  * 检查点：H-01~H-13。
  * · **流式**：`POST /analysis/ask/stream`（SSE over fetch），拿到一段渲染一段；
  *   流不可用（旧后端 / 代理缓冲）且一字未收到时，自动回退到普通 POST，用户无感；
- * · 记录服务端持久化（M-06），刷新/换设备仍在（H-06）；
+ * · **不是聊天窗口**：提问平铺成一行（无气泡）；过程复用 AI 分析的过程区
+ *   （折叠头 + 步骤列表 + 思考块 + 贴底跟随）；回答复用其结论块（`.gov-ai-final`）。
+ *   追问是"卡内执行日志 + 回答"，套气泡会让人以为这里是第二个对话页；
+ * · 过程步骤只在**本会话**保留（不落盘），刷新后由服务端记录接管答案（H-06）；
  * · 回车发送 + `isComposing` 保护（中文选词回车不误发，H-04/H-05）；
  * · 请求序号 + `eventId` 闭包：切事件后晚到的增量直接丢弃（H-13）；
  * · 能看历史 ≠ 能提问：提问看 `canAsk`（knowledge.ask，viewer 也有），清空看 `canWrite`。
@@ -33,6 +40,11 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
   const [turns, setTurns] = useState<AnalysisAskTurn[]>([]);
   /** 正在流式输出的这一轮（先上屏问题，再逐段填答案） */
   const [pending, setPending] = useState<{ question: string; answer: string } | null>(null);
+  /** 本轮过程步骤（按 id upsert，累积展示，像 AI 分析过程区那样实时增长） */
+  const [steps, setSteps] = useState<AskStep[]>([]);
+  const stepsRef = useRef<AskStep[]>([]);
+  /** 已完成追问的过程快照（按 turn id；本会话内保留，刷新后由服务端记录接管答案） */
+  const [turnSteps, setTurnSteps] = useState<Record<string, AskStep[]>>({});
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -51,7 +63,7 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
 
   useEffect(() => { void load(); }, [load]);
 
-  // 新内容到达时贴底（只在已贴底时跟随，避免打断回看）
+  // 新内容到达时贴底（只在已贴底时跟随，避免打断回看）；过程区内部自己贴底（AskProcess）
   useEffect(() => {
     const el = listRef.current;
     if (!el) return;
@@ -67,6 +79,8 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
     setError('');
     setQuestion('');
     setPending({ question: text, answer: '' });
+    stepsRef.current = [];
+    setSteps([]);
 
     let received = '';
     try {
@@ -77,10 +91,35 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
         if (seqRef.current !== seq) return;
         received += delta;
         setPending({ question: text, answer: received });
+      }, (event) => {
+        if (seqRef.current !== seq) return;
+        if (event.type === 'step') {
+          // 同 id upsert：后端传的是累积全文，直接覆盖
+          const next = [...stepsRef.current];
+          const idx = next.findIndex((s) => s.id === event.step.id);
+          if (idx >= 0) next[idx] = event.step;
+          else next.push(event.step);
+          stepsRef.current = next;
+          setSteps(next);
+        } else if (event.type === 'tool' || event.type === 'thinking') {
+          // 旧后端原子事件兜底（没有 step 时至少能提示在动）
+          if (stepsRef.current.length === 0) {
+            const fallback: AskStep = event.type === 'tool'
+              ? { id: `fb-tool-${event.name}`, kind: 'tool', label: event.label || event.name, text: '正在查证据…', at: Date.now() }
+              : { id: 'fb-think', kind: 'thinking', label: '思考中', text: event.text, at: Date.now() };
+            stepsRef.current = [fallback];
+            setSteps([fallback]);
+          }
+        }
       });
       if (seqRef.current !== seq) return;
+      if (stepsRef.current.length > 0) {
+        setTurnSteps((prev) => ({ ...prev, [res.turn.id]: stepsRef.current }));
+      }
       setTurns((prev) => [...prev, res.turn]);
       setPending(null);
+      stepsRef.current = [];
+      setSteps([]);
     } catch (err) {
       if (seqRef.current !== seq) return;
       // 一字未收到 → 回退普通 POST（兼容不支持流式/代理缓冲的环境）
@@ -138,7 +177,7 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       <div className="gov-ask__head">
         <span className="gov-ask__icon" aria-hidden="true">◌</span>
         <span className="gov-ask__title">追问这次分析</span>
-        <span className="gov-ask__hint">只基于本次分析结果回答，不会重新读仓库</span>
+        <span className="gov-ask__hint">可调用只读工具重新核查（源码 / 知识库）</span>
         <span style={{ flex: 1 }} />
         <button
           type="button"
@@ -155,28 +194,22 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
         <div className="gov-ask__list" ref={listRef}>
           {turns.map((t) => (
             <div key={t.id} className="gov-ask__thread">
-              <div className="gov-ask__msg gov-ask__msg--user">
-                <div className="gov-ask__bubble">{t.question}</div>
-              </div>
-              <div className="gov-ask__msg">
-                <div className="gov-ask__bubble">
-                  {t.answer}
-                  {t.truncated ? <span className="gov-hint">（回答超时，已保留已完成部分）</span> : null}
-                </div>
-              </div>
+              <AskQuestion text={t.question} />
+              {/* key 必须带轮次 id：否则 pending → 完成时 React 会复用同一实例，展开态卡在上一次的 true */}
+              {turnSteps[t.id]?.length ? (
+                <AskProcess key={`${t.id}-proc`} steps={turnSteps[t.id]!} running={false} />
+              ) : null}
+              <AskAnswer text={t.answer} truncated={t.truncated} />
+              {t.toolCalls && t.toolCalls.length > 0 && !turnSteps[t.id]?.length ? (
+                <div className="gov-ask__audit gov-hint">本次查证：{t.toolCalls.length} 次工具调用</div>
+              ) : null}
             </div>
           ))}
           {pending ? (
             <div className="gov-ask__thread">
-              <div className="gov-ask__msg gov-ask__msg--user">
-                <div className="gov-ask__bubble">{pending.question}</div>
-              </div>
-              <div className="gov-ask__msg">
-                <div className="gov-ask__bubble">
-                  {pending.answer || '正在基于本次分析结果作答…'}
-                  {pending.answer ? <span className="gov-ask__cursor" aria-hidden="true" /> : null}
-                </div>
-              </div>
+              <AskQuestion text={pending.question} />
+              <AskProcess key="pending-proc" steps={steps} running />
+              {pending.answer ? <AskAnswer text={pending.answer} streaming /> : null}
             </div>
           ) : null}
         </div>
@@ -210,6 +243,110 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       </div>
 
       {error ? <span className="gov-error">{error}</span> : null}
+    </div>
+  );
+}
+
+/** 提问行：平铺成一行（**不套气泡**）—— 追问区是卡内执行日志，不是聊天窗口 */
+function AskQuestion({ text }: { text: string }): JSX.Element {
+  return (
+    <div className="gov-ask__q">
+      <span className="gov-ask__q-mark" aria-hidden="true">问</span>
+      <span className="gov-ask__q-text">{text}</span>
+    </div>
+  );
+}
+
+/**
+ * 一轮追问的过程区：**直接复用 AI 分析的过程区**（折叠头 + 步骤列表 + 思考块 + 贴底跟随）。
+ *
+ * 只做两件追问侧的事：
+ * · 不套 `.gov-ai-embed` 那层卡片 —— 追问区自己已是容器，再套一层就成了气泡；
+ * · 过滤 `answer` 步骤 —— 它的正文就是下方回答，渲染出来会重复一遍。
+ *
+ * 展开逻辑与分析卡一致：运行中展开并贴底；一轮结束组件重挂，`open` 初值 false 即自动收起
+ * （留折叠头「N 步 · M 次工具调用 / 查看过程」，想看再点开）。
+ */
+function AskProcess({ steps, running }: { steps: AskStep[]; running: boolean }): JSX.Element | null {
+  const [open, setOpen] = useState(running);
+  const listRef = useRef<HTMLOListElement>(null);
+  /** 用户是否贴着底部（回看时不让新步骤把视图拽回去） */
+  const stickRef = useRef(true);
+  const visible = steps.filter((s) => s.kind !== 'answer');
+  const toolCount = visible.filter((s) => s.kind === 'tool').length;
+  /** 只在最后一轮仍在生成的思考上标「思考中 ◐」，已定稿的不标（与分析卡同口径） */
+  const liveThinking = running && visible.length > 0 && visible[visible.length - 1]!.kind === 'thinking'
+    ? visible[visible.length - 1]!.id
+    : null;
+
+  useEffect(() => {
+    if (!running) return;
+    const el = listRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [running, steps]);
+
+  // 已完成的轮次且没有过程（老记录 / 回退到非流式）：整块不渲染
+  if (visible.length === 0 && !running) return null;
+
+  return (
+    <div className="gov-ask__proc">
+      <button
+        type="button"
+        className="gov-ai-proc__head"
+        aria-expanded={open}
+        title={open ? '收起过程' : '展开过程'}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="gov-ai-proc__spin" data-done={running ? undefined : ''} />
+        <span className="gov-ai-proc__title">{running ? '正在核对结论与证据…' : '本轮过程'}</span>
+        <span className="gov-ai-proc__time">
+          {running ? `已走 ${visible.length} 步` : `${visible.length} 步 · ${toolCount} 次工具调用`}
+        </span>
+        <span className="gov-ai-proc__toggle">{open ? '收起' : '查看过程'}</span>
+        <span className="gov-ai-proc__chev" aria-hidden="true">▾</span>
+      </button>
+
+      {open ? (
+        visible.length > 0 ? (
+          <ol
+            className="gov-ai-proc__steps gov-ask__proc-steps"
+            ref={listRef}
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
+            }}
+          >
+            {visible.map((s) => (
+              <li key={s.id} className="gov-ai-step is-done">
+                <span className="gov-ai-step__mark" aria-hidden="true">✓</span>
+                <div className="gov-ai-step__body">
+                  <span className="gov-ai-step__text"><b>{s.label}</b></span>
+                  {s.kind === 'thinking' ? (
+                    <ThinkingBlock text={s.text} live={s.id === liveThinking} />
+                  ) : s.text ? (
+                    <span className="gov-ask__step-text">{s.text}</span>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="gov-ask__proc-empty">正在读取事件上下文与已确认位置…</p>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+/** 回答块：复用 AI 分析「最终结论」的排版（`.gov-ai-final`），正文仍走 Markdown */
+function AskAnswer(props: { text: string; truncated?: boolean; streaming?: boolean }): JSX.Element {
+  const { text, truncated, streaming } = props;
+  return (
+    <div className="gov-ai-final gov-ask__answer">
+      <div className="gov-ai-final__head">回答</div>
+      <MarkdownPreview text={text} deferMermaid />
+      {streaming ? <span className="gov-ask__cursor" aria-hidden="true" /> : null}
+      {truncated ? <span className="gov-hint">（回答超时，已保留已完成部分）</span> : null}
     </div>
   );
 }

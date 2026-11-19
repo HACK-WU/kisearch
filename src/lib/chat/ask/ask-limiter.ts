@@ -32,24 +32,12 @@ const ASK_CONCURRENT_MAX = 2;
 const ASK_BUSY_RETRY_SEC = 5;
 
 /** 运行时阈值（测试可覆盖，生产用上面的常量） */
-interface LimiterConfig {
+export interface LimiterConfig {
   windowMs: number;
   rateMax: number;
   concurrentMax: number;
 }
 
-let config: LimiterConfig = {
-  windowMs: ASK_RATE_WINDOW_MS,
-  rateMax: ASK_RATE_MAX,
-  concurrentMax: ASK_CONCURRENT_MAX,
-};
-
-/** `(principalKey, scope)` → 窗口内的时间戳 */
-const windows = new Map<string, number[]>();
-/** 全局在途计数 */
-let inFlight = 0;
-/** 每 N 次准入顺带清扫一次其它 key，避免 Map 随调用方数量无界增长 */
-let sinceSweep = 0;
 const SWEEP_EVERY = 50;
 
 export type AskLimitDecision =
@@ -61,79 +49,112 @@ function keyOf(principalKey: string, scope: string): string {
 }
 
 /** 丢弃窗口外的戳（原地裁剪） */
-function prune(list: number[], now: number): void {
-  const cutoff = now - config.windowMs;
+function prune(list: number[], now: number, windowMs: number): void {
+  const cutoff = now - windowMs;
   let i = 0;
   while (i < list.length && list[i]! <= cutoff) i += 1;
   if (i > 0) list.splice(0, i);
 }
 
 /** 清扫所有 key 的空窗口（Map 无界增长的兜底） */
-function sweep(now: number): void {
+function sweep(windows: Map<string, number[]>, now: number, windowMs: number): void {
   for (const [key, list] of windows) {
-    prune(list, now);
+    prune(list, now, windowMs);
     if (list.length === 0) windows.delete(key);
   }
 }
 
+export interface AskLimiter {
+  acquire(principalKey: string, scope: string): AskLimitDecision;
+  release(): void;
+  inFlight(): number;
+  resetForTest(override?: Partial<LimiterConfig>): void;
+}
+
 /**
- * 申请一个问答槽位。
+ * 创建一个独立的问答限流器。
  *
- * ⚠️ 成功返回后**必须**在 `finally` 里调用 `releaseAskSlot()` —— 否则并发计数泄漏，
- *    最终所有调用都会被判 `ASK_BUSY`（S-02 §8 有专门的异常路径用例）。
+ * 2026-11-19：追问（事件分析）从 `ki_ask` 共享闸独立出来 —— 带工具后单次重得多，
+ * 共享会互相挤占。默认实例（`askLimiter`）仍服务 `ki_ask`，其导出 API 不变 ⇒ 零改动。
  */
-export function acquireAskSlot(principalKey: string, scope: string): AskLimitDecision {
-  const now = Date.now();
-
-  // ① 并发闸门优先：并发满时不必再看窗口（避免给调用方错误归因）
-  if (inFlight >= config.concurrentMax) {
-    return { ok: false, code: 'ASK_BUSY', retryAfterSec: ASK_BUSY_RETRY_SEC };
-  }
-
-  // ② 频率闸门
-  const key = keyOf(principalKey, scope);
-  const list = windows.get(key) ?? [];
-  prune(list, now);
-  if (list.length >= config.rateMax) {
-    windows.set(key, list);
-    const oldest = list[0] ?? now;
-    const retryAfterSec = Math.max(1, Math.ceil((oldest + config.windowMs - now) / 1000));
-    return { ok: false, code: 'ASK_RATE_LIMITED', retryAfterSec };
-  }
-
-  list.push(now);
-  windows.set(key, list);
-  inFlight += 1;
-
-  sinceSweep += 1;
-  if (sinceSweep >= SWEEP_EVERY) {
-    sinceSweep = 0;
-    sweep(now);
-  }
-  return { ok: true };
-}
-
-/** 释放并发槽位（**窗口计数不回滚**：已发生的调用就该占额度） */
-export function releaseAskSlot(): void {
-  if (inFlight > 0) inFlight -= 1;
-}
-
-/** 当前在途数（供审计与单测断言） */
-export function askInFlight(): number {
-  return inFlight;
-}
-
-/**
- * 单测用：重置窗口与并发计数，并可覆盖阈值。
- * ⚠️ 生产代码**不得**调用 —— 它会让限流形同虚设。
- */
-export function resetAskLimiterForTest(override?: Partial<LimiterConfig>): void {
-  windows.clear();
-  inFlight = 0;
-  sinceSweep = 0;
-  config = {
-    windowMs: override?.windowMs ?? ASK_RATE_WINDOW_MS,
-    rateMax: override?.rateMax ?? ASK_RATE_MAX,
-    concurrentMax: override?.concurrentMax ?? ASK_CONCURRENT_MAX,
+export function createAskLimiter(initial?: Partial<LimiterConfig>): AskLimiter {
+  let config: LimiterConfig = {
+    windowMs: initial?.windowMs ?? ASK_RATE_WINDOW_MS,
+    rateMax: initial?.rateMax ?? ASK_RATE_MAX,
+    concurrentMax: initial?.concurrentMax ?? ASK_CONCURRENT_MAX,
   };
+  /** `(principalKey, scope)` → 窗口内的时间戳 */
+  const windows = new Map<string, number[]>();
+  let inFlight = 0;
+  let sinceSweep = 0;
+
+  return {
+    acquire(principalKey, scope): AskLimitDecision {
+      const now = Date.now();
+
+      // ① 并发闸门优先：并发满时不必再看窗口（避免给调用方错误归因）
+      if (inFlight >= config.concurrentMax) {
+        return { ok: false, code: 'ASK_BUSY', retryAfterSec: ASK_BUSY_RETRY_SEC };
+      }
+
+      // ② 频率闸门
+      const key = keyOf(principalKey, scope);
+      const list = windows.get(key) ?? [];
+      prune(list, now, config.windowMs);
+      if (list.length >= config.rateMax) {
+        windows.set(key, list);
+        const oldest = list[0] ?? now;
+        const retryAfterSec = Math.max(1, Math.ceil((oldest + config.windowMs - now) / 1000));
+        return { ok: false, code: 'ASK_RATE_LIMITED', retryAfterSec };
+      }
+
+      list.push(now);
+      windows.set(key, list);
+      inFlight += 1;
+
+      sinceSweep += 1;
+      if (sinceSweep >= SWEEP_EVERY) {
+        sinceSweep = 0;
+        sweep(windows, now, config.windowMs);
+      }
+      return { ok: true };
+    },
+
+    /** 释放并发槽位（**窗口计数不回滚**：已发生的调用就该占额度） */
+    release(): void {
+      if (inFlight > 0) inFlight -= 1;
+    },
+
+    inFlight(): number {
+      return inFlight;
+    },
+
+    /** 单测用：重置窗口与并发计数，并可覆盖阈值。⚠️ 生产代码不得调用。 */
+    resetForTest(override?: Partial<LimiterConfig>): void {
+      windows.clear();
+      inFlight = 0;
+      sinceSweep = 0;
+      config = {
+        windowMs: override?.windowMs ?? ASK_RATE_WINDOW_MS,
+        rateMax: override?.rateMax ?? ASK_RATE_MAX,
+        concurrentMax: override?.concurrentMax ?? ASK_CONCURRENT_MAX,
+      };
+    },
+  };
+}
+
+/** 默认实例：服务 `ki_ask`，行为与重构前逐字节一致 */
+export const askLimiter = createAskLimiter();
+
+export function acquireAskSlot(principalKey: string, scope: string): AskLimitDecision {
+  return askLimiter.acquire(principalKey, scope);
+}
+export function releaseAskSlot(): void {
+  askLimiter.release();
+}
+export function askInFlight(): number {
+  return askLimiter.inFlight();
+}
+export function resetAskLimiterForTest(override?: Partial<LimiterConfig>): void {
+  askLimiter.resetForTest(override);
 }

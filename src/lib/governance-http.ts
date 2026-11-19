@@ -975,6 +975,27 @@ export async function handleGovernanceRoutes(
         return sendJson(res, 200, { ok: true, scope, ...outcome });
       }
 
+      /*
+       * 置顶 / 取消置顶（2026-11-19）。幂等：已在目标态直接 200。
+       * 缺省 `pinned=true`（POST 到 /pin 就是置顶），显式传 false 才取消 ——
+       * 这样 curl 手敲一次不带 body 也能用。
+       * 不要求 revision：置顶不是内容变更，不该被乐观锁挡（详见 setEventPinned 注释）。
+       */
+      if (id && segs[2] === 'pin' && method === 'POST' && !segs[3]) {
+        const b = await body();
+        const scope = scopeFromBody(b);
+        const event = await setEventPinned(scope, id, b.pinned !== false);
+        return sendJson(res, 200, {
+          ok: true,
+          scope,
+          event,
+          pinned: event.pinnedAt !== undefined,
+          hint: event.pinnedAt !== undefined
+            ? `已将事件 #${event.shortId}「${event.title}」置顶`
+            : `已取消置顶事件 #${event.shortId}「${event.title}」`,
+        });
+      }
+
       // ─── 关联文档（事件成员）───
       if (id && segs[2] === 'members') {
         if (method === 'POST' && !segs[3]) {
