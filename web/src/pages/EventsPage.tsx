@@ -31,7 +31,7 @@ import { getDocContent } from '@/api/httpApi';
 import {
   addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
   listEventTypes, listEvents, listRefs, removeConfirmedCodeLocation, removeMember, removeRef,
-  reopenEvent, setEventStage, updateEvent, updateEventType,
+  reopenEvent, setEventPinned, setEventStage, updateEvent, updateEventType,
   REF_LIMIT,
   GovernanceApiError,
   type EventAnalysis, type EventDetail, type EventTypeView, type EventView, type RefItem, type StagePatch,

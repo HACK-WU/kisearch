@@ -167,3 +167,43 @@ describe('⑧ 换库清理选中态（2026-11-19）', () => {
     assert.match(page, /它可能已被删除，或不在当前知识库「\$\{scope\}」中/);
   });
 });
+
+describe('⑨ 深链兜底只判一次（2026-11-19 误报修复）', () => {
+  /*
+   * 真机 Bug：带 `?event=<已收口事件>` 进页面后切「未收口」，先把用户筛选弹回「全部」，
+   * 再在「筛选刚切、列表还是旧的一份」的中间态上重判 → 误报「事件可能已被删除」。
+   * 修法：判定做完就置 `deepLinkWarned`（找到也置），且不再自动放宽筛选。
+   * 复现与证据见 `.debug/events-filter-deeplink-20261119/`。
+   */
+  /*
+   * 取「判定入口 → 依赖数组」这整段，而不是固定长度切片：切片越界会把后面 effect 的
+   * `setStatus(` 一起算进来，让「不改筛选」这条断言假红。
+   */
+  const effectStart = page.indexOf('if (!entryDeepLink || deepLinkWarned.current || events.length === 0) return;');
+  const effectMatch = effectStart < 0
+    ? null
+    : page.slice(effectStart).match(/^[\s\S]*?\n\s*\}, \[([^\]]*)\]\);/);
+  const effectBlock = effectMatch?.[0] ?? '';
+  const effectDeps = (effectMatch?.[1] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+
+  it('能定位深链兜底 effect', () => {
+    assert.ok(effectStart >= 0, '未能定位深链兜底 effect 的判定入口');
+    assert.ok(effectMatch, '未能从判定入口切到依赖数组结尾');
+  });
+
+  it('找到即终结：置位在「命中」判断之前，不只在报警时置位', () => {
+    assert.match(
+      effectBlock,
+      /deepLinkWarned\.current = true;\s*\n\s*if \(matchDeepLink\(events\)\) return;/,
+    );
+  });
+
+  it('兜底不再改动筛选（旧实现在这里 setStatus 放宽到「全部」，会弹回用户刚选的那一档）', () => {
+    assert.doesNotMatch(effectBlock, /setStatus\(/);
+  });
+
+  it('不随状态筛选重判（依赖数组不含 status）', () => {
+    assert.ok(effectDeps.length > 0, '未能解析深链兜底 effect 的依赖数组');
+    assert.ok(!effectDeps.includes('status'), `深链兜底依赖不应包含 status，实际=${effectDeps.join(',')}`);
+  });
+});
