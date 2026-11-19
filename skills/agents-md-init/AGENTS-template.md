@@ -32,7 +32,7 @@ description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search
 - **分流：一条结论 vs 一件事**：写完即完的结论 → 走上面的 relation / 上传通道；**要有人推进到收口的事**（bug、技术债、缺失功能、越界发现）→ 事件；本次任务内马上要做的 → 直接做，不建
 - **主动上报，不等提醒**：开发 / 设计 / 排查中发现了**不属于当前任务范围**且需要有人跟的事，**当场** `use_skill("event-report")` 上报为事件，并在对话里留一行回执（`📮 已上报 #38「…」`）；**任务收尾再扫一遍**"发现了但没做的事"。等用户说"记一下"同样算漏报
   - 建前查重（`ki_event_list(q, status: "open")`）；命中后**先 `ki_event_get` 读详情确认是否同一件事**（标题相似 ≠ 同一 bug），同一件才挂证据不新建
-  - **默认只挂 `refs`，不挂 `docs`**：`docs` 会把文档分类改成 `event`、可见性随阶段走，首阶段常是 `hidden`，直接搜不到
+  - **文档三分法**：**产物文档**（debug 报告 / 需求报告 / 复盘）挂 `docs`（改分类、随阶段），**证据文档**挂 `refs`（零改动）；顺序是**先挂 docs 再推终态**（已收口挂不了）
   - 本次做完的事若对应已有事件 → `ki_event_set_stage` 推到真实阶段（**已修复不许停在「修复中」**）
   - 判据与操作细节见 `use_skill("event-report")`
 
@@ -169,6 +169,7 @@ ki_group_create(scope: "${scope}-memory", path: "团队约定")
 
 - **落点**：上传到 `${scope}-memory`；`--group` 必填且**路径里要有一层 `文档`**（如 `专题记忆/{模块}/文档`、`错误库/文档`）——索引据此机械折叠，别改名
 - **通道**：本机文档 → `use_skill("ki-upload")` 的 `upload` / `upload-dir`；正文已在上下文里的短内容 → `ki_sync_relation`
+- **事件产物**：属于某个事件产出的文档（debug 报告 / 需求报告 / 复盘），上传时带 `--lifecycle event --event '#N'` 直接挂到事件上；分类随事件阶段走（首阶段搜不到，收口后 `keep` 类型转长期保留），判据见 `use_skill("event-report")` §5
 - **上传后**：`ki_search(scope: "${scope}-memory", query: "<文档里的一句话>")` 命中或 `ki_group_list` 能看到该 relation 名才算入库，然后在「近期工作」记一行
 - **缺能力时**（Python / httpflex / `KI_URL` / `KI_TOKEN`）：打印可执行命令让用户自己跑，**不阻塞、不报错**
 

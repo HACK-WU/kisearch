@@ -29,7 +29,7 @@
 | `ki_event_get` | `event` | `members_limit` / `refs_limit` / `logs_limit` / `locations_limit` / `location_snippet_limit`（均 0 = 不返回该块） | 只读；**list 用来找，get 用来读**。返回描述全文、结论全文、未确认点、已确认位置、文档三元组（scope+group+name，可直接 `ki_get_module_info` 取正文）；过程与候选正文不返回 |
 | `ki_event_create` | `title` / `type` | `description`≤4000 / `stage` / `docs`≤50 / `refs`≤50 | 写事件 + 阶段日志（`by: 'ai'`） |
 | `ki_event_set_stage` | `event` / `stage` | `note` | 唯一的状态写工具；到终态按 `terminalAction` 处理成员文档 |
-| `ki_event_docs` | `event` / `action` / `docs` | `docs`≤50 | **add 会把文档分类改为 `event`，可见性随阶段走** |
+| `ki_event_docs` | `event` / `action` / `docs` | `docs`≤50 | **add 会把文档分类改为 `event`，可见性随阶段走**；只用于产物文档，且必须在推终态之前 |
 | `ki_event_refs` | `event` / `action` / `docs` | `docs`≤50 | 只建引用；与关联文档冲突的项会被拒 |
 | `ki_event_delete` | `event` / `doc_action` | `doc_action`: `wiki` \| `trash`；`force` + `confirm_title`（仅**无关联文档**的事件） | **事件须已收口**；清理测试空事件可 `force` + 标题逐字一致；有成员文档时拒绝（先解绑或先收口） |
 
@@ -62,14 +62,14 @@
 
 ## 4. 事故案例
 
-### 案例 1：挂 `docs` 把文档打成不可检索（事件 #37）
+### 案例 1：把已有知识挂成 `docs`，它在首阶段从检索里消失了（事件 #37）
 
 **经过**：给事件挂关联文档后，文档分类变为 `event`，可见性随首阶段 `hidden` 走 → 语义与全文检索都不再召回；同时向量删除侧校验缺失，造成"文档已 hidden，但检索仍能召回"的复合故障。
 
 **教训**：
-- 挂 `docs` 是**可见性操作**，不是"顺手关联"。AI 上报一律用 `refs`。
+- 挂 `docs` 是**归属操作**：会改分类与可见性，不是"顺手关联"——**只对产物文档做**（SKILL §5 三分法）。
 - 看到 `fts-only` / `hidden` 时先想"这是阶段设计的预期行为"，不要当写入失败反复重试（工具返回值里有 `visibility` 与 `hint`）。
-- 真要挂 `docs`，只在事件已到终态（`full`）时做——那是提升可见性。
+- 已收口事件挂不了文档（`EVENT_CLOSED`），所以「推到终态再挂 docs」不是可用路径；正确顺序是**先挂后推**。
 
 ### 案例 2：已修复，事件仍停在「修复中」（事件 #36 / #37）
 

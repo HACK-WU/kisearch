@@ -138,7 +138,11 @@ def call(client: BaseClient, payload: dict | None = None, *, probe=None) -> dict
 # POST 失败的「猜测式出路」：拿不到响应体时的兜底文案（每种原因的动作完全不同，
 # 泛泛说「请求失败」等于没说）
 _POST_STATUS_HINTS = {
-    400: "请求被服务端拒绝（参数非法，或归档不安全/损坏）。用 curl 复现一次可拿到具体 OPEN_API_* 码",
+    400: (
+        "请求被服务端拒绝。常见原因：参数非法 / 归档不安全或损坏 / 事件不存在或已收口。"
+        "先跑 `events --scope <库> --event '#N'` 确认事件状态，再跑 `ping` 确认配额；"
+        "POST 失败时响应体拿不到，用 curl 复现一次可拿到具体 OPEN_API_* 码"
+    ),
     401: "Token 缺失或无效：核对 KI_TOKEN，先跑 ping 自检",
     403: "Token 只读 / 未授权该库 / 目标库被设为只读（三种出路不同，见 reference.md 错误码表）",
     404: "上传接口已关闭（--no-upload-api），或路径拼错",
@@ -294,6 +298,80 @@ def validate_lifecycle_args(args) -> None:
         )
 
 
+def get_json(base: str, token: str, endpoint: str, timeout: float) -> tuple[int, dict]:
+    """GET 并保留**完整响应体**（含 `available` 这类附加字段）。
+
+    与 `call()` 的分工：`call()` 服务成功路径；本函数服务「失败也要读详情」的场景。
+    httpflex 在 4xx 时会丢掉响应体，而事件预检恰恰只关心失败分支 —— 所以这里直接用
+    httpflex 的硬依赖 `requests`（与 `make_get_probe` 同一手法）。
+    """
+    try:
+        import requests  # httpflex 的硬依赖，必装
+    except ImportError:  # pragma: no cover
+        raise UploadError("client", "缺少依赖 requests（httpflex 的硬依赖），无法查询事件状态")
+    try:
+        resp = requests.get(f"{base}{endpoint}", headers=auth_headers(token), timeout=timeout)
+    except Exception as err:  # noqa: BLE001 - 网络层错误统一报「连不上」
+        raise UploadError("http", f"请求 {endpoint} 失败：{err}")
+    try:
+        body = resp.json()
+    except ValueError:
+        body = {}
+    return resp.status_code, body if isinstance(body, dict) else {}
+
+
+def fetch_event(base: str, token: str, scope: str, event_ref: str, timeout: float) -> dict:
+    """查单个事件状态；不存在时抛错并附「可挂哪些事件」。"""
+    query = urllib.parse.urlencode({"scope": scope, "event": event_ref})
+    status, body = get_json(base, token, f"/open/v1/events?{query}", timeout)
+
+    if status == 200 and isinstance(body.get("event"), dict):
+        return body["event"]
+
+    code = body.get("code") or f"HTTP_{status}"
+    if code == "OPEN_API_EVENT_NOT_FOUND":
+        available = body.get("available") or []
+        hint = ""
+        if available:
+            hint = "。可用事件：" + "、".join(
+                f"#{item.get('shortId')} {item.get('title')}" for item in available
+            )
+        raise UploadError("precheck", f"事件「{event_ref}」不存在{hint}", code=code)
+    raise UploadError(
+        "precheck",
+        body.get("error") or f"查询事件「{event_ref}」失败（HTTP {status}）",
+        code=code,
+    )
+
+
+def precheck_event(args, base: str, token: str) -> dict | None:
+    """`--event` 有值时，上传前先把事件状态查清楚。
+
+    不做这一步时，事件不存在 / 已收口要等**整包传完**才由服务端 400 拒绝，而客户端在
+    POST 失败时拿不到响应体（httpflex 缺陷）—— 既白传流量，也给不出「该挂哪个事件」。
+    """
+    if not getattr(args, "event", None):
+        return None
+    state = fetch_event(base, token, args.scope, args.event, min(args.timeout, 30))
+    if state.get("closed"):
+        raise UploadError(
+            "precheck",
+            f"事件 #{state.get('shortId')}「{state.get('title')}」已收口，不能再挂文档；"
+            "换一个进行中的事件，或让事件负责人在页面重新打开它",
+            code="OPEN_API_EVENT_CLOSED",
+        )
+    stage = state.get("stage") or {}
+    log(
+        f"事件 #{state.get('shortId')}「{state.get('title')}」"
+        f" · {state.get('typeName') or '(无类型)'}"
+        f" · {stage.get('name') or '(无阶段)'}"
+        f" · 文档可见性 {stage.get('visibility') or '?'}"
+    )
+    if state.get("terminalAction") == "trash":
+        log("注意：该类型收口时关联文档会进回收站（如「性能优化」），确认这是预期结果")
+    return state
+
+
 def precheck_limits(base: str, token: str, total_bytes: int, largest: tuple[str, int], args) -> dict:
     """上传前先自检：把「1MB 单文件上限」这类必然失败挡在本地，别白传一遍。"""
     endpoint = f"/open/v1/ping?scope={urllib.parse.quote(args.scope)}"
@@ -336,7 +414,10 @@ def cmd_upload(args) -> dict:
 
     total = sum(p.stat().st_size for p in paths)
     largest = max(((str(p), p.stat().st_size) for p in paths), key=lambda x: x[1])
+    event_state = None
     if not args.no_precheck:
+        # 事件预检放在体积预检之前：它是纯参数错误（编号手填），比配额更容易错
+        event_state = precheck_event(args, base, token)
         precheck_limits(base, token, total, largest, args)
         log(f"precheck ok：{len(paths)} 个文件 / {total} 字节")
 
@@ -366,7 +447,7 @@ def cmd_upload(args) -> dict:
                 fh.close()
             except Exception:  # noqa: BLE001
                 pass
-    return finish(args, base, token, uploaded, mode="multipart")
+    return finish(args, base, token, uploaded, mode="multipart", event_state=event_state)
 
 
 def cmd_upload_dir(args) -> dict:
@@ -384,7 +465,9 @@ def cmd_upload_dir(args) -> dict:
 
     total = sum(p.stat().st_size for p in files)
     largest = max(((str(p.relative_to(root)), p.stat().st_size) for p in files), key=lambda x: x[1])
+    event_state = None
     if not args.no_precheck:
+        event_state = precheck_event(args, base, token)
         precheck_limits(base, token, total, largest, args)
         log(f"precheck ok：{len(files)} 个文件 / {total} 字节")
 
@@ -411,10 +494,10 @@ def cmd_upload_dir(args) -> dict:
             tmp.unlink()
         except OSError:
             log(f"警告：临时包未删除，可手动清理 {tmp}")
-    return finish(args, base, token, uploaded, mode="tar.gz")
+    return finish(args, base, token, uploaded, mode="tar.gz", event_state=event_state)
 
 
-def finish(args, base: str, token: str, uploaded: dict, *, mode: str) -> dict:
+def finish(args, base: str, token: str, uploaded: dict, *, mode: str, event_state: dict | None = None) -> dict:
     task_id = uploaded.get("taskId")
     if not task_id:
         raise UploadError("upload", "服务端未返回 taskId（响应异常）", code="NO_TASK_ID", detail={"response": uploaded})
@@ -436,6 +519,9 @@ def finish(args, base: str, token: str, uploaded: dict, *, mode: str) -> dict:
     # 分类回显（仅请求里带了分类时出现）：requested/temp 期限/事件，实际落地看 import.result.lifecycle
     if isinstance(uploaded.get("lifecycle"), dict):
         out["lifecycle"] = uploaded["lifecycle"]
+    # 事件状态回显（上传前预检拿到的）：阶段 + 可见性 + 收口动作
+    if event_state is not None:
+        out["event"] = event_state
     if args.wait:
         status = wait_for_task(base, token, task_id, args.wait_timeout)
         out["import"] = status
@@ -448,6 +534,30 @@ def finish(args, base: str, token: str, uploaded: dict, *, mode: str) -> dict:
                 detail={"taskId": task_id, "status": status},
             )
     return out
+
+
+def cmd_events(args) -> dict:
+    """查事件状态：`--event` 查单个，不传则列事件。
+
+    单独给一条命令的理由：AI 拿不到 MCP 工具时（远端机器只有 HTTP），也需要在
+    **决定挂哪个事件之前**看到标题、阶段与收口状态，而不是先上传再猜。
+    """
+    base, token = require_env(args)
+    if args.event:
+        return {"ok": True, "scope": args.scope, "event": fetch_event(base, token, args.scope, args.event, args.timeout)}
+
+    params = {"scope": args.scope, "status": args.status, "limit": str(args.limit)}
+    if args.q:
+        params["q"] = args.q
+    endpoint = f"/open/v1/events?{urllib.parse.urlencode(params)}"
+    status, body = get_json(base, token, endpoint, args.timeout)
+    if status != 200:
+        raise UploadError(
+            "http",
+            body.get("error") or f"查询事件列表失败（HTTP {status}）",
+            code=body.get("code") or status,
+        )
+    return body
 
 
 def _collect_files(root: Path, args) -> list[Path]:
@@ -544,6 +654,14 @@ def main(argv: list[str]) -> int:
     add_upload_opts(p_dir)
     add_common(p_dir, allow_after_subcommand=True)
     p_dir.set_defaults(func=cmd_upload_dir)
+
+    p_ev = sub.add_parser("events", help="查事件状态（上传前确认能不能挂）")
+    p_ev.add_argument("--event", help="事件 id（evt_…）或 #编号；不传则列出事件")
+    p_ev.add_argument("--status", choices=["open", "closed", "all"], default="open", help="列表筛选（默认 open=未收口）")
+    p_ev.add_argument("--q", help="按标题关键词过滤（仅列表）")
+    p_ev.add_argument("--limit", type=int, default=20, help="列表条数 1~50（默认 20）")
+    add_common(p_ev, allow_after_subcommand=True)
+    p_ev.set_defaults(func=cmd_events)
 
     p_status = sub.add_parser("status", help="查指定 taskId 的进度/结果")
     p_status.add_argument("--task", required=True, help="上传返回的 taskId")

@@ -192,6 +192,37 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
 
 - `lockedSkipped`：目标位置已有同名文档，而它是数据源同步来的（分类固定为长期保留）——这些文件**被跳过、没有导入**。去掉 `lifecycle`/`ttlDays`/`event` 重传即可按原口径覆盖。
 
+### 挂事件前先确认事件状态
+
+`lifecycle=event` 要求事件存在且**未收口**。先查一次，比传完整个包再被拒要省事得多：
+
+```bash
+# 查单个（#3 或 evt_ 开头的 id 都行）
+curl -s -H "Authorization: Bearer $KI_TOKEN" \
+  "http://127.0.0.1:7423/open/v1/events?scope=default&event=%233"
+
+# 列出未收口的事件（默认 status=open，可改 closed / all；q 按标题过滤）
+curl -s -H "Authorization: Bearer $KI_TOKEN" \
+  "http://127.0.0.1:7423/open/v1/events?scope=default&q=登录"
+```
+
+查单个事件的响应：
+
+```json
+{"ok": true, "scope": "default",
+ "event": {"id": "evt_...", "shortId": 3, "title": "登录页白屏",
+           "typeName": "bug 排查", "terminalAction": "keep",
+           "stage": {"key": "st_2", "name": "已定位", "visibility": "fts-only"},
+           "closed": false, "updatedAt": 1763000000000}}
+```
+
+- `closed: true` 表示已收口，**不能再挂文档**（上传会返回 `OPEN_API_EVENT_CLOSED`）。
+- `stage.visibility` 是挂上去之后这批文档的检索档位：`hidden` = 语义与全文都搜不到，`fts-only` = 只能全文搜到，`full` = 都能搜到。
+- `terminalAction` 是事件收口时这批文档的去留：`keep` = 转长期保留、继续可检索；`trash` = 进回收站。
+- 列表最多 50 条（`limit` 取值 1–50）。
+
+这个接口是只读的：**只读 Token 也能用**；关闭上传通道后它仍然可用（与 `ping` 同理，属诊断入口）。
+
 ### 上限与「为什么传不上去」
 
 | 上限 | 默认 | 怎么调 |
@@ -227,7 +258,7 @@ ki mcp status                      # 查看当前状态：uploadApi / uploadApiS
 也可以在配置里写 `mcp.http.uploadApi: false`，重启后生效。关闭后的行为：
 
 - `/open/v1/import/upload` 与 `/open/v1/import/status` 一律返回 **404**（不暴露接口是否存在）。
-- `/open/v1/ping` 仍然可用（用来确认 Token 与服务是否正常）。
+- `/open/v1/ping` 与 `/open/v1/events` 仍然可用（确认 Token、服务状态，以及有哪些事件可供挂载）。
 - Web 页面、`/api/*`、`/mcp` 工具、`/healthz` **完全不受影响**。
 
 `ki mcp status` 里的 `uploadApiSource` 说明这个值从哪来：`lock` = 运行中实例的真实值，`config` = 配置里写的，`default` = 都没设（默认开启）。如果实例当前没在运行，状态会按配置/默认显示「下次启动会怎样」，不会拿上一次残留的运行状态充数。
@@ -247,7 +278,7 @@ ki mcp status                      # 查看当前状态：uploadApi / uploadApiS
 | 400 | `OPEN_API_BAD_REQUEST` | 参数非法（如 `group` 写绝对路径、`conflictMode` 不是四个取值之一） |
 | 400 | `OPEN_API_INVALID_CHUNK` | `chunkSize` 不在 100–4000，或 `chunkOverlap` 不在 0–500 且小于 `chunkSize` |
 | 400 | `OPEN_API_INVALID_LIFECYCLE` | 分类参数不合法：`temp` 缺 `ttlDays`、`wiki` 带了 `ttlDays`/`event`、`ttlDays` 不在 1–365、`lifecycle` 取值不认识等。`reason` 给出精确原因（如 `TTL_REQUIRED`） |
-| 400 | `OPEN_API_EVENT_NOT_FOUND` | 指定的 `event` 不存在；`available` 列出可用的未收口事件（最多 5 个） |
+| 400 | `OPEN_API_EVENT_NOT_FOUND` | 指定的 `event` 不存在；`available` 列出可用的未收口事件（最多 5 个）。查询事件接口下该 code 的状态码是 **404** |
 | 400 | `OPEN_API_EVENT_CLOSED` | 该事件已收口，不能再挂新文档；改挂进行中的事件，或先在页面重开该事件 |
 | 400 | `OPEN_API_VIEW_NOT_WRITABLE` | 把知识视图当成库名了——视图是多库的检索范围，不能作为写入目标 |
 | 400 | `OPEN_API_BAD_MULTIPART` | multipart 请求缺 boundary 或结构不完整（请用 `curl -F`，不要手拼请求体） |

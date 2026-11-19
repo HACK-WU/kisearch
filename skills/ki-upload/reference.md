@@ -12,6 +12,13 @@
 | GET | `/open/v1/ping` | 自检：token 身份、授权 scope、三层上限 |
 | POST | `/open/v1/import/upload` | 上传并**自动开始导入**，返回 `taskId` |
 | GET | `/open/v1/import/status?taskId=` | 查进度 / 结果 |
+| GET | `/open/v1/events?event=` | 单个事件状态（上传前预检）；不带 `event` 则列表（`status` / `q` / `limit`≤50） |
+
+事件查询（2026-11-19 新增）的三个约定：
+
+- **只读**：只读 Token 可用；不受 `uploadApi` 开关影响（关掉上传后仍可用，与 ping 同侧）。
+- **已收口照常返回** `closed: true`，不在这里拒绝 —— 能不能挂由上传链路判定，查询端点只如实回显状态。
+- 事件不存在时返回 **404** `OPEN_API_EVENT_NOT_FOUND` + `available`（至多 5 条未收口事件），与上传链路的 400 同码同形。
 
 ### 上传参数（全部在 URL 查询串）
 
@@ -87,8 +94,8 @@
 | 400 | `OPEN_API_INVALID_CHUNK` | `chunkSize` / `chunkOverlap` 越界或非整数 |
 | 400 | `OPEN_API_VIEW_NOT_WRITABLE` | 把知识视图当库名了（视图是检索范围，不可写） |
 | 400 | `OPEN_API_INVALID_LIFECYCLE` | 分类参数不合法：`temp` 缺 `ttlDays`（`TTL_REQUIRED`）、`wiki` 带期限/事件（`LIFECYCLE_ARG_CONFLICT`）、期限越界（`TTL_INVALID`）、取值不认识（`LIFECYCLE_INVALID`）、事件缺失（`EVENT_REQUIRED`）。看响应 `reason` |
-| 400 | `OPEN_API_EVENT_NOT_FOUND` | 绑定的事件不存在：响应 `available` 给出未收口事件（最多 5 个）。事件只能由人在 Web 创建 |
-| 400 | `OPEN_API_EVENT_CLOSED` | 事件已收口，不能挂新文档：改挂进行中的事件或重开该事件 |
+| 400 | `OPEN_API_EVENT_NOT_FOUND` | 绑定的事件不存在：响应 `available` 给出未收口事件（最多 5 个）。**查询接口下状态码是 404**；上传链路的这个 400 通常已被客户端预检提前拦住 |
+| 400 | `OPEN_API_EVENT_CLOSED` | 事件已收口，不能挂新文档：改挂进行中的事件或重开该事件（预检阶段同样会拦） |
 | 400 | `OPEN_API_BAD_MULTIPART` | multipart 缺 boundary 或结构不完整 |
 | 400 | `OPEN_API_UNSUPPORTED_CONTENT_TYPE`（实际是 415） | 只支持 multipart 与 `application/gzip` |
 | 400 | `OPEN_API_ARCHIVE_UNSAFE` | 归档含越界路径/链接条目，整包拒收 |
@@ -121,7 +128,10 @@ skills/ki-upload/
 | 统一调用 | `call()` | 把 httpflex 的 `{result, code, message, data}` 规整成 data 或抛 `UploadError` |
 | 错误补读 | `make_get_probe()` | GET 失败后补读服务端 JSON 错误体（httpflex 会丢） |
 | 预检 | `precheck_limits()` | 上传前查 `limits`，把必然失败的请求挡在本地 |
+| 预检 | `precheck_event()` / `fetch_event()` | `--event` 有值时先查事件（存在 / 收口 / 阶段），不存在则直接列出可用事件 |
+| 错误保真 | `get_json()` | GET 并**保留完整响应体**：预检只关心失败分支，而 httpflex 会丢响应体 |
 | 分支 | `cmd_upload()` / `cmd_upload_dir()` | multipart / tar.gz |
+| 查询 | `cmd_events()` | `events` 子命令：单事件 / 事件列表 |
 | 等待 | `wait_for_task()` | 轮询到终态，`queued` 与 `running` 分开报 |
 
 常见改法：

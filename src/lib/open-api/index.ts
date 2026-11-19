@@ -23,6 +23,7 @@ import { OPEN_API_PREFIX, OPEN_API_UPLOAD_PATH } from './constants.js';
 import { sendOpenApiError } from './respond.js';
 import { handleOpenApiPing } from './routes/ping.js';
 import { handleOpenApiImportStatus, handleOpenApiImportUpload } from './routes/import.js';
+import { handleOpenApiEvents } from './routes/events.js';
 
 /** 分发器依赖：全部由 `mcp-http.ts` 注入，本模块不自己去读配置/Token 存储 */
 export interface OpenApiContext {
@@ -58,6 +59,12 @@ const ROUTES: OpenApiRoute[] = [
   { method: 'GET', path: `${OPEN_API_PREFIX}/ping`, handler: handleOpenApiPing },
   { method: 'POST', path: `${OPEN_API_UPLOAD_PATH}/upload`, handler: handleOpenApiImportUpload },
   { method: 'GET', path: `${OPEN_API_UPLOAD_PATH}/status`, handler: handleOpenApiImportStatus },
+  /**
+   * 事件状态查询（2026-11-19）：`lifecycle=event` 上传前先查一次，避免「包传完才发现
+   * 事件不存在/已收口」。**不在 `isUploadPath` 里** —— 关掉上传接口后它照常可用，
+   * 与 ping 同侧（诊断入口不随写开关关闭）。
+   */
+  { method: 'GET', path: `${OPEN_API_PREFIX}/events`, handler: handleOpenApiEvents },
 ];
 
 /** 是否属于「上传通道」路径（开关只拦这里） */

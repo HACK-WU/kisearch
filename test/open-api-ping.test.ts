@@ -202,6 +202,20 @@ describe('写方法与路由语义', () => {
     assert.equal(r.body.code, 'OPEN_API_UNSUPPORTED_CONTENT_TYPE');
     assert.match(r.body.error, /multipart\/form-data/);
   });
+
+  it('事件查询路由已注册：GET /open/v1/events → 200（空库返回空列表）', async () => {
+    const r = await call(openApi.base, '/open/v1/events', { token: 'tok-rw' });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.ok, true);
+    assert.deepEqual(r.body.events, []);
+  });
+
+  it('事件查询只读：POST 同一路径 → 405 且 Allow 只有 GET', async () => {
+    const r = await call(openApi.base, '/open/v1/events', { method: 'POST', token: 'tok-rw' });
+    assert.equal(r.status, 405);
+    assert.equal(r.body.code, 'OPEN_API_METHOD_NOT_ALLOWED');
+    assert.equal(r.headers.get('allow'), 'GET');
+  });
 });
 
 describe('上传开关：只拦 /open/v1/import/*，且不泄露存在性', () => {
@@ -221,6 +235,12 @@ describe('上传开关：只拦 /open/v1/import/*，且不泄露存在性', () =
     const r = await call(closedApi.base, '/open/v1/ping', { token: 'tok-rw' });
     assert.equal(r.status, 200);
     assert.equal(r.body.uploadApi, false);
+  });
+
+  it('关闭后：/open/v1/events 仍可用（与 ping 同侧，不属于上传通道）', async () => {
+    const r = await call(closedApi.base, '/open/v1/events', { token: 'tok-rw' });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
   });
 
   it('关闭后：/healthz 免鉴权照常（硬边界：关上传不影响其它入口）', async () => {
