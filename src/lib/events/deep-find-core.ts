@@ -42,6 +42,11 @@ export interface DeepFindCoreArgs {
   /** 已关联 / 已参考文档的 key（`scope\0group\0name`），不进候选 */
   usedKeys: ReadonlySet<string>;
   /**
+   * 工具开关（来自 `prompt-config.find.tools`）。
+   * 缺省全开：调用方漏传时不能把工具面收成空（老客户端没有这个字段）。
+   */
+  tools?: Record<string, boolean>;
+  /**
    * 单次查找允许的工具调用次数上限（来自 `prompt-config.find.maxToolCalls`）。
    *
    * 缺省按 `FIND_DEFAULT_TOOL_CALLS`（15）处理：AI 查找**没有"不限制"档**，
@@ -96,7 +101,17 @@ function toolCallBudgetNote(maxToolCalls: number): string {
 export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindResult> {
   const now = args.now ?? Date.now;
   const started = now();
-  const allowed = new Set(args.targets);
+  /*
+   * 允许出现的**物理库**：targets 里的视图要展开成成员库。
+   * 只比对 `targets.includes(src)` 会把视图成员的候选全判成越界（2026-11-17 真机缺陷）。
+   * 视图名本身仍不可作为文档所在库（下面的 `viewOf(src) !== null` 拦掉）。
+   */
+  const allowed = new Set<string>();
+  for (const t of args.targets) {
+    allowed.add(t);
+    const members = args.viewOf(t);
+    if (members) for (const m of members) allowed.add(m);
+  }
   /*
    * 没有"不限制"档：漏传 / 配置缺字段都按默认 15 次兜住。
    *
@@ -129,7 +144,7 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     }),
     exclude: [...args.usedKeys],
     limit: 20,
-    tools: { ki_search: true, ki_get_module_info: true, ki_group_list: true, ki_tag_list: true },
+    tools: args.tools ?? { ki_search: true, ki_get_module_info: true, ki_group_list: true, ki_tag_list: true },
     maxRounds: DEFAULT_MAX_ROUNDS,
     maxToolCalls,
     llm: args.llm,
@@ -235,6 +250,7 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     ...(grounded.summary ? { summary: grounded.summary } : {}),
     ...(grounded.dropped > 0 ? { droppedCount: grounded.dropped } : {}),
     ...(grounded.uncertainties.length > 0 ? { uncertainties: grounded.uncertainties } : {}),
-    mode: 'hybrid',
+    // 内核按"实际发生的检索"聚合：全部降级才 fulltext，没有检索则不声称降级
+    mode: grounded.mode ?? 'hybrid',
   };
 }

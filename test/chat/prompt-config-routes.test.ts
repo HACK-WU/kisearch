@@ -116,7 +116,16 @@ describe('GET /api/chat/prompt-config', () => {
     const groups = r.json?.toolGroups as Array<{ key: string; danger: boolean; names: string[]; descs: Record<string, string> }>;
     assert.deepEqual(groups.map((g) => g.key), ['read', 'write', 'delete']);
     assert.deepEqual(groups.map((g) => g.danger), [false, true, true], '只有只读组不是危险组');
-    assert.equal(groups.reduce((n, g) => n + g.names.length, 0), 14, '工具总数应为 14（6 读 + 6 写 + 2 删）');
+    /*
+     * 不硬编码总数（2026-11-19）：工具增减过一次，硬编码 14 让这条用例常红，
+     * 与真实契约（"下发必须与代码里注册的一致"）也无关。改为与源码常量对照。
+     */
+    const { MCP_TOOL_GROUPS } = await import('../../src/lib/chat/prompt-config.js');
+    assert.equal(
+      groups.reduce((n, g) => n + g.names.length, 0),
+      MCP_TOOL_GROUPS.reduce((n, g) => n + g.names.length, 0),
+      '下发的工具总数必须与代码里真实注册的工具数一致',
+    );
 
     // 走查 #7：每个工具都要有非空短描述（配置层工具行的说明文案，SSOT 在服务端）
     for (const g of groups) {
@@ -143,7 +152,8 @@ describe('PUT /api/chat/prompt-config', () => {
       prompt: { content: '你是 kisearch 助手。' },
       skills: [
         { id: 'builtin-retrieval', name: 'knowledge-retrieval', content: '内置默认内容（被改过）', enabled: true },
-        { id: 'deploy-search', name: '部署检索', content: '先 ki_query_group 看结构。', enabled: true },
+        // skill 名必须是英文（现行校验规则）：中文名会被 PROMPT_CONFIG_INVALID 拒掉
+        { id: 'deploy-search', name: 'deploy-search', content: '先 ki_query_group 看结构。', enabled: true },
       ],
       tools: { ki_search: true, ki_store: true },
     };
@@ -160,7 +170,8 @@ describe('PUT /api/chat/prompt-config', () => {
     const got = await api('GET', '/api/chat/prompt-config');
     const cfg = got.json?.config as { prompt: { content: string }; skills: Array<{ id: string }>; tools: Record<string, boolean> };
     assert.equal(cfg.prompt.content, '你是 kisearch 助手。');
-    assert.deepEqual(cfg.skills.map((s) => s.id), ['builtin-retrieval', 'deploy-search']);
+    // 提交的两个 skill 必须按原顺序保留在前；其余是服务端自动补齐的内置 skill（数量会随版本增加，不硬编码全表）
+    assert.deepEqual(cfg.skills.map((s) => s.id).slice(0, 2), ['builtin-retrieval', 'deploy-search']);
     assert.equal(cfg.tools.ki_store, true);
   });
 
@@ -193,11 +204,14 @@ describe('PUT /api/chat/prompt-config', () => {
     assert.ok(details.some((d) => d.field === 'tools.ki_serach'), JSON.stringify(details));
   });
 
-  it('删掉内置 skill → 400（内置可禁用不可删除）', async () => {
+  it('传空 skills 数组 → 200，内置 skill 自动补齐（内置可禁用不可删除）', async () => {
     const r = await api('PUT', '/api/chat/prompt-config', { skills: [] });
-    assert.equal(r.status, 400);
-    const details = r.json?.details as Array<{ message: string }>;
-    assert.ok(details.some((d) => d.message.includes('builtin-retrieval')), JSON.stringify(details));
+    assert.equal(r.status, 200);
+    // 现行规则：空数组按"没传"处理并补回内置 skill，而不是报错
+    const saved = r.json?.config as { skills: Array<{ id: string; builtin: boolean }> };
+    const builtin = saved.skills.find((s) => s.id === 'builtin-retrieval');
+    assert.ok(builtin, `内置 skill 必须被补齐：${JSON.stringify(saved.skills.map((s) => s.id))}`);
+    assert.equal(builtin?.builtin, true);
   });
 
   it('skill 重名 → 400，details 指向 name', async () => {

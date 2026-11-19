@@ -26,6 +26,13 @@ export interface GroundedToolOutcome {
   text: string;
   /** 若读了文档正文，回填身份（用于校验「候选必须真读过」） */
   read?: { scope: string; group: string; name: string; truncated: boolean };
+  /**
+   * `ki_search` 的**实际**检索模式（2026-11-19）。
+   *
+   * 必须报实际值而不是模型请求值：语义侧不可用时引擎会降级成全文，
+   * 照抄入参会让面板把一次降级检索显示成"语义+全文"。
+   */
+  searchMode?: 'hybrid' | 'fulltext';
 }
 
 export type GroundedToolRunner = (
@@ -95,6 +102,12 @@ export interface GroundedResult {
    * 缺失（而 `partial` 为真）= 只读到片段导致的降级，与收口无关。
    */
   stopReason?: 'timeout' | 'budget';
+  /**
+   * 本次所有检索轮次的**聚合模式**（工具未回填时缺省）：
+   * 全部轮次都降级为全文才算 `fulltext`；只要有一轮走了语义就是 `hybrid`。
+   * 没有任何检索（模型凭清单判断）也不返回 —— 调用方按 `hybrid` 处理，不声称降级。
+   */
+  mode?: 'hybrid' | 'fulltext';
   durationMs: number;
 }
 
@@ -239,6 +252,13 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
 
   /** 工具调用轨迹（顺序即发生顺序） */
   const toolTrace: Array<{ name: string; args: Record<string, unknown>; ms: number; ok: boolean }> = [];
+  /** 本次真正读到文档 / 检索模式足迹 */
+  const sawSearchModes = new Set<'hybrid' | 'fulltext'>();
+  const aggregatedMode = (): 'hybrid' | 'fulltext' | undefined => {
+    if (sawSearchModes.size === 0) return undefined;
+    // 只要有一轮走了语义就是 hybrid；全部降级才如实报 fulltext
+    return sawSearchModes.has('hybrid') || !sawSearchModes.has('fulltext') ? 'hybrid' : 'fulltext';
+  };
   /** 本次真正读到的文档：key = group\0name（`~` 前缀 = 只读到片段） */
   const readDocs = new Map<string, { scope: string; group: string; name: string; truncated: boolean }>();
   const messages: ChatTurn[] = [
@@ -359,6 +379,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
         ok: !outcome.text.startsWith('{"error"'),
       };
       toolTrace.push(traceItem);
+      if (outcome.searchMode) sawSearchModes.add(outcome.searchMode);
       try {
         input.onToolCall?.({ ...traceItem, round });
       } catch {
@@ -429,6 +450,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
       ...(stopReason ? { stopReason } : {}),
       toolTrace,
       parsedOk: false,
+      ...(aggregatedMode() ? { mode: aggregatedMode()! } : {}),
       durationMs: now() - started,
     };
   }
@@ -491,6 +513,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
     ...(stopReason ? { stopReason } : {}),
     toolTrace,
     parsedOk: true,
+    ...(aggregatedMode() ? { mode: aggregatedMode()! } : {}),
     durationMs: now() - started,
   };
 }

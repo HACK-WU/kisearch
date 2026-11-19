@@ -2,7 +2,7 @@
  * find-service.ts —— 「AI 查找」深度通道的服务层（REQ-20261116-005 二期 · S-03）
  *
  * 只做两件事，把「执行」与「对外形状」隔开：
- *   1. 调 `runDeepFind`（门禁 / 工具循环 / 三重校验都在它里面）；
+ *   1. 调 `runDeepFindCore`（共享内核）并承担门禁 / 并发槽 / 硬超时；
  *   2. 把它的产物补成 `RefSearchResult` —— 库统计、`reason`、`excluded` 与快速通道同口径，
  *      前端才能用同一套渲染（`origin` 字段决定默认勾选策略，不需要两套响应）。
  *
@@ -11,11 +11,20 @@
  */
 
 import { loadConfig } from '../config.js';
+import { resolveLlmStatus } from '../chat/llm-client.js';
 import { GovernanceError } from '../governance-errors.js';
 import { readAllGroupCaches } from '../group-cache.js';
 import { readViews } from '../scope-view.js';
 import { countDocsByTargets } from './find-targets.js';
-import { acquireFindSlot, releaseFindSlot, type DeepFindDeps, type DeepFindResult, type UnconfirmedCandidate } from './find-runner.js';
+import {
+  acquireFindSlot,
+  FIND_HARD_TIMEOUT_MS,
+  releaseFindSlot,
+  setFindLimitsForTest,
+  type DeepFindDeps,
+  type DeepFindResult,
+  type UnconfirmedCandidate,
+} from './find-runner.js';
 import { runDeepFindCore } from './deep-find-core.js';
 import { defaultFindConfig, FIND_DEFAULT_TOOL_CALLS, readPromptConfig } from '../chat/prompt-config.js';
 import { findEnabledSkill } from '../chat/prompt-config.js';
@@ -36,18 +45,41 @@ export interface DeepFindSearchResult extends RefSearchResult {
 /**
  * 共享内核版「AI 查找」（2026-11-19 合并）：与 `ki_recall` 同一个 `runGroundedRecall`。
  *
- * 这里只做**装配**（事件 → 用户消息所需的一切）与**并发槽**，循环/工具/解析都在内核里。
- * 与 `find-runner.runDeepFind` 的差别：不再自带一份循环与工具执行器。
+ * 这里做**装配**（事件 → 用户消息所需的一切）、**门禁**、**并发槽**与**硬超时**，
+ * 循环 / 工具 / 解析都在内核里。
+ *
+ * 2026-11-19：旧执行器 `runDeepFind` 删除时，门禁与 45s 硬超时一并搬到这里 ——
+ * 它们是对外错误码契约（`FIND_LLM_UNAVAILABLE` / `FIND_TIMEOUT` …），不能跟着旧函数消失。
  */
 async function runDeepFindSharedCore(
   scope: string,
   eventRef: string,
   deps: DeepFindDeps,
   onProgress?: (call: { name: string; args: Record<string, unknown>; ms: number; ok: boolean; round: number }) => void,
-): Promise<DeepFindResult> {
+): Promise<{ result: DeepFindResult; queuedMs: number }> {
   const cfg = deps.kiConfig ?? loadConfig();
   const promptCfg = readPromptConfig(cfg).config;
-  const findCfg = promptCfg.find ?? defaultFindConfig();
+  const findCfg = deps.config ?? promptCfg.find ?? defaultFindConfig();
+
+  // ── ① 门禁（与 AI 分析同源，错误码换 FIND_ 前缀）──
+  const llmStatus = deps.llm?.status(cfg) ?? resolveLlmStatus(cfg, cfg._configPath ?? '');
+  if (llmStatus.ackRequired) {
+    throw new GovernanceError('FIND_DISCLOSURE_REQUIRED', '尚未确认知识库内容外发给上游模型，请先完成隐私确认');
+  }
+  if (!llmStatus.enabled) {
+    throw new GovernanceError('FIND_LLM_UNAVAILABLE', llmStatus.reason ?? '未配置 LLM 模型，无法执行深度查找');
+  }
+  if (!llmStatus.supportsTools) {
+    throw new GovernanceError('FIND_TOOLS_UNSUPPORTED', '当前模型未启用工具调用（llm.supportsTools=false），深度查找不可用；可改用快速查找');
+  }
+  // 工具面按配置下发（旧实现读同一份；漏传时按全开兜住，老客户端不因此变空）
+  const tools = findCfg.tools ?? { ki_search: true, ki_get_module_info: true, ki_group_list: true, ki_tag_list: true };
+  if (!Object.values(tools).some((on) => on === true)) {
+    throw new GovernanceError(
+      'FIND_TOOLS_ALL_DISABLED',
+      '已关闭全部查找工具，请先在「AI 设置 → AI 查找 → 工具与权限」中至少启用一个',
+    );
+  }
 
   const event = findEventIn(readAllEvents(scope), eventRef);
   if (!event) throw new GovernanceError('EVENT_NOT_FOUND', `事件「${eventRef}」不存在`);
@@ -83,9 +115,30 @@ async function runDeepFindSharedCore(
   const skills = scenarioSkill ? [{ name: scenarioSkill.name, content: scenarioSkill.content, enabled: true }] : [];
 
   const queueKey = `${scope}\u0000${eventRef}`;
-  await acquireFindSlot(queueKey, deps.signal);
+  if (deps.limits) setFindLimitsForTest(deps.limits);
+  const queuedMs = await acquireFindSlot(queueKey, deps.signal);
+
+  /*
+   * 硬超时（45s，不可配）：与前端断开的 signal 合成一路，靠 `timedOut` 区分终态。
+   * 前者 → FIND_TIMEOUT（504）；后者 → FIND_CANCELED（499）。
+   */
+  const controller = new AbortController();
+  let timedOut = false;
+  const outerSignal = deps.signal;
+  const onOuterAbort = (): void => controller.abort();
+  if (outerSignal) {
+    if (outerSignal.aborted) controller.abort();
+    else outerSignal.addEventListener('abort', onOuterAbort, { once: true });
+  }
+  const hardTimeoutMs = deps.hardTimeoutMs ?? FIND_HARD_TIMEOUT_MS;
+  const hardTimer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, hardTimeoutMs);
+  hardTimer.unref?.();
+
   try {
-    return await runDeepFindCore({
+    const result = await runDeepFindCore({
       event: event as never,
       eventType: null,
       members,
@@ -95,6 +148,7 @@ async function runDeepFindSharedCore(
       prompt: findCfg.prompt.content,
       skills,
       usedKeys,
+      tools,
       // 查找没有"不限制"档：配置缺字段按默认 15 次（内核同源再兜一次）
       maxToolCalls: findCfg.maxToolCalls ?? FIND_DEFAULT_TOOL_CALLS,
       llm: {
@@ -108,10 +162,23 @@ async function runDeepFindSharedCore(
           : {}),
       },
       ...(deps.llm?.stream ? { stream: deps.llm.stream as never } : {}),
-      ...(deps.signal ? { signal: deps.signal } : {}),
+      ...(deps.runTool ? { runTool: deps.runTool } : {}),
+      ...(deps.nowFn ? { now: deps.nowFn } : {}),
+      signal: controller.signal,
       ...(onProgress ? { onProgress } : {}),
     });
+
+    // 超时有候选 → 保留结果并标 partial；无候选 → 不返回空成功
+    if (timedOut && result.candidates.length === 0) {
+      throw new GovernanceError('FIND_TIMEOUT', '深度查找超时且没有产出候选，建议缩短检索范围或改用快速查找');
+    }
+    if (outerSignal?.aborted && !timedOut) {
+      throw new GovernanceError('FIND_CANCELED', '查找已被中止');
+    }
+    return { result, queuedMs };
   } finally {
+    clearTimeout(hardTimer);
+    outerSignal?.removeEventListener('abort', onOuterAbort);
     releaseFindSlot(queueKey);
   }
 }
@@ -122,7 +189,7 @@ export async function runDeepFindAsSearchResult(
   deps: DeepFindDeps,
 ): Promise<DeepFindSearchResult> {
   const started = Date.now();
-  const result = await runDeepFindSharedCore(scope, eventRef, deps, deps.onProgress);
+  const { result, queuedMs } = await runDeepFindSharedCore(scope, eventRef, deps, deps.onProgress);
 
   const event = findEventIn(readAllEvents(scope), eventRef);
   if (!event) throw new GovernanceError('EVENT_NOT_FOUND', `事件「${eventRef}」不存在`);
@@ -163,7 +230,13 @@ export async function runDeepFindAsSearchResult(
 
   return {
     candidates: result.candidates,
-    steps: result.steps,
+    /*
+     * 排队耗时挂在首个步骤上：面板据此说"排队等了 N 秒"，而不是把等待算进检索耗时。
+     * 没有步骤（模型一次工具都没调）时无处可挂，直接省略。
+     */
+    steps: queuedMs > 0 && result.steps.length > 0
+      ? result.steps.map((s, i) => (i === 0 ? { ...s, metrics: { ...s.metrics, queuedMs } } : s))
+      : result.steps,
     excluded: { associated: members, added },
     total,
     totalByScope,

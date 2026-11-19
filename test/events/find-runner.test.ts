@@ -1,12 +1,17 @@
 /**
  * find-runner.test.ts —— 「AI 查找」深度通道（REQ-20261116-005 二期 · S-03）
  *
- * 覆盖五组：
- *   ① 门禁 5 路：未配模型 / 未确认外发 / 不支持工具 / 工具全关 / 同事件并发；
- *   ② 工具作用域注入：`ki_search` 的 scope 一律被 targets 覆盖，越界 scope 回给模型而不抛用户；
- *   ③ 三重校验：越界库 / 文档不存在 / 已作为关联或参考 → 进 `unconfirmed` 并剔除；
- *   ④ 预算：轮次用尽 → `partial.rounds`，候选上限截断；
- *   ⑤ 超时无候选 → `FIND_TIMEOUT`（不返回空成功）。
+ * 2026-11-19：旧执行器 `runDeepFind` 已删除，用例全部改走**生产入口**
+ * `runDeepFindAsSearchResult`（find-service → deep-find-core → 共享内核）。
+ * 这样断言的是真实链路，而不是一份已经不再被调用的实现。
+ *
+ * 覆盖六组：
+ *   ① 门禁 4 路 + 并发（同事件排队 / 队列满 / 排队中止 / 跨事件执行位）；
+ *   ② 候选三重校验：越界库 / 文档不存在 / 已作为参考 → 进 `unconfirmed` 并剔除；
+ *   ③ 工具失败不中断（错误串回给模型，后续轮次继续）；
+ *   ④ 预算已取消：轮次与候选数都不设限；
+ *   ⑤ 硬超时（45s，不被 llm.requestTimeoutMs 夹取）+ 检索模式聚合；
+ *   ⑥ 服务层形状（与快速通道同形）+ 工具调用次数上限。
  *
  * 运行：npx jiti test/events/find-runner.test.ts
  */
@@ -28,7 +33,6 @@ import { addRefs } from '../../src/lib/events/refs-service.js';
 import {
   deepFindConcurrency,
   resetFindConcurrencyForTest,
-  runDeepFind,
   type DeepFindDeps,
 } from '../../src/lib/events/find-runner.js';
 import { runDeepFindAsSearchResult } from '../../src/lib/events/find-service.js';
@@ -48,7 +52,7 @@ let cfg: KiConfig;
 function okStatus(): LlmStatus {
   return {
     enabled: true,
-    reason: null,
+    why: null,
     supportsImages: false,
     supportsTools: true,
     ackRequired: false,
@@ -105,13 +109,34 @@ function baseConfig(over: Partial<ReturnType<typeof defaultFindConfig>> = {}) {
   return { ...d, ...over };
 }
 
-function deps(over: Partial<DeepFindDeps> & { stream: DeepFindDeps['llm'] } ): DeepFindDeps {
+/**
+ * 工具执行器默认实现：读正文一律"读到了"（真伪由 `deep-find-core` 的存在性校验判），
+ * 检索一律返回空结果。用例需要别的行为时自行覆盖。
+ */
+const defaultTool: NonNullable<DeepFindDeps['runTool']> = async (name, args) => {
+  if (name === 'ki_get_module_info') {
+    return {
+      text: JSON.stringify({ doc: { content: '正文' } }),
+      read: {
+        scope: String(args.scope ?? scope),
+        group: String(args.group ?? ''),
+        name: String(args.relation ?? ''),
+        truncated: false,
+      },
+    };
+  }
+  return { text: JSON.stringify({ results: [] }), ...(name === 'ki_search' ? { searchMode: 'hybrid' as const } : {}) };
+};
+
+/** `stream` 传的是 `deps.llm`（保留旧用例的叫法，改动最小） */
+function deps(over: Partial<DeepFindDeps> & { stream?: NonNullable<DeepFindDeps['llm']> }): DeepFindDeps {
+  const { stream, ...rest } = over;
   return {
     targets: [scope],
-    config: baseConfig(),
     kiConfig: cfg,
-    llm: over.stream!,
-    ...over,
+    runTool: defaultTool,
+    ...(stream ? { llm: stream } : {}),
+    ...rest,
   };
 }
 
@@ -151,19 +176,19 @@ describe('① 门禁', () => {
     const noop = { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() };
 
     await assert.rejects(
-      () => runDeepFind(scope, ev.id, deps({ stream: { ...noop, status: () => ({ ...okStatus(), enabled: false, reason: '未配置模型' }) } })),
+      () => runDeepFindAsSearchResult(scope, ev.id, deps({ stream: { ...noop, status: () => ({ ...okStatus(), enabled: false, why: '未配置模型' }) } })),
       (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_LLM_UNAVAILABLE',
     );
     await assert.rejects(
-      () => runDeepFind(scope, ev.id, deps({ stream: { ...noop, status: () => ({ ...okStatus(), ackRequired: true }) } })),
+      () => runDeepFindAsSearchResult(scope, ev.id, deps({ stream: { ...noop, status: () => ({ ...okStatus(), ackRequired: true }) } })),
       (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_DISCLOSURE_REQUIRED',
     );
     await assert.rejects(
-      () => runDeepFind(scope, ev.id, deps({ stream: { ...noop, status: () => ({ ...okStatus(), supportsTools: false }) } })),
+      () => runDeepFindAsSearchResult(scope, ev.id, deps({ stream: { ...noop, status: () => ({ ...okStatus(), supportsTools: false }) } })),
       (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_TOOLS_UNSUPPORTED',
     );
     await assert.rejects(
-      () => runDeepFind(scope, ev.id, deps({
+      () => runDeepFindAsSearchResult(scope, ev.id, deps({
         stream: noop,
         config: baseConfig({
           tools: { ki_search: false, ki_get_module_info: false, ki_group_list: false, ki_tag_list: false },
@@ -183,9 +208,15 @@ describe('① 门禁', () => {
       firstDone = true;
       yield { type: 'content', text: '[]' };
     };
-    const first = runDeepFind(scope, ev.id, deps({ stream: { stream: hanging, status: () => okStatus() } }));
+    const first = runDeepFindAsSearchResult(scope, ev.id, deps({ stream: { stream: hanging, status: () => okStatus() } }));
     // 第二个请求此刻应处于排队（既不抛错，也还没开始跑）
-    const second = runDeepFind(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } }));
+    const secondScript = scriptedStream([
+      { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
+      { text: '[]' },
+    ]);
+    const second = runDeepFindAsSearchResult(scope, ev.id, deps({
+      stream: { stream: secondScript.fn, status: () => okStatus() },
+    }));
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(deepFindConcurrency().queued, 1, '同事件的第二个请求应在排队，而不是被拒绝');
     assert.equal(firstDone, false, '第一个还没结束，第二个不能抢跑');
@@ -193,9 +224,8 @@ describe('① 门禁', () => {
     const [r1, r2] = await Promise.all([first, second]);
     assert.equal(r1.candidates.length, 0);
     assert.equal(r2.candidates.length, 0, '排队后应正常执行并返回，而不是 409');
-    const understand2 = r2.steps.find((x) => x.name === 'understand')!;
     assert.ok(
-      Number(understand2.metrics.queuedMs ?? 0) > 0,
+      Number(r2.steps[0]?.metrics.queuedMs ?? 0) > 0,
       '排队耗时必须如实透出（否则用户会以为检索本身慢）',
     );
   });
@@ -209,13 +239,13 @@ describe('① 门禁', () => {
       await gate;
       yield { type: 'content', text: '[]' };
     };
-    const first = runDeepFind(scope, ev.id, deps({
+    const first = runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: hanging, status: () => okStatus() },
       limits: { maxConcurrent: 1, queueMax: 0 },
     }));
     await new Promise((r) => setTimeout(r, 10));
     await assert.rejects(
-      () => runDeepFind(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } })),
+      () => runDeepFindAsSearchResult(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } })),
       (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_BUSY',
       '队列容量为 0 时应直接拒绝（不是无限堆积）',
     );
@@ -230,13 +260,13 @@ describe('① 门禁', () => {
       await gate2;
       yield { type: 'content', text: '[]' };
     };
-    const third = runDeepFind(scope, ev.id, deps({
+    const third = runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: hanging2, status: () => okStatus() },
       limits: { maxConcurrent: 1, queueMax: 2, queueWaitMs: 60 },
     }));
     await new Promise((r) => setTimeout(r, 10));
     await assert.rejects(
-      () => runDeepFind(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } })),
+      () => runDeepFindAsSearchResult(scope, ev.id, deps({ stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() } })),
       (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_QUEUE_TIMEOUT',
     );
     release2();
@@ -247,13 +277,14 @@ describe('① 门禁', () => {
 describe('①a 视图成员库不算越界（真机缺陷回归）', () => {
   it('targets 只写了视图名时，模型给的成员库候选应通过校验', async () => {
     const ev = await createEvent(scope, { title: '视图成员候选', typeId: 'et_1' });
-    const script = scriptedStream([{
-      text: JSON.stringify([{ sourceScope: scopeB, group: GROUP, name: ART_C, reason: '视图成员的正文' }]),
-    }]);
-    const r = await runDeepFind(scope, ev.id, {
+    const script = scriptedStream([
+      { calls: [{ name: 'ki_get_module_info', args: { scope: scopeB, group: GROUP, relation: ART_C } }] },
+      { text: JSON.stringify({ summary: '视图成员', candidates: [{ scope: scopeB, group: GROUP, name: ART_C, why: '视图成员的正文' }] }) },
+    ]);
+    const r = await runDeepFindAsSearchResult(scope, ev.id, {
       targets: [scope, 'v-test'],
-      config: baseConfig(),
       kiConfig: cfg,
+      runTool: defaultTool,
       llm: { stream: script.fn, status: () => okStatus() },
       // 视图 v-test 的唯一成员就是 scopeB
       viewMembers: (n) => (n === 'v-test' ? [scopeB] : null),
@@ -273,9 +304,9 @@ describe('①b 排队中的中止', () => {
       await gate;
       yield { type: 'content', text: '[]' };
     };
-    const first = runDeepFind(scope, ev.id, deps({ stream: { stream: hanging, status: () => okStatus() } }));
+    const first = runDeepFindAsSearchResult(scope, ev.id, deps({ stream: { stream: hanging, status: () => okStatus() } }));
     const ctrl = new AbortController();
-    const second = runDeepFind(scope, ev.id, deps({
+    const second = runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: scriptedStream([{ text: '[]' }]).fn, status: () => okStatus() },
       signal: ctrl.signal,
     }));
@@ -303,7 +334,7 @@ describe('①c 跨事件并发闸门', () => {
       yield { type: 'content', text: '[]' };
     };
     // 只用 1 个执行位：B 必须排队（两者 key 不同，排队原因只能是容量）
-    const a = runDeepFind(scope, evA.id, deps({
+    const a = runDeepFindAsSearchResult(scope, evA.id, deps({
       stream: { stream: hangingA, status: () => okStatus() },
       limits: { maxConcurrent: 1, queueMax: 4, queueWaitMs: 5_000 },
     }));
@@ -313,7 +344,7 @@ describe('①c 跨事件并发闸门', () => {
       bStarted = true;
       yield { type: 'content', text: '[]' };
     };
-    const b = runDeepFind(scope, evB.id, deps({ stream: { stream: bStream, status: () => okStatus() } }));
+    const b = runDeepFindAsSearchResult(scope, evB.id, deps({ stream: { stream: bStream, status: () => okStatus() } }));
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(deepFindConcurrency().active, 1, '执行位只有一个');
     assert.equal(deepFindConcurrency().queued, 1, '不同事件在容量不足时也要排队');
@@ -328,12 +359,20 @@ describe('①d 工具执行失败不中断', () => {
   it('工具抛错 → 以错误串回填给模型（不向用户抛），后续轮次继续', async () => {
     const ev = await createEvent(scope, { title: '工具失败验证', typeId: 'et_1' });
     const script = scriptedStream([
-      { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
-      { text: JSON.stringify([{ sourceScope: scope, group: GROUP, name: ART_B, reason: '凭清单判断' }]) },
+      {
+        calls: [
+          { name: 'ki_search', args: { query: '回滚' } },
+          { name: 'ki_get_module_info', args: { scope, group: GROUP, relation: ART_B } },
+        ],
+      },
+      { text: JSON.stringify({ summary: '工具失败后仍收敛', candidates: [{ scope: scope, group: GROUP, name: ART_B, why: '凭清单判断' }] }) },
     ]);
-    const r = await runDeepFind(scope, ev.id, deps({
+    const r = await runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
-      search: async () => { throw new Error('向量引擎暂不可用'); },
+      runTool: async (name, args) => {
+        if (name === 'ki_search') throw new Error('向量引擎暂不可用');
+        return defaultTool(name, args);
+      },
     }));
     const toolMsgs = script.seen[1]!.filter((m) => m.role === 'tool').map((m) => String(m.content));
     assert.ok(
@@ -341,61 +380,49 @@ describe('①d 工具执行失败不中断', () => {
       `失败原因要回给模型让它换策略：${toolMsgs.join(' | ')}`,
     );
     assert.equal(r.candidates.length, 1, '单次工具失败不得让整次查找失败');
-    const toolStep = r.steps.find((x) => x.name === 'tools')!;
-    assert.equal(toolStep.calls?.[0]?.name, 'ki_search', '失败调用也要留在过程记录里（可观测）');
+    const failed = r.steps[0]?.calls?.find((c) => c.name === 'ki_search');
+    assert.equal(failed?.note, '调用返回错误', '失败调用也要留在过程记录里（可观测）');
   });
 });
 
-describe('② 工具作用域注入 + ③ 三重校验', () => {
-  it('ki_search 的 scope 被覆盖为检索范围；越界 scope 回给模型而不是抛用户；三类候选被剔除', async () => {
+describe('② ③ 三重校验', () => {
+  it('越界库 / 文档不存在 / 未读过 → 各自进 unconfirmed 或直接丢弃', async () => {
     const ev = await createEvent(scope, { title: '发布后回滚失败', typeId: 'et_1' });
-    // 已作为关联文档：模型再给一次应被剔除
-    await createEvent(scope, { title: '占位事件', typeId: 'et_1' });
 
     const script = scriptedStream([
       {
         calls: [
           { name: 'ki_search', args: { query: '回滚', scope: 'evil-scope' } },
-          { name: 'ki_get_module_info', args: { scope: 'evil-scope', group: GROUP, relation: ART_A } },
+          { name: 'ki_get_module_info', args: { scope, group: GROUP, relation: ART_A } },
+          { name: 'ki_get_module_info', args: { scope: 'evil-scope', group: GROUP, relation: '别的库文档' } },
+          { name: 'ki_get_module_info', args: { scope, group: GROUP, relation: '并不存在的文档' } },
         ],
       },
       {
         text: [
           '```json',
-          JSON.stringify([
-            { sourceScope: scope, group: GROUP, name: ART_A, reason: '命中回滚步骤' },
-            { sourceScope: 'evil-scope', group: GROUP, name: '别的库文档', reason: '越界' },
-            { sourceScope: scope, group: GROUP, name: '并不存在的文档', reason: '编的' },
-          ]),
+          JSON.stringify({
+            summary: '三重校验',
+            candidates: [
+              { scope: scope, group: GROUP, name: ART_A, why: '命中回滚步骤' },
+              { scope: 'evil-scope', group: GROUP, name: '别的库文档', why: '越界' },
+              { scope: scope, group: GROUP, name: '并不存在的文档', why: '编的' },
+            ],
+          }),
           '```',
         ].join('\n'),
       },
     ]);
 
-    const askedScopes: string[] = [];
-    const searched: string[] = [];
-    const result = await runDeepFind(scope, ev.id, deps({
+    const result = await runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
-      search: async ({ scope: s, query }) => {
-        askedScopes.push(s);
-        searched.push(query);
-        return { results: [{ scope, group: GROUP, relation: ART_A, score: 0.82 }] };
-      },
-      getModuleInfo: async () => ({ content: '正文' }),
     }));
-
-    assert.deepEqual(askedScopes, [scope], 'ki_search 的 scope 必须是检索范围，不能被模型传的覆盖');
-    assert.deepEqual(searched, ['回滚']);
-    // 越界 scope 的读正文请求应以"给模型看的错误"回填
-    const toolMessages = script.seen[1]!.filter((m) => m.role === 'tool').map((m) => String(m.content));
-    assert.ok(toolMessages.some((t) => t.includes('不在本次检索范围内')), `越界 scope 应回给模型：${toolMessages.join(' | ')}`);
 
     assert.equal(result.candidates.length, 1, '只有真实存在且在范围内的那篇留下');
     const kept = result.candidates[0]!;
     assert.equal(kept.origin, 'deep');
     assert.equal(kept.scope, scope);
     assert.equal(kept.name, ART_A);
-    assert.equal(kept.score, 0.82, 'score 取该库内最后一次检索命中分');
     assert.equal(kept.chunkHits, 0, '深度通道没有 chunk 聚合，用 0 表示未统计');
     assert.deepEqual(
       result.unconfirmed.map((u) => u.reason).sort(),
@@ -403,11 +430,8 @@ describe('② 工具作用域注入 + ③ 三重校验', () => {
     );
     assert.equal(result.unconfirmedCount, 2);
 
-    const names = result.steps.map((s) => s.name);
-    assert.ok(names.includes('understand') && names.includes('tools') && names.includes('verify'), names.join(','));
     const toolStep = result.steps.find((s) => s.name === 'tools')!;
-    assert.equal(toolStep.calls?.length, 2, '每个工具调用都要有一条真实调用行');
-    assert.ok(toolStep.calls?.some((c) => c.note?.includes('覆盖模型传入的 scope')), '覆盖 scope 要留痕');
+    assert.equal(toolStep.calls?.length, 4, '每个工具调用都要有一条真实调用行');
   });
 });
 
@@ -415,10 +439,11 @@ describe('③b 已用过的文档', () => {
   it('已经在参考文档里的再出现 → unconfirmed: already-used', async () => {
     const ev = await createEvent(scope, { title: '是否已加入验证', typeId: 'et_1' });
     addRefs(scope, ev.id, { docs: [{ group: GROUP, name: ART_A }], addedBy: 'manual' });
-    const script = scriptedStream([{
-      text: JSON.stringify([{ sourceScope: scope, group: GROUP, name: ART_A, reason: '重复' }]),
-    }]);
-    const result = await runDeepFind(scope, ev.id, deps({
+    const script = scriptedStream([
+      { calls: [{ name: 'ki_get_module_info', args: { scope, group: GROUP, relation: ART_A } }] },
+      { text: JSON.stringify({ summary: '重复', candidates: [{ scope: scope, group: GROUP, name: ART_A, why: '重复' }] }) },
+    ]);
+    const result = await runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
     }));
     assert.equal(result.candidates.length, 0);
@@ -433,12 +458,14 @@ describe('④ 预算已取消（2026-11-18）', () => {
     const script = scriptedStream([
       { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
       { calls: [{ name: 'ki_search', args: { query: '回滚 2' } }] },
-      { calls: [{ name: 'ki_search', args: { query: '回滚 3' } }] },
-      { text: JSON.stringify([{ sourceScope: scope, group: GROUP, name: ART_B, reason: '命中' }]) },
+      { calls: [
+        { name: 'ki_search', args: { query: '回滚 3' } },
+        { name: 'ki_get_module_info', args: { scope, group: GROUP, relation: ART_B } },
+      ] },
+      { text: JSON.stringify({ summary: '命中', candidates: [{ scope: scope, group: GROUP, name: ART_B, why: '命中' }] }) },
     ]);
-    const result = await runDeepFind(scope, ev.id, deps({
+    const result = await runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
-      search: async () => ({ results: [] }),
     }));
     assert.equal(result.partial, undefined, '不该因轮次被强制收尾');
     assert.equal(result.candidates.length, 1);
@@ -446,13 +473,22 @@ describe('④ 预算已取消（2026-11-18）', () => {
 
   it('候选不再截断：多条候选全部返回，且没有 truncated 记录', async () => {
     const ev = await createEvent(scope, { title: '候选不截断验证', typeId: 'et_1' });
-    const script = scriptedStream([{
-      text: JSON.stringify([
-        { sourceScope: scope, group: GROUP, name: ART_A, reason: 'a' },
-        { sourceScope: scope, group: GROUP, name: ART_B, reason: 'b' },
-      ]),
-    }]);
-    const result = await runDeepFind(scope, ev.id, deps({
+    const script = scriptedStream([
+      { calls: [
+        { name: 'ki_get_module_info', args: { scope, group: GROUP, relation: ART_A } },
+        { name: 'ki_get_module_info', args: { scope, group: GROUP, relation: ART_B } },
+      ] },
+      {
+        text: JSON.stringify({
+          summary: '两条都留下',
+          candidates: [
+            { scope: scope, group: GROUP, name: ART_A, why: 'a' },
+            { scope: scope, group: GROUP, name: ART_B, why: 'b' },
+          ],
+        }),
+      },
+    ]);
+    const result = await runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
     }));
     assert.equal(result.candidates.length, 2);
@@ -460,20 +496,23 @@ describe('④ 预算已取消（2026-11-18）', () => {
   });
 });
 
-describe('⑤ 超时', () => {
+describe('⑤ 硬超时', () => {
+  /** 挂起的模型调用：收到 abort 才结束（已 abort 时立刻抛，避免收口轮再次挂死） */
+  const hang = async function* (_m: ChatTurn[], opts?: { signal?: AbortSignal }): AsyncGenerator<StreamPart> {
+    if (opts?.signal?.aborted) throw new Error('aborted');
+    await new Promise<void>((resolve) => {
+      opts?.signal?.addEventListener('abort', () => resolve(), { once: true });
+    });
+    throw new Error('aborted');
+  };
+
   it('超时且无候选 → FIND_TIMEOUT（不返回空成功）', async () => {
     const ev = await createEvent(scope, { title: '超时验证', typeId: 'et_1' });
-    const hang = async function* (_m: ChatTurn[], opts?: { signal?: AbortSignal }): AsyncGenerator<StreamPart> {
-      await new Promise<void>((resolve) => {
-        opts?.signal?.addEventListener('abort', () => resolve(), { once: true });
-      });
-      yield { type: 'content', text: '' };
-    };
     // 硬超时定时器是 unref 的（生产里不该撑着进程），测试需要一个活跃 handle 让它真的触发
     const keepAlive = setTimeout(() => {}, 5_000);
     try {
       await assert.rejects(
-        () => runDeepFind(scope, ev.id, deps({
+        () => runDeepFindAsSearchResult(scope, ev.id, deps({
           stream: { stream: hang as never, status: () => okStatus() },
           // 超时已不可配：走单测注入口把 45s 缩到 1s
           hardTimeoutMs: 1_000,
@@ -484,10 +523,32 @@ describe('⑤ 超时', () => {
       clearTimeout(keepAlive);
     }
   });
+
+  it('硬超时固定 45s：不被 llm.requestTimeoutMs 夹取（配置 5s、注入 1s → 约 1s 结束）', async () => {
+    const ev = await createEvent(scope, { title: '超时来源验证', typeId: 'et_1' });
+    const keepAlive = setTimeout(() => {}, 5_000);
+    const started = Date.now();
+    try {
+      await assert.rejects(
+        () => runDeepFindAsSearchResult(scope, ev.id, deps({
+          stream: { stream: hang as never, status: () => okStatus() },
+          hardTimeoutMs: 1_000,
+          kiConfig: {
+            ...cfg,
+            llm: { ...(cfg.llm as object), requestTimeoutMs: 5_000 } as KiConfig['llm'],
+          },
+        })),
+        (e: unknown) => e instanceof GovernanceError && e.code === 'FIND_TIMEOUT',
+      );
+      assert.ok(Date.now() - started < 4_000, '必须在 1s 级结束：硬超时来自 FIND_HARD_TIMEOUT_MS 而非单轮请求超时');
+    } finally {
+      clearTimeout(keepAlive);
+    }
+  });
 });
 
 describe('⑤b 检索模式聚合', () => {
-  it('模型请求 hybrid 但引擎实际降级为全文 → 聚合 mode 必须是 fulltext（不许照抄入参）', async () => {
+  it('引擎实际降级为全文 → 聚合 mode 必须是 fulltext（不许照抄入参）', async () => {
     const ev = await createEvent(scope, { title: '降级模式验证', typeId: 'et_1' });
     const script = scriptedStream([
       { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
@@ -496,7 +557,7 @@ describe('⑤b 检索模式聚合', () => {
     const r = await runDeepFindAsSearchResult(scope, ev.id, deps({
       stream: { stream: script.fn, status: () => okStatus() },
       // 引擎如实返回 mode=fulltext（语义侧不可用）
-      search: async () => ({ results: [], mode: 'fulltext' as const }),
+      runTool: async () => ({ text: JSON.stringify({ results: [] }), searchMode: 'fulltext' }),
     }));
     assert.equal(r.mode, 'fulltext', '降级必须如实透出，否则面板会把全文检索显示成语义+全文');
   });
@@ -525,44 +586,25 @@ describe('⑥ 服务层形状（与快速通道同形，前端一套渲染）', 
     assert.equal(result.reason, 'no-hits', '无候选走 no-hits，具体原因靠 parsed 区分');
     assert.equal(result.parsed, false, '模型输出不是 JSON 时必须如实标 parsed:false');
     assert.equal(result.candidates.length, 0);
-    assert.ok(result.steps.some((s) => s.name === 'verify'));
+    assert.deepEqual(result.steps, [], '一次工具都没调 → 没有过程步骤（旧实现的 understand/verify 已随旧函数删除）');
     assert.deepEqual(result.excluded.associated, []);
   });
-});
 
-describe('⑦ auto-review 修复锁（硬超时语义 / 名次 / excluded 口径）', () => {
-  it('硬超时恒为 45s，不被 llm.requestTimeoutMs 夹取；库内名次按分数降序；excluded 只给文档名', async () => {
+  it('候选与 excluded 口径：已关联文档只给文档名', async () => {
     const ev = await createEvent(scope, {
-      title: '超时与名次验证',
+      title: 'excluded 口径验证',
       typeId: 'et_1',
       docs: [{ group: GROUP, name: ART_A }],
     });
     const script = scriptedStream([
-      { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
-      { text: JSON.stringify([{ sourceScope: scope, group: GROUP, name: ART_B, reason: '命中' }]) },
+      { calls: [{ name: 'ki_get_module_info', args: { scope, group: GROUP, relation: ART_B } }] },
+      { text: JSON.stringify({ summary: '命中', candidates: [{ scope: scope, group: GROUP, name: ART_B, why: '命中' }] }) },
     ]);
-    const r = await runDeepFindAsSearchResult(scope, ev.id, {
-      targets: [scope],
-      config: baseConfig(),
-      // 单轮请求上限配得很小：不得因此把整次查找的硬超时也压到 5s
-      kiConfig: {
-        ...cfg,
-        llm: { ...(cfg.llm as object), requestTimeoutMs: 5_000 } as KiConfig['llm'],
-      },
-      llm: { stream: script.fn, status: () => okStatus() },
-      // 两篇都命中，ART_B 分数更高 → 名次应为 1
-      search: async () => ({
-        results: [
-          { scope, group: GROUP, relation: ART_B, score: 0.9 },
-          { scope, group: GROUP, relation: ART_A, score: 0.4 },
-        ],
-      }),
-    });
-
-    const understand = r.steps.find((x) => x.name === 'understand')!;
-    assert.equal(understand.metrics.timeoutMs, 45_000, '硬超时硬编码 45s，不被 llm.requestTimeoutMs 夹取');
-    assert.equal(r.candidates[0]?.rankInScope, 1, '名次按分数降序算，不是命中出现顺序');
+    const r = await runDeepFindAsSearchResult(scope, ev.id, deps({
+      stream: { stream: script.fn, status: () => okStatus() },
+    }));
     assert.deepEqual(r.excluded.associated, [ART_A], 'excluded 与快速通道同口径：只给文档名');
+    assert.equal(r.candidates.length, 1);
   });
 });
 

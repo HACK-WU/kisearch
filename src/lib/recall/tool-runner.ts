@@ -44,7 +44,9 @@ export function makeRecallToolRunner(opts: ToolRunnerOptions): GroundedToolRunne
       // scope 由工具注入（一次多库），模型传的 scope 一律忽略
       const res = await executeSearch({ scope: targets.join(','), query, mode, limit });
       const hits = (res as { results?: Array<{ scope?: string; group?: string; relation?: string; score?: number }> }).results ?? [];
-      return { text: clip(JSON.stringify({ results: hits })) };
+      // 实际模式（语义侧不可用时引擎会降级）：让调用方如实显示"仅全文"
+      const actualMode = (res as { mode?: 'hybrid' | 'fulltext' }).mode ?? mode;
+      return { text: clip(JSON.stringify({ results: hits })), searchMode: actualMode };
     }
 
     if (name === 'ki_get_module_info') {
