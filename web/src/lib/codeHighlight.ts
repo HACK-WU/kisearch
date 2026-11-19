@@ -63,6 +63,32 @@ export function resolveHighlightLanguage(language?: string): string | null {
   return hljs.getLanguage(raw) ? raw : null;
 }
 
+/** 源码文件扩展名 → 高亮语言 id（只覆盖本项目会读到的源码类型；未知返回 null） */
+const FILE_LANGUAGES: Record<string, string> = {
+  ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
+  js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
+  py: 'python', go: 'go', java: 'java', rs: 'rust',
+  json: 'json', jsonc: 'json', yaml: 'yaml', yml: 'yaml',
+  sh: 'bash', bash: 'bash', zsh: 'bash',
+  css: 'css', scss: 'css',
+  html: 'xml', xml: 'xml', svg: 'xml',
+  sql: 'sql',
+};
+
+/**
+ * 按文件路径猜高亮语言（`src/a/b.tsx` → `typescript`）。
+ *
+ * 只做"文件名 → 语言"这一层，语言是否真的装载由 `resolveHighlightLanguage` 决定 ——
+ * 未知扩展名返回 null，调用方退回**转义纯文本**（代码仍完整可读，只是没颜色）。
+ */
+export function resolveFileLanguage(file: string): string | null {
+  const dot = file.lastIndexOf('.');
+  if (dot < 0) return null;
+  const ext = file.slice(dot + 1).toLowerCase();
+  const lang = FILE_LANGUAGES[ext];
+  return lang ? resolveHighlightLanguage(lang) : null;
+}
+
 /**
  * 高亮一段代码，返回可安全插入 `<code>` 的 HTML；**返回 null 表示不着色**（调用方须自行转义）。
  *

@@ -1,5 +1,5 @@
 import type { CodeLocRowProps } from './types';
-import { highlightCodeHtml, resolveHighlightLanguage } from '@/lib/codeHighlight';
+import { highlightCodeHtml, resolveFileLanguage } from '@/lib/codeHighlight';
 
 /**
  * 已确认代码位置行（2026-11-17 改版 · 批 4，真机走查后补：图标 + 语法高亮）。
@@ -11,23 +11,6 @@ import { highlightCodeHtml, resolveHighlightLanguage } from '@/lib/codeHighlight
  * · 高亮复用 `codeHighlight`（highlight.js 同步、按需语言）：未知语言/超阈值返回 null 时
  *   退回**转义纯文本**，绝不因为高亮失败而丢内容。
  */
-
-/** 扩展名 → highlight.js 语言 id（只覆盖本项目会读到的源码类型） */
-function langOfFile(file: string): string | undefined {
-  const ext = file.slice(file.lastIndexOf('.') + 1).toLowerCase();
-  const map: Record<string, string> = {
-    ts: 'typescript', tsx: 'typescript', mts: 'typescript', cts: 'typescript',
-    js: 'javascript', jsx: 'javascript', mjs: 'javascript', cjs: 'javascript',
-    py: 'python', go: 'go', java: 'java', rs: 'rust',
-    json: 'json', jsonc: 'json', yaml: 'yaml', yml: 'yaml',
-    sh: 'bash', bash: 'bash', zsh: 'bash',
-    css: 'css', scss: 'css',
-    html: 'xml', xml: 'xml', svg: 'xml',
-    sql: 'sql',
-  };
-  const lang = map[ext];
-  return lang && resolveHighlightLanguage(lang) ? lang : undefined;
-}
 
 const ICON_CODE = (
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -41,7 +24,7 @@ export function CodeLocRow(props: CodeLocRowProps): JSX.Element {
   const expandId = `codeloc-${loc.id}`;
   const hasSnippet = Boolean(loc.snippet && loc.snippet.trim());
   const path = `${loc.file}:${loc.line}${loc.endLine ? `-${loc.endLine}` : ''}`;
-  const html = open && loc.snippet ? highlightCodeHtml(loc.snippet, langOfFile(loc.file)) : null;
+  const html = open && loc.snippet ? highlightCodeHtml(loc.snippet, resolveFileLanguage(loc.file) ?? undefined) : null;
   /**
    * 历史位置可能**没有** `confidence`（早期确认 / 手工录入 / 旧版草稿）。
    * 类型上是必填，但读盘不做逐字段校验 —— 直接 `.toFixed(2)` 会让整张卡片崩掉，

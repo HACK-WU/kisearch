@@ -220,11 +220,20 @@ describe('S-04 异步分析 Pipeline', () => {
         yield { type: 'done', finishReason: 'tool_calls' };
         return;
       }
-      // 第 3 轮输出 JSON：含 1 个真实位置 + 1 个幻觉路径 + 1 个越界行号
+      // 第 3 轮输出 JSON：含 1 个真实位置 + 1 个幻觉路径 + 1 个越界行号；
+      // chain 里再掺一条非法 kind、一条指向幻觉位置的 ref、一条挂在非根因节点上的分支
       yield {
         type: 'content',
         text: JSON.stringify({
           conclusion: '根因是 token 为空时未兜底：登录守卫在解构前就读取了 token，缺失即抛错。',
+          chain: [
+            { kind: 'symptom', text: '登录时提示 TOKEN_MISSING' },
+            { kind: 'cause', text: '守卫在解构前读取 token', ref: 'src/login.ts:3', branches: ['挂在原因上的分支应被丢弃'] },
+            { kind: 'bogus', text: '非法类型应被丢弃' },
+            { kind: 'root', text: '未对空 token 兜底', ref: 'src/ghost.ts:10', branches: ['token 来自 localStorage', '冷启动时 token 尚未写入'] },
+            { kind: 'impact', text: '登录直接失败，用户无法进入' },
+            { kind: 'fix', text: '解构前判空并给出可操作的提示' },
+          ],
           candidates: [
             { file: 'src/login.ts', line: 3, why: 'token 为空直接抛出 TOKEN_MISSING', confidence: 0.9 },
             { file: 'src/ghost.ts', line: 10, why: '幻觉文件', confidence: 0.8 },
@@ -268,6 +277,23 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.equal(finalDoc.draft?.candidates.length, 1, '幻觉文件与越界行号必须被二次校验剔除');
     assert.equal(finalDoc.draft?.candidates[0]!.file, 'src/login.ts');
     assert.equal(finalDoc.draft?.candidates[0]!.line, 3);
+
+    // ── 结论因果链（2026-11-19）：非法项丢弃、引用跟着候选校验一起剪 ──
+    const chain = finalDoc.draft?.chain ?? [];
+    assert.deepEqual(
+      chain.map((n) => n.kind),
+      ['symptom', 'cause', 'root', 'impact', 'fix'],
+      '非法 kind 必须丢弃，节点顺序保持因果顺序',
+    );
+    assert.equal(chain.length, 5, '节点上限 5：多余节点不得进入落盘结果');
+    assert.equal(chain[1]!.ref, 'src/login.ts:3', '指向真实候选的引用必须保留');
+    assert.equal(chain[1]!.branches, undefined, 'branches 只允许挂在 root 上');
+    assert.equal(chain[2]!.ref, undefined, '指向幻觉位置的引用必须被剪掉（节点文本保留）');
+    assert.deepEqual(
+      chain[2]!.branches,
+      ['token 来自 localStorage', '冷启动时 token 尚未写入'],
+      '根因下的触发条件必须原样保留',
+    );
     // ── 调用明细：入参 / 返回 / 思考（2026-11-18，MCP 与本地工具同一条路径）──
     const toolSteps = (finalDoc.draft?.steps ?? []).filter((s) => (s.calls?.length ?? 0) > 0);
     assert.ok(toolSteps.length >= 2, '应有至少两轮带工具调用的步骤');

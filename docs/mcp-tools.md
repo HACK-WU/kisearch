@@ -19,7 +19,7 @@
 | `ki_lifecycle_list` | 列出文档分类（wiki / temp / event）与期限选项、分类预设，以及指定 group 的有效默认分类（只读） | `scope`、`group`（传了才回显该组默认分类，避免无界返回） |
 | `ki_event_list` | 列出事件：id / `#shortId` / 标题 / 类型 / 当前阶段 / 可见性 / 关联文档预览（只读；创建用 ki_event_create） | `scope`、`status`（`open` 默认 / `closed` / `all`）、`type`（先调 `ki_event_type_list` 取 id）、`q`、`limit`、`offset` |
 | `ki_event_type_list` | 列出事件类型及其阶段链（每阶段可见性）与收口动作（只读，不能创建或修改类型） | `scope` |
-| `ki_event_get` | 读单条事件完整详情（只读）：描述全文 / 阶段链与当前可见性 / 关联文档 / 参考文档 / AI 分析结论与未确认点 / 已确认代码位置 / 阶段日志。**找事件用 ki_event_list，读事件用本工具**（list 只有 120 字结论预览与位置预览） | `event`（`evt_…` / `#3` / `3`）、`members_limit`、`refs_limit`、`logs_limit`、`locations_limit`、`location_snippet_limit`（均为 0 时该块不返回，仍给 `total`） |
+| `ki_event_get` | 读单条事件完整详情（只读）：描述全文 / 阶段链与当前可见性 / 关联文档 / 参考文档 / AI 分析结论（一句话总结 + 因果链）与未确认点 / 已确认代码位置 / 阶段日志。**找事件用 ki_event_list，读事件用本工具**（list 只有 120 字结论预览与位置预览） | `event`（`evt_…` / `#3` / `3`）、`members_limit`、`refs_limit`、`logs_limit`、`locations_limit`、`location_snippet_limit`（均为 0 时该块不返回，仍给 `total`） |
 | `ki_ask` | **模型消耗型**：让 ki 用它自己的模型 + 指定知识库回答一个问题，内部自动多轮检索再合成，返回答案与来源；默认每次全新问答，追问时把上次的 `contextId` 作为 `context_id` 传回（10 分钟内有效，每次交互顺延）。单次通常 5~30 秒，超 45 秒返回已生成的部分答案（`truncated=true`）。只读 Token 不可见 | `scope`（**必填**，单个具体库）、`question`、`background`（≤2000 字符，只对本轮生效）、`context_id` |
 | `ki_recall` | **开工前预取**（需要模型）：给任务画像 + 范围，由 ki 自己的模型多轮读正文后返回「值得先读的文档清单（含 why / evidence）+ 整体结论 summary + 判断不了的点 uncertainties」，0 篇是合法结论。未配置模型 / 未确认外发 / 模型不支持 tools 时**直接不可用**（不降级，文案引导改用 `ki_search`）。只读 Token **可用**（产出只有清单与判断，不写数据） | `scope`（**必填**，库名或视图，可多个）、`task`（≤2000 字）、`hints`（≤10 条强线索）、`exclude`（已读清单）、`limit`（默认 8） |
 

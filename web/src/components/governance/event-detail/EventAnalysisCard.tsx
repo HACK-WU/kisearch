@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { ConfirmedCodeLocation, EventAnalysis, EventView } from '@/api/governanceApi';
 import { AiAnalyzePanel } from '@/components/governance/AiAnalyzePanel';
 import { CodeLocRow } from './CodeLocRow';
+import { ConclusionChain } from './ConclusionChain';
 import { AskBlock } from './AskBlock';
 
 /**
@@ -51,6 +52,11 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
   const { scope, event, analysis, canWrite, canAsk, busy, startSignal, onUpdated, onOpenSettings, onRemoveLocation } = props;
   const draft = analysis?.draft ?? null;
   const confirmed = analysis?.confirmed ?? [];
+  /*
+   * 结论链：空数组表示"这版没分层"（旧事件 / 模型没给），此时回退纯文本结论。
+   * `?? []` 不能省 —— 老接口返回的旧 draft 里没有这个字段。
+   */
+  const chain = draft?.chain ?? [];
   /** 可多行同时展开（I-28） */
   const [openLocs, setOpenLocs] = useState<string[]>([]);
 
@@ -81,7 +87,9 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
          * 原先只在有 conclusion 时渲染，导致「分析完成但未定位到」时整块空白，
          * 用户分不清是没跑、还在跑、还是确实没找到。
          */}
-        {draft?.conclusion ? (
+        {chain.length > 0 ? (
+          <ConclusionChain summary={draft?.conclusion ?? null} chain={chain} confirmed={confirmed} />
+        ) : draft?.conclusion ? (
           <div className="gov-conclusion">
             <div className="gov-conclusion__head">分析结论</div>
             <p className="gov-conclusion__text">{draft.conclusion}</p>

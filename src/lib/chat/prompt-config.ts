@@ -764,9 +764,13 @@ candidates 为空是**正常交付**。不允许为了"有输出"把疑似提级
 
 ## 五、输出前自检
 - 每条 candidates 的 file / line 都能在本次工具返回里找到
-- conclusion 里不出现 candidates 之外的位置
+- conclusion 是一句话总结（≤120 字），细节在 chain 里，不重复
+- chain 顺序是 现象 → 直接原因 → 根本原因 → 影响面 → 建议，缺哪层就跳过
+- chain 里每个 ref 都指向 candidates 中的位置（file:line），指不到就删掉 ref 字段
+- 正文里提到的文件路径都用反引号包住（有行号写 \`src/a.ts:128\`），别写成裸文本 —— 反引号片段才会变成可点开的位置
+- conclusion 与 chain 里都不出现 candidates 之外的位置
 - unconfirmed 写的是「缺什么证据」，不是「可能 / 也许」
-- candidates 为空时，conclusion 必须说明已排查哪些方向
+- candidates 为空时，conclusion 必须说明已排查哪些方向，chain 可以是空数组
 
 约束：只读。不修改文件，不执行命令，不臆造未在事件、文档或源码中出现的信息。`;
 

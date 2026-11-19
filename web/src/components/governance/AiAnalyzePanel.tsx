@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ThinkingBlock, ToolCallRow } from './ToolCallRow';
 import { StepMetrics } from './StepMetrics';
+import { ConclusionChain } from './event-detail/ConclusionChain';
 import {
   cancelEventAnalysis,
   confirmEventAnalysis,
@@ -464,14 +465,31 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                * 结论就近展示：此前只出现在卡片顶部，用户滚到过程区就看不到了（真机反馈）。
                * 放在滚动容器末尾 → 跟随步骤一起滚，读完过程正好读到结论。
                */}
-              {!isRunning && draft?.conclusion ? (
+              {!isRunning && (draft?.conclusion || (draft?.chain?.length ?? 0) > 0) ? (
                 <div className="gov-ai-final">
-                  <div className="gov-ai-final__head">最终结论</div>
-                  <p className="gov-ai-final__text">{draft.conclusion}</p>
+                  {draft && (draft.chain?.length ?? 0) > 0 ? (
+                    /*
+                     * 与卡片顶部同一份数据、同一个组件：过程区滚到底看到的结论
+                     * 不该是另一种排版（分层结果在下面、卡片上却是纯文本会很割裂）。
+                     * boxed=false：这里已有 `.gov-ai-final` 容器，不再套一层紫色壳。
+                     */
+                    <ConclusionChain
+                      summary={draft.conclusion}
+                      chain={draft.chain ?? []}
+                      confirmed={confirmed}
+                      title="最终结论"
+                      boxed={false}
+                    />
+                  ) : (
+                    <>
+                      <div className="gov-ai-final__head">最终结论</div>
+                      <p className="gov-ai-final__text">{draft?.conclusion}</p>
+                    </>
+                  )}
                   <div className="gov-ai-final__meta">
                     定位到 {candidates.length} 处候选
                     {pendingCandidates.length > 0 ? ` · 待确认 ${pendingCandidates.length} 处` : ' · 已全部确认'}
-                    {draft.unconfirmed.length > 0 ? ` · 未确认点 ${draft.unconfirmed.length} 项` : ''}
+                    {(draft?.unconfirmed.length ?? 0) > 0 ? ` · 未确认点 ${draft?.unconfirmed.length} 项` : ''}
                   </div>
                 </div>
               ) : null}

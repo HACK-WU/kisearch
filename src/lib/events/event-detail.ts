@@ -23,7 +23,7 @@ import { readRefs } from './refs-store.js';
 import { readStageLogs } from './stage-log.js';
 import { readAnalysisDocRaw, normalizeAnalysisDocForRead } from './analysis-store.js';
 import type {
-  EventAnalysisDoc, EventRecord, EventStage, EventStageLog, EventTypeRecord, Visibility,
+  ConclusionNode, EventAnalysisDoc, EventRecord, EventStage, EventStageLog, EventTypeRecord, Visibility,
 } from './types.js';
 
 /** 单块上限：超过就截断并给 note（默认值见工具层 zod，服务层只做兜底夹取） */
@@ -120,6 +120,8 @@ export interface EventDetailView {
     draft: {
       status: string;
       conclusion: string | null;
+      /** 结论因果链（2026-11-19）；旧数据为空数组，前端回退渲染 `conclusion` */
+      chain: ConclusionNode[];
       unconfirmed: string[];
       commit: string | null;
       startedAt: number;
@@ -357,6 +359,7 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
         ? {
           status: draft.status,
           conclusion: draft.conclusion ?? null,
+          chain: Array.isArray(draft.chain) ? draft.chain : [],
           unconfirmed: Array.isArray(draft.unconfirmed) ? draft.unconfirmed : [],
           commit: draft.commit ?? null,
           startedAt: draft.startedAt,

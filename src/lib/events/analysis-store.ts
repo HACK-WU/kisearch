@@ -21,6 +21,7 @@ import { readJson } from '../store.js';
 import { walWrite } from '../wal.js';
 import { withScopeWriteLock } from '../scope-write-lock.js';
 import { GovernanceError } from '../governance-errors.js';
+import { normalizeChain } from './conclusion-chain.js';
 import type {
   AnalysisDraft,
   ConfirmedCodeLocation,
@@ -76,9 +77,24 @@ export function normalizeAnalysisDocForRead(
    * 插在僵尸分支里等于只修了 running 的文件）；但**不能 return** ——
    * 否则僵尸 running 的恢复逻辑会被跳过（曾因此让「跨进程僵尸态」测试变红）。
    */
-  const normalized = typeof (d as { conclusion?: unknown }).conclusion === 'string'
+  const rawChain = (d as { chain?: unknown }).chain;
+  const chain = normalizeChain(rawChain);
+  const conclusionOk = typeof (d as { conclusion?: unknown }).conclusion === 'string';
+  /*
+   * 历史文件兼容（2026-11-19 引入 chain）：
+   * - 旧文件没有 `chain` → 归一为 `[]`，前端回退渲染 `conclusion` 纯文本；
+   * - `chain` 是数组但含非法项 → 重新归一（长度变化即判定需要替换）。
+   * 两者都"没有变化"时保留原对象引用，避免每次读盘都造新对象
+   * （下游有 `normalized === d` 的早退判断，破坏它等于让所有读取都走慢路径）。
+   */
+  const chainOk = Array.isArray(rawChain) && chain.length === rawChain.length;
+  const normalized = conclusionOk && chainOk
     ? d
-    : { ...d, conclusion: null };
+    : {
+      ...d,
+      conclusion: conclusionOk ? d.conclusion : null,
+      chain: chainOk ? d.chain : chain,
+    };
   const withNormalized = (draft: typeof d) => (normalized === d ? doc : { ...doc, draft });
 
   if (normalized.status !== 'running' || isActive) return withNormalized(normalized);
