@@ -44,6 +44,9 @@ const analysisCardSrc = fs.readFileSync(
 const summaryCardSrc = fs.readFileSync(
   path.join(webRoot, 'src/components/governance/event-detail/EventSummaryCard.tsx'), 'utf8');
 const scopePickerSrc = fs.readFileSync(path.join(webRoot, 'src/components/ScopeMultiPicker.tsx'), 'utf8');
+/** 追问区（2026-11-19 改版：过程与回答复用 AI 分析排版，不再套对话气泡） */
+const askBlockSrc = fs.readFileSync(
+  path.join(webRoot, 'src/components/governance/event-detail/AskBlock.tsx'), 'utf8');
 const kiCss = fs.readFileSync(path.join(webRoot, 'src/styles/ki.css'), 'utf8');
 const govCss = fs.readFileSync(path.join(webRoot, 'src/styles/governance.css'), 'utf8');
 const pickerCss = fs.readFileSync(path.join(webRoot, 'src/styles/scope-picker.css'), 'utf8');
@@ -303,5 +306,25 @@ describe('S-05c · 过程可观测（去重 + 工具明细）', () => {
     assert.match(stepMetricsSrc, /members: '关联文档'/, 'members → 关联文档');
     assert.match(stepMetricsSrc, /verified: '保留候选'/, 'verified → 保留候选');
     assert.match(stepMetricsSrc, /hasDescription: \{ yes: '有', no: '无' \}/, '布尔值要翻成中文');
+  });
+
+  it('追问区复用 AI 分析的展示与逻辑，不套对话气泡（2026-11-19）', () => {
+    // 过程：折叠头 + 步骤列表 + 思考块，与 AI 分析同款（类名照搬，样式跟着分析卡走）
+    assert.match(askBlockSrc, /className="gov-ai-proc__head"/, '过程区要用 AI 分析的折叠头');
+    assert.match(askBlockSrc, /gov-ai-proc__steps/, '步骤列表复用 AI 分析的过程列表');
+    assert.match(askBlockSrc, /gov-ai-step__mark/, '每步带已完成标记（与分析卡一致）');
+    assert.match(askBlockSrc, /<ThinkingBlock/, '思考复用思考块组件（不自己铺长文本）');
+    assert.match(askBlockSrc, /gov-ai-proc__toggle/, '折叠头要有「查看过程 / 收起」入口');
+    assert.match(askBlockSrc, /stickRef/, '运行中贴底跟随，回看时不打断');
+    // 回答：复用「最终结论」块
+    assert.match(askBlockSrc, /gov-ai-final gov-ask__answer/, '回答复用 AI 分析的结论块');
+    assert.match(askBlockSrc, /gov-ask__q/, '提问平铺成一行');
+    // 不再套气泡 / 不再自己造一套过程样式
+    assert.doesNotMatch(askBlockSrc, /gov-ask__bubble|gov-ask__msg/, '提问不得再套对话气泡');
+    // 注释里会提到它，这里只查 className —— 追问区自己就是容器，不再套一层卡片
+    assert.doesNotMatch(askBlockSrc, /className="[^"]*gov-ai-embed/, '不套 AI 分析面板那层卡片');
+    assert.doesNotMatch(govCss, /\.gov-ask__bubble/, '气泡样式随之删除，避免复活');
+    // 不反向耦合：AI 分析组件不得依赖追问区的类名
+    assert.doesNotMatch(modalSrc, /gov-ask/, 'AI 分析组件保持独立，不回引追问样式');
   });
 });

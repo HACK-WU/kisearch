@@ -139,7 +139,17 @@ export function EventsPage(): JSX.Element {
    * `replace: true` —— 点十次事件不该在浏览器历史里留十个台阶，但刷新仍停在同一事件；
    * 新 id 也顺手清掉上一个事件的深链标记，避免旧 id 留在地址栏里骗人。
    */
+  /**
+   * 选中 id 的 ref 镜像（2026-11-19 修「删除事件后弹 404」）：
+   * `run()` 收尾要「操作完刷新当前详情」，但它读的是**闭包里的 `activeId`** ——
+   * 删除事件后 `selectEvent(null)` 只改 state，闭包仍是刚删掉的 id，
+   * 于是紧接着 `loadDetail(旧 id)` 打出 `getEventDetail` + `listRefs` 双 404，
+   * 其错误消息还会覆盖掉成功提示。ref 在这里同步写，闭包读它才是「此刻」的选中。
+   */
+  const activeIdRef = useRef<string | null>(null);
   const selectEvent = useCallback((id: string | null): void => {
+    // 必须先于 setState 同步写：run 的收尾在同一次事件循环里就要读到新值
+    activeIdRef.current = id;
     setActiveId(id);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
@@ -334,6 +344,11 @@ export function EventsPage(): JSX.Element {
 
   useEffect(() => { void loadList(); }, [loadList]);
 
+  /** 兜底同步：首屏与深链的选中由 `loadList` 直接 `setActiveId`，不经过 `selectEvent` */
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
+
   /**
    * 深链：选中后滚到可见（列表可能很长，右栏已切过去但左栏还停在别处）。
    *
@@ -502,7 +517,8 @@ export function EventsPage(): JSX.Element {
     try {
       setMessage({ tone: 'ok', text: await fn() });
       await loadList();
-      if (activeId) await loadDetail(activeId);
+      // 读 ref 而不是闭包里的 activeId：删除事件后它已被清空，不能再拿旧 id 去查
+      if (activeIdRef.current) await loadDetail(activeIdRef.current);
     } catch (err) {
       const code = err instanceof GovernanceApiError && err.code ? `[${err.code}] ` : '';
       setMessage({ tone: 'err', text: `${code}${(err as Error).message}` });
