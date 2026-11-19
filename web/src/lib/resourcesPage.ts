@@ -118,6 +118,7 @@ export const MCP_TOOLS: McpToolGroup[] = [
     tone: 'read',
     items: [
       { name: 'ki_search', purpose: '语义检索（hybrid 混合 / fulltext 只查全文）' },
+      { name: 'ki_recall', purpose: '开工前预取：给任务画像 + 范围，由模型读正文后返回该先读哪几篇（需模型；只读 Token 可用）' },
       { name: 'ki_group_list', purpose: 'Group 树与 Relations，支持 hot / full 等分区与向量兜底' },
       { name: 'ki_get_module_info', purpose: '读取本地 KB 原文（同 Group 批量 ≤10 条）' },
       { name: 'ki_scope_list', purpose: '列出所有 scope 及 KB / 向量状态、只读标记与 Wiki 回写可用性' },
@@ -171,7 +172,7 @@ export const MCP_TOOL_COUNT = MCP_TOOLS.reduce((sum, group) => sum + group.items
 /** 工具清单的边界说明：MCP 刻意不暴露的能力 + 只读 Token 的可见性差异 */
 export const MCP_TOOLS_NOTE =
   'MCP 刻意不暴露 scope / doc 级联删除与 --force 类操作 —— 需要级联或强制操作时用 CLI（左侧「Scope 数据操作」）。'
-  // 上面列的是**读写会话**的全量工具；只读 Token 的 tools/list 只有「读」组的前 9 个
+  // 上面列的是**读写会话**的全量工具；只读 Token 的 tools/list 只有「读」组（含 ki_recall）
   // （写工具与 ki_ask 都不注册 —— ki_ask 对库只读但消耗模型额度，按写工具准入）。
   // 不说明会让拿只读 Token 接入的人以为"页面写了 19 个，我却只看到 9 个"是坏了。
   + '只读 Token 的会话里，写工具与 ki_ask 不会出现在 tools/list。';

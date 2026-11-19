@@ -1,16 +1,20 @@
 /**
- * recall/codes.ts —— `ki_recall` 的错误码**唯一真源**（P2 定稿）。
+ * recall/codes.ts —— `ki_recall` 的错误码**唯一真源**。
  *
  * 两段式，别合并：
- *   - **内核码**（`RecallKernelErrorCode`）：S-01 只看「范围/检索」出了什么事，不关心对外语义；
+ *   - **内核码**（`RecallKernelErrorCode`）：S-01 只看「范围/模型/执行」出了什么事，不关心对外语义；
  *   - **工具码**（`RECALL_TOOL_CODES`）：MCP 客户端只看得到它，必须自带原因 + 出路文案。
  *
- * 为什么不直接抛工具码：内核要能在工具层之外被单测（也避免"检索层开始关心 HTTP 语义"）。
+ * 为什么不直接抛工具码：内核要能在工具层之外被单测（也避免"内核开始关心 MCP 语义"）。
  * 映射只有一张表（`toolCodeForKernel`），新增内核码时 TS 会逼你补映射（穷尽 switch）。
  *
- * ⚠️ 12 个工具码里 `TOKEN_MODEL_FORBIDDEN` **不在本文件**：它由
- *    `lib/mcp-tools/tool-access.ts` 统一定义，所有「模型消耗型」工具共用同一个码。
- *    本文件只负责 `RECALL_*` 那 11 个。
+ * ⚠️ `TOKEN_MODEL_FORBIDDEN` **不在本文件**：它由 `lib/mcp-tools/tool-access.ts` 统一定义，
+ *    所有「模型消耗型」工具共用同一个码。
+ *
+ * 2026-11-18（REQ-20261118-004）变更：
+ *   · 删 `MODE_UNAVAILABLE`（不再有通道可选）与 `BUSY`（并发槽取消）
+ *   · 新增 `MODEL_UNAVAILABLE` / `DISCLOSURE_REQUIRED` / `TOOLS_UNSUPPORTED` 三态 ——
+ *     三者都是**直接不可用**（不降级），且对外文案统一引导「改用 ki_search 自己查」
  */
 
 export type RecallKernelErrorCode =
@@ -23,7 +27,13 @@ export type RecallKernelErrorCode =
   /** 全部 target 被剔除（权限/缺失/超限） */
   | 'NO_TARGETS'
   /** 每个 target 的检索都失败了 */
-  | 'ALL_TARGETS_FAILED';
+  | 'ALL_TARGETS_FAILED'
+  /** 模型未配置 / 不合法 URL */
+  | 'MODEL_UNAVAILABLE'
+  /** 知识库内容外发未确认（`llm.kbDisclosureAck !== true`） */
+  | 'DISCLOSURE_REQUIRED'
+  /** 模型不支持 function calling（`llm.supportsTools === false`） */
+  | 'TOOLS_UNSUPPORTED';
 
 export const RECALL_TOOL_CODES = {
   TASK_INVALID: 'RECALL_TASK_INVALID',
@@ -32,8 +42,9 @@ export const RECALL_TOOL_CODES = {
   SCOPE_UNKNOWN: 'RECALL_SCOPE_UNKNOWN',
   SCOPE_FORBIDDEN: 'RECALL_SCOPE_FORBIDDEN',
   TARGETS_EMPTY: 'RECALL_TARGETS_EMPTY',
-  MODE_UNAVAILABLE: 'RECALL_MODE_UNAVAILABLE',
-  BUSY: 'RECALL_BUSY',
+  MODEL_UNAVAILABLE: 'RECALL_MODEL_UNAVAILABLE',
+  DISCLOSURE_REQUIRED: 'RECALL_DISCLOSURE_REQUIRED',
+  TOOLS_UNSUPPORTED: 'RECALL_TOOLS_UNSUPPORTED',
   THROTTLED: 'RECALL_THROTTLED',
   TIMEOUT: 'RECALL_TIMEOUT',
   INTERNAL: 'RECALL_INTERNAL',
@@ -43,7 +54,6 @@ export type RecallToolCode = (typeof RECALL_TOOL_CODES)[keyof typeof RECALL_TOOL
 
 /** 可重试的码（调用方据此决定要不要退避重试；不可重试的**重试也没用**） */
 export const RETRYABLE_TOOL_CODES: ReadonlySet<RecallToolCode> = new Set<RecallToolCode>([
-  RECALL_TOOL_CODES.BUSY,
   RECALL_TOOL_CODES.THROTTLED,
   RECALL_TOOL_CODES.TIMEOUT,
   RECALL_TOOL_CODES.INTERNAL,
@@ -60,6 +70,12 @@ export function toolCodeForKernel(code: RecallKernelErrorCode): RecallToolCode {
       return RECALL_TOOL_CODES.SCOPE_FORBIDDEN;
     case 'NO_TARGETS':
       return RECALL_TOOL_CODES.TARGETS_EMPTY;
+    case 'MODEL_UNAVAILABLE':
+      return RECALL_TOOL_CODES.MODEL_UNAVAILABLE;
+    case 'DISCLOSURE_REQUIRED':
+      return RECALL_TOOL_CODES.DISCLOSURE_REQUIRED;
+    case 'TOOLS_UNSUPPORTED':
+      return RECALL_TOOL_CODES.TOOLS_UNSUPPORTED;
     case 'ALL_TARGETS_FAILED':
       return RECALL_TOOL_CODES.INTERNAL;
   }

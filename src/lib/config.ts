@@ -272,15 +272,9 @@ export interface EmbeddingConfig {
  * ⚠️ 也不含提示词：一期确定性通道不读提示词，加一个"改了没反应"的配置项比不加更糟。
  */
 export interface RecallConfig {
-  /** 检索结果缓存有效期（秒），0 = 关闭，默认 600 */
-  cacheTtlSec?: number;
-  /** 缺省候选数上限（1~20），默认 8 */
-  maxCandidates?: number;
-  /** 进程内并发槽（1~8），默认 4；满了直接 RECALL_BUSY（不排队） */
-  maxConcurrent?: number;
-  /** 每个调用方每分钟上限（1~120），默认 20 */
+  /** 每个调用方每分钟上限（1~120），默认 20 —— 唯一的护栏 */
   throttlePerMinute?: number;
-  /** 单次硬超时（毫秒，1000~45000），默认 20000 */
+  /** 单次硬超时（毫秒，1000~45000），默认 45000（模型循环读 3~5 篇正文需要这个量级） */
   hardTimeoutMs?: number;
 }
 
@@ -864,9 +858,6 @@ function parseAndExpand(configFile: string): KiConfig {
     : undefined;
   const recall: RecallConfig | undefined = rawRecall
     ? {
-        cacheTtlSec: rawRecall.cacheTtlSec !== undefined ? Number(rawRecall.cacheTtlSec) : undefined,
-        maxCandidates: rawRecall.maxCandidates !== undefined ? Number(rawRecall.maxCandidates) : undefined,
-        maxConcurrent: rawRecall.maxConcurrent !== undefined ? Number(rawRecall.maxConcurrent) : undefined,
         throttlePerMinute: rawRecall.throttlePerMinute !== undefined ? Number(rawRecall.throttlePerMinute) : undefined,
         hardTimeoutMs: rawRecall.hardTimeoutMs !== undefined ? Number(rawRecall.hardTimeoutMs) : undefined,
       }

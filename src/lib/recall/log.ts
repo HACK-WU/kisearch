@@ -31,6 +31,8 @@ export interface RecallLogFields {
   /** 错误码（error 时必带） */
   code?: string;
   durationMs?: number;
+  /** 模型通道实际轮次（含收口轮）；排查「轮次耗尽拿不到结论」时最关键 */
+  rounds?: number;
   /** 任务画像原文（内部截断） */
   task?: string;
 }

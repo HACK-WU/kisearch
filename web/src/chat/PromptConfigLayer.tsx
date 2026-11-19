@@ -545,6 +545,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     });
   };
 
+
   // ── AI 查找思考级别 ──（2026-11-18：轮次 / 候选数 / 超时上限整体取消，只留思考级别）
   const findEffortCurrent = findCfg.reasoningEffort ?? data?.reasoningEffortDefault;
   const findEffortOptions = useMemo(
@@ -557,6 +558,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     current: findEffortCurrent,
     overridden: findCfg.reasoningEffort !== undefined,
   });
+
 
   /**
    * 启停查找 skill：依赖工具没开时**不放行**，改为指路（与对话 / 分析同一守卫）。
@@ -1775,14 +1777,6 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
 
         {capability === 'find' && draft && data && (
           <>
-            {/* 一期（无深度通道）：四块配置暂不生效，必须如实说 —— 不能把"改了没反应"换个位置 */}
-            {data.capabilities?.findDeep !== true && (
-              <p className="ki-chat-cfg__warn">
-                深度查找上线后生效：当前「AI 查找」走确定性快速检索，不使用提示词 / Skill / 预算；
-                <b>检索范围对快速查找立即生效</b>。
-              </p>
-            )}
-
             {/* 1. 检索范围 */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
@@ -1852,7 +1846,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               <span className="ki-chat-cfg__label">
                 基础提示词
                 <em className="ki-chat-cfg__badge">
-                  {data.capabilities?.findDeep === true ? '恒定生效' : '深度查找生效'}
+                  恒定生效
                 </em>
               </span>
               <p className="ki-chat-cfg__hint">
@@ -2044,9 +2038,9 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
           descMaxChars={data!.limits.skillDescMaxChars}
           descSuggestedChars={data!.limits.skillDescSuggestedChars}
           // 内置条目不改名；能力级提示词同理（名称由界面固定，避免两处文案漂移）
-          canRename={(modal.kind === 'skill' || modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill' || modal.kind === 'find-skill') && !modalItem.builtin}
+          canRename={(modal.kind === 'skill' || modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill' || modal.kind === 'find-skill' ) && !modalItem.builtin}
           canReset={modal.kind !== 'new-skill' && modal.kind !== 'new-analysis-skill' && modalItem.builtin}
-          canDelete={(modal.kind === 'skill' || modal.kind === 'analysis-skill') && !modalItem.builtin}
+          canDelete={(modal.kind === 'skill' || modal.kind === 'analysis-skill' ) && !modalItem.builtin}
           checkName={(name) => {
             const list = modal.kind === 'analysis-skill' || modal.kind === 'new-analysis-skill'
               ? analysisCfg.skills

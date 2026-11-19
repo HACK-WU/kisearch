@@ -41,9 +41,10 @@ import {
   type CreateEventOutcome,
 } from './events/event-service.js';
 import { bindMembers, unbindMember, type BindMembersOutcome } from './events/members.js';
+import { readLastFind, saveLastFind } from './events/refs-store.js';
 import { listRefs, addRefs, removeRef, searchRefCandidates, searchDocsForAdd, REF_LIMIT } from './events/refs-service.js';
 import { createSearchAdapter, type RefSearchFn } from './events/refs-search.js';
-import { readAllEvents, findEventIn, isEventClosed } from './events/store.js';
+import { readAllEvents, findEventIn, isEventClosed, mustFindEvent } from './events/store.js';
 import { resolveFindTargets } from './events/find-targets.js';
 import { defaultFindConfig, readPromptConfig } from './chat/prompt-config.js';
 import { runDeepFindAsSearchResult } from './events/find-service.js';
@@ -1017,6 +1018,43 @@ export async function handleGovernanceRoutes(
           const scope = scopeFromQuery();
           return sendJson(res, 200, { ok: true, scope, ...listRefs(scope, id) });
         }
+        /**
+         * 「AI 查找」的结论（2026-11-19）：确认加入参考文档后落盘，刷新/换机仍可见。
+         *
+         * 为什么单独一个端点而不是塞进 refs 列表：它是**一次查找的注脚**，
+         * 与 refs 数组的增删无关，读写时机也不同（确认时写、进页面时读）。
+         *
+         * 事件存在性**先校验再读写**（事件 #44）：否则任意 id 都能落一个孤儿
+         * `events/<id>.refs.json`（事件列表里看不到它），读侧还会把「事件不存在」
+         * 伪装成 `lastFind: null` —— 与同前缀 `GET /refs` 的 EVENT_NOT_FOUND 口径不一致。
+         */
+        if (segs[3] === 'find-summary') {
+          if (method === 'GET') {
+            const scope = scopeFromQuery();
+            const event = mustFindEvent(scope, id);
+            return sendJson(res, 200, { ok: true, scope, lastFind: readLastFind(scope, event.id) });
+          }
+          if (method === 'POST') {
+            const b = await body();
+            const scope = scopeFromBody(b);
+            // 事件校验优先于参数校验：否则「id 打错」会被报成「summary 不能为空」
+            const event = mustFindEvent(scope, id);
+            const summary = (str(b.summary) ?? '').trim();
+            if (!summary) {
+              throw new GovernanceError('REF_UPLOAD_BAD_REQUEST', 'summary 不能为空');
+            }
+            const uncertainties = Array.isArray(b.uncertainties)
+              ? b.uncertainties.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).slice(0, 8)
+              : [];
+            // 落盘用规范 id（`evt_…`）：`id` 段是调用方给的，不能直接当文件名
+            saveLastFind(scope, event.id, {
+              summary: summary.slice(0, 2000),
+              ...(uncertainties.length > 0 ? { uncertainties } : {}),
+              at: Date.now(),
+            });
+            return sendJson(res, 200, { ok: true });
+          }
+        }
         if (method === 'POST' && segs[3] === 'search') {
           const b = await body();
           const scope = scopeFromBody(b);
@@ -1034,16 +1072,13 @@ export async function handleGovernanceRoutes(
               { hint: '/governance/docs/search' },
             );
           }
-          /**
-           * **通道分派**（REQ-20261116-005 二期）：`fast` = 确定性五步，`deep` = LLM 工具循环。
+          /*
+           * **只有模型通道**（REQ-20261118-004）：确定性 fast 通道已下线。
            *
-           * 两条通道共用同一份 `targets` 与响应形状（`origin` 区分），前端才不必维护两套渲染。
-           * 未知模式显式 1411 拒绝，不猜。
+           * 理由：不调模型的"AI 查找"实际是「关键词 + 向量检索」，与用户点开"AI"的预期不符；
+           *      调用方不如自己 ki_search。`mode` 入参保留但**忽略**（旧前端发 fast 不报错，
+           *      避免发版瞬间整页 400）。
            */
-          const mode = str(b.mode) ?? 'fast';
-          if (mode !== 'fast' && mode !== 'deep') {
-            throw new GovernanceError('FIND_MODE_INVALID', `未知查找模式：${mode}（可选 fast / deep）`);
-          }
           /**
            * 检索范围：**[事件库] ∪ 配置里放开的额外库**，由服务端解析。
            * 前端不得传 targets —— 那等于把越权入口开放给浏览器（且它拿不到完整授权集）。
@@ -1054,7 +1089,7 @@ export async function handleGovernanceRoutes(
             tokenScopes: ctx.authScopes ?? [ALL_SCOPES],
             config: kiCfg,
           });
-          if (mode === 'deep') {
+          {
             /**
              * 前端关闭弹窗时中止上游请求（一次深度查找可能跑几十秒，白跑既费额度也占并发）。
              * `close` 在正常响应完成后也会触发，故用 `writableEnded` 区分「提前断开」。
@@ -1078,23 +1113,56 @@ export async function handleGovernanceRoutes(
               abortCtl.abort();
             };
             req.once('close', onClose);
+            /*
+             * 流式模式（REQ-20261118-004 · 2026-11-19）：`?stream=1` 时用 SSE 把**过程**实时吐出去。
+             * 不加这个时前端只能等到最后一次性渲染 —— 深度查找要 25~35s，面板整段时间是空白，
+             * 用户会以为卡死（实测反馈）。
+             *
+             * 非流式分支保持原样：其他客户端 / 旧前端不受影响。
+             */
+            const wantStream = String(req.url ?? '').includes('stream=1');
+            let sseStep: ((payload: unknown) => void) | null = null;
+            if (wantStream) {
+              res.writeHead(200, {
+                'Content-Type': 'text/event-stream; charset=utf-8',
+                'Cache-Control': 'no-cache, no-transform',
+                Connection: 'keep-alive',
+                'X-Accel-Buffering': 'no',
+              });
+              // SSE 必须立刻刷头：否则前端要等到第一条事件才拿到 200
+              res.flushHeaders?.();
+              res.socket?.setNoDelay?.(true);
+              sseStep = (payload) => { res.write(`event: step\ndata: ${JSON.stringify(payload)}\n\n`); };
+            }
             try {
               const deepResult = await runDeepFindAsSearchResult(scope, id, {
                 targets,
                 config: promptCfg.find ?? defaultFindConfig(),
                 kiConfig: kiCfg,
                 signal: abortCtl.signal,
+                ...(sseStep ? { onProgress: (call: { name: string; args: Record<string, unknown>; ms: number; ok: boolean; round: number }) => sseStep?.({ ...call, label: findToolLabel(call.name) }) } : {}),
               });
-              return sendJson(res, 200, {
+              const payload = {
                 ok: true,
                 scope,
                 ...deepResult,
                 ...(skipped.length > 0 ? { skippedTargets: skipped } : {}),
-              });
+              };
+              if (sseStep) {
+                res.write(`event: result\ndata: ${JSON.stringify(payload)}\n\n`);
+                res.end();
+                // 该路由处理器返回 boolean（true = 已处理），`return;` 在这里类型不合法
+                return true;
+              }
+              return sendJson(res, 200, payload);
             } finally {
               req.removeListener('close', onClose);
             }
           }
+          /*
+           * 以下为**已下线**的确定性通道（REQ-20261118-004）。上面的模型通道恒 return，
+           * 故这段不可达；保留一个版本便于回滚，下个版本连同 searchRefCandidates 一起删。
+           */
           const result = await searchRefCandidates(
             scope,
             id,
@@ -1353,4 +1421,15 @@ export async function handleGovernanceRoutes(
 /** 诊断文件路径（供外部测试与页面复用） */
 export function governanceDiagnosticsPath(scope: string): string {
   return failureFilePath(scope);
+}
+
+/** 「AI 查找」过程区展示的工具名（与 deep-find-core 的映射保持一致） */
+function findToolLabel(name: string): string {
+  switch (name) {
+    case 'ki_search': return '检索知识库';
+    case 'ki_get_module_info': return '读取文档正文';
+    case 'ki_group_list': return '查看知识树';
+    case 'ki_tag_list': return '查看标签';
+    default: return name;
+  }
 }

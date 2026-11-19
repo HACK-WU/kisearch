@@ -52,9 +52,10 @@ describe('① 默认值', () => {
     assert.ok(d, '默认配置必须带 find 域（否则设置页显示"未接入"）');
     assert.deepEqual(d.ranges.extraScopes, [], '默认不放开任何额外库 = 与历史行为一致');
     assert.ok(d.prompt.content.length > 0);
-    assert.equal(d.skills.length, 1);
-    assert.equal(d.skills[0]!.name, 'refs-locate', '内置 skill 名由服务端常量强制');
-    assert.equal(d.skills[0]!.enabled, true, '只读 skill 默认启用（S-01 D-01-6）');
+    // REQ-20261118-004：内置 skill 由 1 个变 2 个 —— 同一套内核，场景差异由加载哪个 skill 决定
+    assert.equal(d.skills.length, 2);
+    assert.deepEqual(d.skills.map((s) => s.name), ['refs-locate', 'task-recall'], '内置 skill 名由服务端常量强制');
+    assert.ok(d.skills.every((s) => s.enabled), '只读 skill 默认启用（S-01 D-01-6）');
     assert.deepEqual(
       Object.keys(d.tools).sort(),
       ['ki_get_module_info', 'ki_group_list', 'ki_search', 'ki_tag_list'],

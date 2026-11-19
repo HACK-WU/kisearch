@@ -469,6 +469,8 @@ export interface PromptConfig {
    * 一期后端 `capabilities.findDeep=false` 时，设置页据此把后者标为「深度查找上线后生效」。
    */
   find?: FindConfig;
+  /** AI 预取（REQ-20261118-004） */
+  recall?: RecallSectionConfig;
 }
 
 export interface AnalysisTargetConfig {
@@ -512,6 +514,21 @@ export interface FindRangeConfig {
 }
 
 /** AI 查找独立配置域（与后端 `FindConfig` 同形状） */
+/**
+ * **AI 预取**配置域（REQ-20261118-004），与 find 同级、物理独立。
+ *
+ * 与 find 的差异：没有 `ranges`（范围由调用方 scope 决定）；多 `maxRounds` / `toolResponseChars`
+ * （预取是多轮读正文的循环，这两项直接决定能不能在 45s 内跑完）。
+ */
+export interface RecallSectionConfig {
+  prompt: CapabilityPrompt;
+  skills: Array<{ id: string; name: string; description: string; content: string; builtin: boolean; enabled: boolean; at: string }>;
+  tools: Record<string, boolean>;
+  reasoningEffort?: string;
+  maxRounds: number;
+  toolResponseChars: number;
+}
+
 export interface FindConfig {
   ranges: FindRangeConfig;
   /** 检索定位提示词（深度通道注入；快速通道不读） */
@@ -567,6 +584,11 @@ export interface PromptConfigLimits {
    *    服务端不再下发，前端也不再有对应的输入框。
    */
   findMaxTargets?: number;
+  /** AI 预取：轮次与单次工具结果字符的上下界（REQ-20261118-004） */
+  recallMaxRoundsMin?: number;
+  recallMaxRoundsMax?: number;
+  recallToolCharsMin?: number;
+  recallToolCharsMax?: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
@@ -616,11 +638,6 @@ export interface PromptConfigOk {
   findSkillRequiredTools?: Record<string, string>;
   findReasoningEffort?: string;
   findReasoningEffortOverridden?: boolean;
-  /**
-   * 能力标记（不是可写配置）：`findDeep=false` 表示服务端尚无深度通道，
-   * 设置页据此显示「深度查找上线后生效」横幅并禁用模式切换。
-   */
-  capabilities?: { findDeep: boolean };
   /** 非 null = 配置文件有问题且**已回退默认**（必须可见，不得静默） */
   issue: string | null;
 }

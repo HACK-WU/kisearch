@@ -3,7 +3,7 @@
  *
  * 运行：env -u NODE_OPTIONS -u BASH_ENV npx jiti test/governance-routes.test.ts
  *
- * 这个文件存在的唯一理由：**30 条路由 + 4 个工具分散在 5 处登记**，漏任何一处都
+ * 这个文件存在的唯一理由：**41 条路由 + 4 个工具分散在 5 处登记**，漏任何一处都
  * 不会编译报错，只会静默坏掉：
  *
  *   - 漏 `route-permissions.ts`  → matchRoute 判 unknown → 404（前端只看到"接口不存在"）
@@ -33,7 +33,7 @@ import { handleGovernanceRoutes } from '../src/lib/governance-http.js';
 
 const ROOT = process.cwd();
 
-/** 39 条治理路由：`[method, path, 期望能力]`。改路由必须同步改这张表（表就是契约） */
+/** 41 条治理路由：`[method, path, 期望能力]`。改路由必须同步改这张表（表就是契约） */
 const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['GET', '/governance/lifecycle/list', 'knowledge.read'],
   ['POST', '/governance/lifecycle/apply', 'knowledge.write'],
@@ -56,6 +56,9 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['POST', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['DELETE', '/governance/events/evt_1/refs', 'knowledge.write'],
   ['POST', '/governance/events/evt_1/refs/search', 'knowledge.read'],
+  // 「AI 查找」结论固定/回读：漏登记 = 404「总结未能固定」（2026-11-19）
+  ['GET', '/governance/events/evt_1/refs/find-summary', 'knowledge.read'],
+  ['POST', '/governance/events/evt_1/refs/find-summary', 'knowledge.write'],
   // REQ-20261116-004：关联文档增删（漏登记会 404，不是 403）
   ['POST', '/governance/events/evt_1/members', 'knowledge.write'],
   ['DELETE', '/governance/events/evt_1/members', 'knowledge.write'],
@@ -82,7 +85,7 @@ const WRITE_TOOLS = ['ki_event_set_stage'];
 const FORBIDDEN_CREATE_TOOLS = ['ki_event_create', 'ki_lifecycle_create', 'ki_event_type_create', 'ki_event_delete', 'ki_event_type_write'];
 
 describe('① 路由权限登记（漏一条就是 404）', () => {
-  it('39 条全部命中 permission 且能力正确', () => {
+  it('41 条全部命中 permission 且能力正确', () => {
     const problems: string[] = [];
     for (const [method, p, capability] of ROUTES) {
       const match = matchRoute(method, p);
@@ -97,8 +100,8 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
     assert.deepEqual(problems, [], `以下路由登记有误：\n${problems.join('\n')}`);
   });
 
-  it('表里正好 39 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 39);
+  it('表里正好 41 条（新增/删除路由必须同步这张表）', () => {
+    assert.equal(ROUTES.length, 41);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {

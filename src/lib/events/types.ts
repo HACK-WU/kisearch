@@ -118,6 +118,18 @@ export interface RefsDoc {
   eventId: string;
   refs: EventRefDoc[];
   updatedAt: number;
+  /**
+   * 最近一次「AI 查找」的结论（2026-11-19）。
+   *
+   * 为什么落在这里而不是事件主体：它是**查找产物的注脚**，与 refs 同生命周期
+   * （加入参考文档后仍要能回看「当初为什么加」），且不影响事件流转的低频写。
+   * 只在用户**确认加入**时写一次；不随每次查找覆盖。
+   */
+  lastFind?: {
+    summary: string;
+    uncertainties?: string[];
+    at: number;
+  };
 }
 
 // ─── 事件源码分析（REQ-20261113-003 · S-03）─────────────────

@@ -84,11 +84,12 @@ describe('① 草稿拷贝必须搬运 find（整份替换语义）', () => {
 describe('② 渲染标记', () => {
   const layerSrc = fs.readFileSync(path.join(webRoot, 'src/chat/PromptConfigLayer.tsx'), 'utf8');
 
-  it('find 分组含：范围多选、一期横幅、工具开关、提示词卡', () => {
+  it('find 分组含：范围多选、工具开关、提示词卡（不再有「待生效」横幅）', () => {
     assert.match(layerSrc, /capability === 'find'/, '要有 find 专属分支');
     assert.match(layerSrc, /检索范围/, '范围块标题');
     assert.match(layerSrc, /ScopeMultiPicker[\s\S]{0,400}findScopeOptions/s, '范围选择复用 ScopeMultiPicker');
-    assert.match(layerSrc, /深度查找上线后生效/, '一期必须如实标注哪些块不生效');
+    // REQ-20261118-004：取消 fast 后所有块都生效，「待生效」横幅必须消失
+    assert.equal(/深度查找上线后生效/.test(layerSrc), false, '不得再出现「待生效」横幅');
     assert.match(layerSrc, /findToolGroups/, '工具清单由服务端下发，前端不硬编码');
     assert.match(layerSrc, /检索定位提示词/, '提示词卡名称已改口径');
   });
@@ -105,18 +106,20 @@ describe('② 渲染标记', () => {
   });
 });
 
-describe('④ 二期双通道 UI 标记（REQ-20261116-005 · B8）', () => {
+describe('④ 查找面板：只有模型通道（REQ-20261118-004 取消 fast）', () => {
   const read = (rel) => fs.readFileSync(path.join(webRoot, 'src', rel), 'utf-8');
 
-  it('查找面板有「快速 / 深度」切换、停止按钮，并把 partial / unconfirmed / parsed 透给过程面板（批 3：弹窗改卡内嵌）', () => {
+  it('面板不再有「快速 / 深度」切换，保留停止与 partial / parsed 透传', () => {
     const s = read('components/governance/FindRefPanel.tsx');
-    assert.ok(s.includes("useState<'fast' | 'deep'>('fast')"), '默认走快速查找（深度成本可见才选）');
-    assert.ok(s.includes('深度查找（AI）'), '模式入口必须可见');
-    assert.ok(s.includes('onClick={stop}'), '深度查找必须有停止');
+    assert.equal(/useState<'fast' \| 'deep'>/.test(s), false, '模式切换必须删除');
+    assert.equal(s.includes('深度查找（AI）'), false, '模式入口按钮必须删除');
+    assert.equal(s.includes('改用快速查找'), false, '兜底按钮无目标，必须删除');
+    assert.ok(s.includes("const mode = 'deep' as const"), '通道固定为模型');
+    assert.ok(s.includes('onClick={stop}'), '模型查找必须有停止');
     assert.ok(s.includes('partial: result.partial'), '结果不完整必须如实透给面板');
     assert.ok(s.includes('parsed: result.parsed'), '模型未给出可解析结果要与"没有相关文档"分开');
     // 客户端超时必须覆盖「排队 20s + 执行 60s」两端，否则后端还在等、前端先报超时
-    assert.ok(s.includes("mode === 'deep' ? 95_000 : 15_000"), '深度通道客户端超时要覆盖排队 + 执行');
+    assert.ok(s.includes('95_000'), '模型通道客户端超时要覆盖排队 + 执行');
   });
 
   it('过程面板为 tools / verify 两步给出人话文案，且提示不完整', () => {

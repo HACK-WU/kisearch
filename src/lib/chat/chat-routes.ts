@@ -100,6 +100,10 @@ import {
   MCP_TOOL_GROUPS,
   PROMPT_MAX_CHARS,
   PromptConfigError,
+  RECALL_MAX_ROUNDS,
+  RECALL_MAX_TOOL_CHARS,
+  RECALL_MIN_ROUNDS,
+  RECALL_MIN_TOOL_CHARS,
   SKILL_DESC_MAX_CHARS,
   SKILL_DESC_SUGGESTED_CHARS,
   SKILL_MAX_CHARS,
@@ -660,6 +664,11 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       // ── AI 查找（REQ-20261116-005）：范围上限，前端一律读这里 ──
       // 2026-11-18：分析 / 检索的轮次·文件·候选·超时预算整体取消，不再下发任何预算上下界
       findMaxTargets: FIND_MAX_TARGETS,
+      // ── AI 预取（REQ-20261118-004）：轮次与工具结果字符的上下界，前端一律读这里 ──
+      recallMaxRoundsMin: RECALL_MIN_ROUNDS,
+      recallMaxRoundsMax: RECALL_MAX_ROUNDS,
+      recallToolCharsMin: RECALL_MIN_TOOL_CHARS,
+      recallToolCharsMax: RECALL_MAX_TOOL_CHARS,
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,
@@ -684,11 +693,6 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
     findSkillRequiredTools: FIND_SKILL_REQUIRED_TOOLS,
     findReasoningEffort: config.find?.reasoningEffort ?? cfg.llm?.reasoningEffort,
     findReasoningEffortOverridden: config.find?.reasoningEffort !== undefined,
-    /**
-     * **能力标记**（不是可写配置）：深度通道已上线（`find-runner`），故为 true。
-     * 前端据此隐藏「深度查找上线后生效」横幅并放开模式切换 —— 不让前端按版本号猜。
-     */
-    capabilities: { findDeep: true },
     datasourceDirs: collectAuthorizedDatasourceDirs(cfg, ctx.authScopes),
     issue,
   });

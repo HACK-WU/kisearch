@@ -751,6 +751,126 @@ export function findRefCandidates(
   });
 }
 
+/** 流式过程中的一次工具调用（与后端 `onProgress` 形状一致） */
+export interface RefSearchStepEvent {
+  name: string;
+  args: Record<string, unknown>;
+  ms: number;
+  ok: boolean;
+  round: number;
+  label?: string;
+}
+
+/**
+ * **流式版** AI 候选：与服务端 `?stream=1` 配套（2026-11-19）。
+ *
+ * 为什么需要它：深度查找要 25~35 秒，非流式接口在这整段时间里不返回任何东西，
+ * 面板只能干转圈（实测反馈"知道有结果了才显示"）。流式版把每次工具调用作为
+ * `event: step` 推下来，面板即可边跑边显示「检索了什么 / 读了几篇」。
+ *
+ * 返回值与 `findRefCandidates` **完全一致**（最终 `event: result` 的 payload），
+ * 所以调用方只需把结果照旧丢给渲染层。
+ */
+export async function findRefCandidatesStream(
+  scope: string,
+  eventId: string,
+  opts: {
+    signal?: AbortSignal;
+    /**
+     * 客户端超时（毫秒）。**流式也必须保留**：服务端 45s 硬顶 + 排队 20s，
+     * 客户端不设上限时，一旦网关半开或服务端卡死，面板会永远转圈。
+     */
+    timeoutMs?: number;
+    /** 每收到一次工具调用回调一次（用于实时更新过程区） */
+    onStep?: (step: RefSearchStepEvent) => void;
+  } = {},
+): Promise<RefSearchResult> {
+  // 调用方取消 + 客户端超时，两者任一触发都中止（AbortSignal.any 已在目标浏览器基线内）
+  const signals: AbortSignal[] = [];
+  if (opts.signal) signals.push(opts.signal);
+  if (opts.timeoutMs !== undefined) signals.push(AbortSignal.timeout(opts.timeoutMs));
+  const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
+
+  const res = await fetch(
+    `/api/governance/events/${encodeURIComponent(eventId)}/refs/search?stream=1`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope }),
+      ...(signal ? { signal } : {}),
+    },
+  );
+  if (!res.ok || !res.body) {
+    throw new Error(`查找失败（HTTP ${res.status}）`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let result: RefSearchResult | null = null;
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx = buf.indexOf('\n\n');
+    while (idx >= 0) {
+      const chunk = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      idx = buf.indexOf('\n\n');
+      const evName = /^event: (\w+)$/m.exec(chunk)?.[1];
+      const dataLine = /^data: (.*)$/m.exec(chunk)?.[1];
+      if (!dataLine) continue;
+      let payload: unknown;
+      try {
+        payload = JSON.parse(dataLine);
+      } catch {
+        continue;
+      }
+      if (evName === 'step') {
+        opts.onStep?.(payload as RefSearchStepEvent);
+      } else if (evName === 'result') {
+        result = payload as RefSearchResult;
+      }
+    }
+  }
+
+  if (!result) throw new Error('流式响应未返回结果（连接可能被中断）');
+  return result;
+}
+
+/** 最近一次「AI 查找」的结论（落盘在事件 refs 文件里，刷新后仍在） */
+export interface FindSummaryRecord {
+  summary: string;
+  uncertainties?: string[];
+  at: number;
+}
+
+export function getFindSummary(
+  scope: string,
+  eventId: string,
+): Promise<{ ok: true; scope: string; lastFind: FindSummaryRecord | null }> {
+  const params = new URLSearchParams({ scope });
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs/find-summary?${params}`);
+}
+
+/** 确认加入参考文档时调用：把这次的结论固定下来（不随刷新消失） */
+export function saveFindSummary(
+  scope: string,
+  eventId: string,
+  summary: string,
+  uncertainties?: string[],
+): Promise<{ ok: true }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/refs/find-summary`, {
+    method: 'POST',
+    body: JSON.stringify({
+      scope,
+      summary,
+      ...(uncertainties && uncertainties.length > 0 ? { uncertainties } : {}),
+    }),
+  });
+}
+
 /** 手动按名 / 路径搜文档；传 eventId 时后端排除「已关联 / 已加入」（R31 服务端兜底） */
 export function searchRefDocs(
   scope: string,

@@ -25,6 +25,7 @@ import { getKbDir, getLocalKbDir } from '../src/lib/scope.js';
 import { loadGroupCache, writeGroupCache } from '../src/lib/group-cache.js';
 import { createEvent } from '../src/lib/events/event-service.js';
 import { addRefs } from '../src/lib/events/refs-service.js';
+import { getRefsPath } from '../src/lib/events/refs-store.js';
 import { handleGovernanceRoutes } from '../src/lib/governance-http.js';
 import type { Relation } from '../src/lib/scoring.js';
 
@@ -142,5 +143,54 @@ describe('③ 挂载点不越界', () => {
   it('非 /governance/* 返回 false（交回上层）', async () => {
     const handled = await call('GET', '/api/doc/list');
     assert.equal(handled, false);
+  });
+});
+
+/**
+ * 事件 #44：find-summary 曾不校验事件存在。
+ *
+ * 两个后果一起守：① 读侧把「事件不存在」伪装成 `lastFind: null`；② 写侧给任意 id
+ * 落一个孤儿 `.refs.json`（事件列表里看不到，排查时会被当成真实事件）。
+ */
+describe('④ find-summary 必须绑定真实事件', () => {
+  it('不存在的事件：GET / POST 都是 EVENT_NOT_FOUND，且不落盘', async () => {
+    const get = await call(
+      'GET',
+      `/api/governance/events/evt_missing/refs/find-summary?scope=${encodeURIComponent(scope)}`,
+    );
+    assert.ok(get);
+    assert.equal(get.ok, false);
+    assert.equal(get.code, 'EVENT_NOT_FOUND');
+
+    const post = await call('POST', '/api/governance/events/evt_missing/refs/find-summary', {
+      scope,
+      summary: '不存在的事件不该落盘',
+    });
+    assert.ok(post);
+    assert.equal(post.code, 'EVENT_NOT_FOUND');
+    assert.equal(fs.existsSync(getRefsPath(scope, 'evt_missing')), false, '校验必须前置到写盘之前');
+  });
+
+  it('真实事件：summary + uncertainties 原样往返', async () => {
+    const event = await createEvent(scope, { title: 'find-summary 往返验证', typeId: 'et_1' });
+    const summary = '查了 3 个组没有命中，返回空数组。';
+    const uncertainties = ['事件坐标系不明，无法判断 12px 偏移是否可复现'];
+
+    const post = await call('POST', `/api/governance/events/${event.id}/refs/find-summary`, {
+      scope,
+      summary,
+      uncertainties,
+    });
+    assert.ok(post);
+    assert.equal(post.ok, true);
+
+    const get = await call(
+      'GET',
+      `/api/governance/events/${event.id}/refs/find-summary?scope=${encodeURIComponent(scope)}`,
+    );
+    assert.ok(get);
+    const last = get.lastFind as { summary: string; uncertainties?: string[] } | null;
+    assert.equal(last?.summary, summary);
+    assert.deepEqual(last?.uncertainties, uncertainties, '判断不了的点必须与面板看到的一致');
   });
 });

@@ -31,10 +31,61 @@ export function readRefs(scope: string, eventId: string): EventRefDoc[] {
   }
 }
 
+/**
+ * 读最近一次「AI 查找」的结论（无则 null）。
+ *
+ * 只读 refs 文件，不碰事件主体 —— 与 `readRefs` 同一份数据源，不会出现两者不一致。
+ */
+export function readLastFind(scope: string, eventId: string): RefsDoc['lastFind'] | null {
+  try {
+    const doc = readJson<RefsDoc>(getRefsPath(scope, eventId));
+    return doc?.lastFind ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 写最近一次「AI 查找」的结论。
+ *
+ * **保留既有 refs**：这两个字段共用同一个文件，覆盖写会把参考文档一起清掉。
+ */
+export function saveLastFind(
+  scope: string,
+  eventId: string,
+  find: NonNullable<RefsDoc['lastFind']>,
+): void {
+  const dir = getEventsDir(scope);
+  fs.mkdirSync(dir, { recursive: true });
+  const refs = readRefs(scope, eventId);
+  const doc: RefsDoc = {
+    version: 1,
+    eventId,
+    refs,
+    updatedAt: Date.now(),
+    lastFind: find,
+  };
+  writeJson(getRefsPath(scope, eventId), doc as unknown as Record<string, unknown>);
+}
+
 function writeRefs(scope: string, eventId: string, refs: EventRefDoc[], now: number): EventRefDoc[] {
   const dir = getEventsDir(scope);
   fs.mkdirSync(dir, { recursive: true });
-  const doc: RefsDoc = { version: 1, eventId, refs, updatedAt: now };
+  // 保留 lastFind：加/删参考文档不应抹掉上次查找的结论
+  const prev = (() => {
+    try {
+      return readJson<RefsDoc>(getRefsPath(scope, eventId))?.lastFind;
+    } catch {
+      return undefined;
+    }
+  })();
+  const doc: RefsDoc = {
+    version: 1,
+    eventId,
+    refs,
+    updatedAt: now,
+    ...(prev ? { lastFind: prev } : {}),
+  };
   writeJson(getRefsPath(scope, eventId), doc as unknown as Record<string, unknown>);
   return refs;
 }

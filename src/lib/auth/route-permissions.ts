@@ -130,6 +130,9 @@ const RULES: Rule[] = [
   pattern('POST', /^\/governance\/events\/[^/]+\/refs$/, 'permission', 'knowledge.write'),
   // 上传文件并挂为参考文档（REQ-20261118-001）：写操作；漏登记 = 404
   pattern('POST', /^\/governance\/events\/[^/]+\/refs\/upload$/, 'permission', 'knowledge.write'),
+  // 「AI 查找」结论的固定 / 回读（2026-11-19）：漏登记同 upload —— 曾静默 404「总结未能固定」
+  pattern('GET', /^\/governance\/events\/[^/]+\/refs\/find-summary$/, 'permission', 'knowledge.read'),
+  pattern('POST', /^\/governance\/events\/[^/]+\/refs\/find-summary$/, 'permission', 'knowledge.write'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/refs$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analyze$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/cancel$/, 'permission', 'knowledge.write'),

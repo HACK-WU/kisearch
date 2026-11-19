@@ -26,9 +26,17 @@
  *   若改成"写工具黑名单"，漏登记就等于静默放开写入（安全属性 fail-open）。
  */
 
-/** 只读 Token 可见 / 可调的工具名单（10 个，均为纯读；`ki_ask` 不在其中 —— 对库只读但消耗模型额度） */
+/**
+ * 只读 Token 可见 / 可调的工具名单（**11 个**，均为纯读）。
+ *
+ * `ki_ask` 不在其中 —— 对库只读但会产出答案，按模型消耗型准入。
+ * `ki_recall` **在**其中（REQ-20261118-004，用户拍板「它本来就是只读」）：
+ * 虽然它内部会跑模型，但产出只有文档清单与判断，不写任何数据；
+ * 放开后只读 Token 也能触发模型调用与内容外发，该代价已由产品确认。
+ */
 export const READ_ONLY_TOOL_NAMES: readonly string[] = [
   'ki_search',
+  'ki_recall',
   'ki_get_module_info',
   'ki_group_list',
   'ki_scope_list',
@@ -79,14 +87,14 @@ export const SEARCH_TOOL_NAMES: readonly string[] = [
  * 白名单方向仍然安全：只读 Token 的闸门是 `isReadOnlyTool()`，
  * 新工具不登记进 READ_ONLY_TOOL_NAMES 就默认被拒（fail-safe 不变）。
  */
-export const MODEL_CONSUMING_TOOL_NAMES: readonly string[] = ['ki_ask', 'ki_recall'];
+export const MODEL_CONSUMING_TOOL_NAMES: readonly string[] = ['ki_ask'];
 
 /**
- * ⚠️ 本名单表达的是**准入维度**「可能消耗模型」，不是**计量维度**「本次真的消耗了」。
+ * 名单语义：**会被只读 Token 挡在门外的工具**（因为消耗模型额度 + 外发内容）。
  *
- * `ki_recall` 一期只跑确定性通道（零模型调用），但仍登记在此：它的通道由服务端配置决定，
- * 二期接上深度通道后就会消耗模型 —— 准入判定不能跟着版本改来改去。
- * **成本统计请以审计日志的 `channel` 字段为准**，不要按本名单算。
+ * `ki_recall` 已**移出**（REQ-20261118-004）：它虽然也跑模型，但产出只有文档清单与判断、
+ * 不写任何数据，产品判定「它本来就是只读」，故对只读 Token 放开。
+ * 代价（只读 Token 也能触发模型调用与外发）已确认接受，见 S-02 D-02-3。
  */
 
 /** 该工具是否会消耗模型额度（只读 Token 同样不得调用） */
@@ -109,16 +117,6 @@ export const TOKEN_MODEL_FORBIDDEN = 'TOKEN_MODEL_FORBIDDEN' as const;
  */
 export function modelConsumingRejectMessage(toolName: string, tokenId?: string): string {
   const idText = tokenId ? `（id: ${tokenId}）` : '';
-  /*
-   * `ki_recall` 单独一条文案：它一期并不消耗模型，"会消耗模型额度"这句对它来说是错的，
-   * 会让调用方以为换成读写 Token 就一定会烧钱。原因要说准（`ki_ask` 的文案逐字保持不变）。
-   */
-  if (toolName === 'ki_recall') {
-    return `Forbidden: 该 Token${idText}为只读，不能调用 ${toolName}。`
-      + '它不是写入工具，而是「模型消耗型」：会按服务端配置选择检索通道、可能触发上游模型调用并外发知识库内容，故与 ki_ask 同样按模型型准入。'
-      + '注意：这个工具可能仍出现在你当前会话的工具列表里（列表是建连时的快照），但已被禁用。'
-      + '请改用读写 Token，或由管理员执行 ki mcp token update <id> --read-write 切换为读写。';
-  }
   return `Forbidden: 该 Token${idText}为只读，不能调用会消耗模型额度的工具 ${toolName}。`
     + '注意：这个工具可能仍出现在你当前会话的工具列表里（列表是建连时的快照），但已被禁用。'
     + '它不是写入工具，拒绝原因也不是权限不足，而是"只读 Token 不允许触发上游模型调用"。'

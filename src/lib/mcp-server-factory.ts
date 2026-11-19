@@ -69,6 +69,14 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
   registerEventTypeListTool(server);
   /** `ki_event_get`（2026-11-18）：list 用来找、get 用来读；过程与候选正文不返回，见 event-detail.ts 文件头 */
   registerEventGetTool(server);
+  /**
+   * `ki_recall`（REQ-20261118-004）：任务前上下文预取。
+   *
+   * **放在只读块**：产出只有文档清单与判断、不写任何数据，产品判定「它本来就是只读」，
+   * 故只读 Token 也能看见并调用（已从 `MODEL_CONSUMING_TOOL_NAMES` 移出）。
+   * 虽然内部会跑模型，但代价（模型额度 + 内容外发）已由产品确认接受（S-02 D-02-3）。
+   */
+  registerRecallTool(server, auth?.id ?? 'local');
   // ── 写工具（13 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
   // ⚠️ 新增写工具必须放在本块内，否则会暴露给只读 Token；
   //    tools/call 侧另有一道白名单拦截（mcp-http.ts::findReadOnlyViolation）兜住缓存/构造调用。
@@ -93,13 +101,6 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
     //    注意读白名单方向：`ki_ask` 不在 READ_ONLY_TOOL_NAMES，只读会话看不见它也调不动
     //    （tools/call 侧另有 mcp-http 的模型消耗型闸门兜住缓存/构造调用）。
     registerAskTool(server, auth?.id ?? 'local');
-    /**
-     * `ki_recall`（REQ-20261118-003）：任务前上下文预取。
-     *
-     * 一期只跑确定性通道（不消耗模型），仍放在本块内 —— 它**按配置可能**触发模型调用
-     * （二期深度通道），准入按「可能消耗」判，与 `ki_ask` 同源，避免二期再改一次注册位置。
-     */
-    registerRecallTool(server, auth?.id ?? 'local');
   }
   return server;
 }

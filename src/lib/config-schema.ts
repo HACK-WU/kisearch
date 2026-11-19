@@ -144,10 +144,6 @@ function recallIntRange(min: number, max: number, label: string) {
   };
 }
 
-/** 秒；0 = 关闭缓存，是合法值 */
-const recallCacheTtlRange = recallIntRange(0, 3600, '检索结果缓存有效期，0=关闭');
-const recallMaxCandidatesRange = recallIntRange(1, 20, '缺省候选数上限');
-const recallMaxConcurrentRange = recallIntRange(1, 8, '进程内并发槽');
 const recallThrottleRange = recallIntRange(1, 120, '每个调用方每分钟上限');
 const recallHardTimeoutRange = recallIntRange(1000, 45_000, '单次硬超时（毫秒）');
 
@@ -459,10 +455,6 @@ const CONFIG_SCHEMA: ConfigNode = {
     recall: {
       type: 'object',
       fields: {
-        /** 0 = 关闭缓存（合法值，别用 `||` 取默认） */
-        cacheTtlSec: { type: 'number', validate: recallCacheTtlRange },
-        maxCandidates: { type: 'number', validate: recallMaxCandidatesRange },
-        maxConcurrent: { type: 'number', validate: recallMaxConcurrentRange },
         throttlePerMinute: { type: 'number', validate: recallThrottleRange },
         hardTimeoutMs: { type: 'number', validate: recallHardTimeoutRange },
       },

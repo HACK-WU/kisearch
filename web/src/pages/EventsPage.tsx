@@ -19,6 +19,7 @@ import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
 import { aiSettingsHref } from '@/lib/aiSettingsUrl';
 import { FindRefPanel } from '@/components/governance/FindRefPanel';
+import { getFindSummary, saveFindSummary } from '@/api/governanceApi';
 import { DocPickerModal, type DocPickerRef } from '@/components/governance/DocPickerModal';
 import { EventRefUploadModal } from '@/components/governance/EventRefUploadModal';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
@@ -135,6 +136,8 @@ export function EventsPage(): JSX.Element {
   /** 绑定成功但索引没摘掉：必须持续显示，不能只闪一条消息 */
   const [memberVisWarn, setMemberVisWarn] = useState<string | null>(null);
   /** 「AI 查找」弹窗：打开即请求候选，不再一点就自动加入（R28/R29） */
+  /** 上次「AI 查找」的结论：面板关闭后仍固定展示（确认后不消失）；含「判断不了的点」 */
+  const [findSummary, setFindSummary] = useState<{ summary: string; uncertainties?: string[] } | null>(null);
   const [findRefOpen, setFindRefOpen] = useState(false);
   /** 查找面板回抛的状态：卡头 chip 用（检索中 / N 篇候选） */
   const [findStatus, setFindStatus] = useState<{ state: string; count: number } | null>(null);
@@ -286,6 +289,30 @@ export function EventsPage(): JSX.Element {
   // 分析进度轮询已下沉到 AiAnalyzePanel（1.5s，单一真源）；页面不再持有轮询
 
   const active = useMemo(() => events.find((e) => e.id === activeId) ?? detail?.event ?? null, [events, activeId, detail]);
+
+  /*
+   * 从磁盘读回上次「AI 查找」的结论（2026-11-19）。
+   *
+   * ⚠️ 两个"不许清空"的坑（真机踩过）：
+   *   · `loadDetail` 过程中 `active` 会短暂为空 → 旧实现立刻置 null，刚固定的总结当场消失；
+   *   · 接口失败（daemon 未重启时 404）→ 旧实现也置 null，等于"存过但看不见"。
+   * 现在只在**明确读到空**时才清，其余保留已有值。
+   */
+  useEffect(() => {
+    const id = active?.id;
+    if (!id) return; // 切换中：保留上一份，等新 id 到了再覆盖
+    let alive = true;
+    void getFindSummary(scope, id)
+      .then((r) => {
+        if (!alive) return;
+        const last = r.lastFind;
+        setFindSummary(last
+          ? { summary: last.summary, ...(last.uncertainties ? { uncertainties: last.uncertainties } : {}) }
+          : null);
+      })
+      .catch(() => { /* 读失败保留现有值，不清空 */ });
+    return () => { alive = false; };
+  }, [active?.id, scope]);
   const activeAnalysis = detail?.event.id === active?.id ? (detail?.analysis ?? null) : null;
   const type = useMemo(
     () => types.find((t) => t.id === (active?.typeId ?? '')) ?? null,
@@ -815,7 +842,16 @@ export function EventsPage(): JSX.Element {
                       open={findRefOpen}
                       onOpenChange={(open) => { if (!open) setFindRefOpen(false); }}
                       onStatus={setFindStatus}
-                      onAdded={(added, skipped) => {
+                      onSummary={(summary, uncertainties) => setFindSummary(uncertainties ? { summary, uncertainties } : { summary })}
+                      onAdded={(added, skipped, summary, uncertainties) => {
+                        // 确认后把结论固定下来：面板随即卸载，不带走这段文字
+                        if (summary) {
+                          setFindSummary(uncertainties ? { summary, uncertainties } : { summary });
+                          // 落盘：刷新 / 换机后仍能看到这次的结论（含判断不了的点）
+                          void saveFindSummary(scope, active.id, summary, uncertainties).catch(() => {
+                            /* 落盘失败不影响加入结果，静默即可 */
+                          });
+                        }
                         // 局部刷新参考文档区：查找本身没写数据，不该触发整页重载
                         setMessage({
                           tone: 'ok',
@@ -826,6 +862,19 @@ export function EventsPage(): JSX.Element {
                       onSwitchToManual={() => { setFindRefOpen(false); setAddRefOpen(true); }}
                       onOpenSettings={() => { setFindRefOpen(false); openAiSettings('find'); }}
                     />
+                  ) : findSummary ? (
+                    <div className="gov-find-last">
+                      <div className="gov-find-last__head">查找总结</div>
+                      <p className="gov-find-last__text">{findSummary.summary}</p>
+                      {findSummary.uncertainties && findSummary.uncertainties.length > 0 ? (
+                        <div className="gov-ai-final__uncertain">
+                          <div className="gov-ai-final__uncertain-head">判断不了的点 · {findSummary.uncertainties.length}</div>
+                          <ul className="gov-ai-final__uncertain-list">
+                            {findSummary.uncertainties.map((u, i) => <li key={i}>{u}</li>)}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
                   ) : null}
                   emptyText="暂无参考文档：可用「AI 查找」、「＋ 添加」或「上传文件」"
                   confirmKey={refConfirmKey}

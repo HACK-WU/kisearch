@@ -108,7 +108,8 @@ function stepSentence(step: RefSearchStep, ctx: AiProcessContext, keywordCount: 
     case 'rank':
       return `按相关度排序取前 ${numOf(step.metrics.candidates)} 篇（默认勾选阈值 ${numOf(step.metrics.threshold)}）`;
     case 'tools':
-      return `第 ${numOf(step.metrics.round)} 轮：调用 ${numOf(step.metrics.calls)} 个只读工具`;
+      // 轮次不展示（2026-11-19 用户要求）：第几轮是内部机制，用户只关心「调了几次工具」
+      return `调用 ${numOf(step.metrics.calls)} 个只读工具`;
     case 'verify':
       // 深度通道没有检索分，不在这里编"相关度"；只说校验结果
       return numOf(step.metrics.parsed) === 1

@@ -109,6 +109,22 @@ export interface NeedMoreItem {
   hint: string;
 }
 
+/**
+ * **模型通道**的候选（REQ-20261118-004）。
+ *
+ * 与 `RecallCandidate`（种子/确定性通道的产物）区别有三：
+ *   · 没有分数 / 名次 —— 模型不看分，它看的是正文内容
+ *   · `why` 由模型写（"它对任务的哪一部分有用"），不是服务端拼的命中理由
+ *   · `evidence` 标明读到的是全文还是片段（只有 `ki_get_module_info` 未截断才算 full）
+ */
+export interface RecallHit {
+  scope: string;
+  group: string;
+  name: string;
+  why: string;
+  evidence: 'full' | 'snippet';
+}
+
 /** 建议的下一步读取动作（参数可直接调 `ki_get_module_info`） */
 export interface NextAction {
   tool: 'ki_get_module_info';

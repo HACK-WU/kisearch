@@ -17,7 +17,6 @@ const LABELS: Record<string, string> = {
   newReads: '本轮新读',
   verified: '保留候选',
   dropped: '剔除候选',
-  round: '轮次',
   // 查找
   understand: '理解',
   extract: '提取',
@@ -51,7 +50,8 @@ export interface StepMetricsProps {
 }
 
 export function StepMetrics(props: StepMetricsProps): JSX.Element | null {
-  const entries = Object.entries(props.data ?? {});
+  // `round` 不展示（2026-11-19 用户要求）：展开明细里的「轮次 0」会被读成出错
+  const entries = Object.entries(props.data ?? {}).filter(([key]) => key !== 'round');
   if (entries.length === 0) return null;
   return (
     <div className="gov-step-metrics">

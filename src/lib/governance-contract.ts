@@ -298,6 +298,21 @@ export interface RefSearchResultDto {
    * `false` 表示"模型没给出结果"，前端文案要与"确实没有相关文档"区分。
    */
   parsed?: boolean;
+  /**
+   * 深度通道：模型写的整体结论（3 句以内）。
+   * 0 候选时必须说明「查了什么、为什么没有」——与"确实没有相关文档"区分开。
+   */
+  summary?: string;
+  /**
+   * 深度通道：模型判断不了的点（与 `unresolved` / `needMore` 不同：这些不需要调用方补信息，
+   * 只是如实交代不确定性）。
+   */
+  uncertainties?: string[];
+  /**
+   * 深度通道：模型提到但**未通过校验**（没读全正文 / 与已读清单重复）而被剔除的条数。
+   * 面板据此解释"总结里说有几篇、候选却是空的"这种情况，避免看起来像 bug。
+   */
+  droppedCount?: number;
   /** 提前结束（轮次用尽 / 超时），结果不完整 */
   partial?: { reason: 'rounds' | 'timeout'; usedRounds: number };
   /** 0 候选的原因；有候选时省略。前端据此区分空态文案 */

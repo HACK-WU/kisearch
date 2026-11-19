@@ -26,10 +26,10 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
   //    （`ki_ask` 不进 CHAT_MCP_TOOLS，所以这一行当前是"为将来预留 + 语义完整"）
   ki_ask: 'knowledge.ask',
   /**
-   * 开工前预取（REQ-20261118-003）：一期只跑确定性通道，但通道由服务端配置决定（二期可能调模型），
-   * 故与 `ki_ask` 同档——都是「可能消耗模型」的工具。同样不进 CHAT_MCP_TOOLS，此行属语义完整。
+   * 开工前预取（REQ-20261118-004）：产出只有文档清单与判断、不写任何数据，
+   * 故按 `knowledge.read` 而非 `knowledge.ask`（后者是"给答案"的能力）。不进 CHAT_MCP_TOOLS。
    */
-  ki_recall: 'knowledge.ask',
+  ki_recall: 'knowledge.read',
   // 写工具（13）
   ki_store: 'knowledge.write',
   ki_bulk_store: 'knowledge.write',

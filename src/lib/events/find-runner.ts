@@ -21,7 +21,7 @@ import {
   type LlmStatus,
   type ToolDef,
 } from '../chat/llm-client.js';
-import type { FindConfig, PromptSkill } from '../chat/prompt-config.js';
+import { FIND_SCENARIO_SKILL_ID, type FindConfig, type PromptSkill } from '../chat/prompt-config.js';
 import { serializeToolResponse } from '../chat/retrieval/tool-response.js';
 import type { ChatToolResponse } from '../chat/chat-contract.js';
 import { renderSkillLoadedBlock, USE_SKILL_TOOL_NAME } from '../chat/retrieval/tool-loop.js';
@@ -141,7 +141,12 @@ function pumpFindQueue(): void {
  *
  * @param signal 前端断开时出队并中止，避免"用户早关页面了还在排"
  */
-async function acquireFindSlot(key: string, signal?: AbortSignal): Promise<number> {
+/**
+ * 取并发槽（上限 `FIND_MAX_CONCURRENT` + 排队 `FIND_QUEUE_MAX` + 等待 `FIND_QUEUE_WAIT_MS`）。
+ * 2026-11-19 导出：`deep-find-core`（共享内核实现）切换时要用同一套并发保护，
+ * 否则两条实现各排一套队列，上限形同虚设。
+ */
+export async function acquireFindSlot(key: string, signal?: AbortSignal): Promise<number> {
   if (signal?.aborted) throw new GovernanceError('FIND_CANCELED', '查找已被中止');
   // 有空位且没有同 key 在跑/在等 → 直接跑，不进队列（省掉一次微任务与定时器）
   if (!runningKeys.has(key) && !findWaiters.some((w) => w.key === key) && activeFindRuns < findLimits.maxConcurrent) {
@@ -194,7 +199,11 @@ async function acquireFindSlot(key: string, signal?: AbortSignal): Promise<numbe
   return Date.now() - enqueuedAt;
 }
 
-function releaseFindSlot(key: string): void {
+/**
+ * 释放并发槽。**必须放在 finally**：异常路径漏放会让该 key 永久占位。
+ * 2026-11-19 导出（与 `acquireFindSlot` 成对，供切换期的新实现复用）。
+ */
+export function releaseFindSlot(key: string): void {
   runningKeys.delete(key);
   activeFindRuns = Math.max(0, activeFindRuns - 1);
   pumpFindQueue();
@@ -221,6 +230,12 @@ export interface DeepFindResult {
   unconfirmedCount: number;
   /** 模型输出不可解析时置 false（前端据此显示"模型未给出可解析结果"而不是"没有相关文档"） */
   parsed: boolean;
+  /** 模型写的整体结论（3 句以内；0 候选时说明查了什么、为什么没有） */
+  summary?: string;
+  /** 模型判断不了的点（如实交代不确定性，不要调用方补信息） */
+  uncertainties?: string[];
+  /** 模型提到但未通过校验（没读全 / 重复）被剔除的条数 */
+  droppedCount?: number;
   /**
    * 本次所有检索轮次的**聚合检索模式**：
    * 全部轮次都走全文 → `fulltext`（面板必须如实显示"仅全文"）；只要有一轮走了语义 → `hybrid`。
@@ -246,6 +261,11 @@ export interface DeepFindDeps {
   tagList?: (args: { scope: string }) => Promise<unknown>;
   /** 视图名 → 成员库（默认读 `views.json`）；用于把视图名纠错成成员库 */
   viewMembers?: (name: string) => string[] | null;
+  /**
+   * 工具调用进度回调（2026-11-19）：SSE 面板据此边跑边显示。
+   * 只在 `stream=1` 时注入；不注入时行为与之前完全一致。
+   */
+  onProgress?: (call: { name: string; args: Record<string, unknown>; ms: number; ok: boolean; round: number }) => void;
   /** 前端断开时中止（与硬超时共用 signal，靠 `timedOut` 标记区分终态） */
   signal?: AbortSignal;
   /**
@@ -270,7 +290,11 @@ interface ParsedCandidate {
 }
 
 function buildSkillCatalog(skills: readonly PromptSkill[]): string | null {
-  const callable = skills.filter((s) => s.enabled);
+  /*
+   * 只加载**本场景**的 skill（REQ-20261118-004）：域里现在有两个内置 skill，
+   * 另一个（task-recall）属于「AI 预取」，混进来会让模型按错误的判定口径工作。
+   */
+  const callable = skills.filter((s) => s.enabled && s.id === FIND_SCENARIO_SKILL_ID);
   if (callable.length === 0) return null;
   const lines = callable.map((s) => `- ${s.name}（id: ${s.id}）：${s.description || '（无描述）'}`);
   return [
@@ -361,6 +385,12 @@ export function parseCandidateBlock(text: string): ParsedCandidate[] | null {
   return out;
 }
 
+/**
+ * @deprecated 2026-11-19：运行期已改走 `deep-find-core.runDeepFindCore`（与 `ki_recall`
+ *   共用同一个模型循环 `runGroundedRecall`）。本函数保留一个版本用于回滚，**不再被调用**；
+ *   下个版本连同它内部那份循环与工具执行器一起删除。
+ *   仍被外部使用的只有：`buildFindContext` / `parseCandidateBlock` / 各类型 / 并发槽。
+ */
 export async function runDeepFind(
   scope: string,
   eventRef: string,
