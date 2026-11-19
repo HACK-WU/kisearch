@@ -29,6 +29,8 @@ export interface EventSummaryCardProps {
   memberCount: number;
   refCount: number;
   closed: boolean;
+  /** 已置顶（pinnedAt 有值）：决定按钮文案与 aria-pressed（2026-11-19） */
+  pinned: boolean;
   canWrite: boolean;
   busy: boolean;
   delConfirm: boolean;
@@ -38,6 +40,8 @@ export interface EventSummaryCardProps {
   /** C-15：未分析态入口引导（`draft === null && confirmed.length === 0`） */
   showAnalyzeGuide: boolean;
   onAnalyze: () => void;
+  /** 置顶 / 取消置顶（2026-11-19）：置顶项不受列表筛选与排序影响 */
+  onTogglePin: () => void;
   onReopen: () => void;
   onDelete: () => void;
   onTransition: () => void;

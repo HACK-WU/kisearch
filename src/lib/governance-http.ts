@@ -37,7 +37,7 @@ import { resolveVisibilityOfRelation } from './visibility-index.js';
 import { readAllGroupCaches } from './group-cache.js';
 import { listTypes, createType, updateType, deleteType } from './events/type-service.js';
 import {
-  listEvents, createEventWithBinding, updateEvent, transitionEvent, deleteEvent, reopenEvent,
+  listEvents, createEventWithBinding, updateEvent, transitionEvent, deleteEvent, reopenEvent, setEventPinned,
   type CreateEventOutcome,
 } from './events/event-service.js';
 import { bindMembers, unbindMember, type BindMembersOutcome } from './events/members.js';
@@ -651,6 +651,11 @@ export async function handleGovernanceRoutes(
           limit: num(q.get('limit')) ?? 20,
           offset: num(q.get('offset')) ?? 0,
           docsPreviewLimit: num(q.get('docsPreviewLimit')) ?? 3,
+          /*
+           * 置顶免疫开关（2026-11-19）：只在显式传 `includePinned=1` 时生效。
+           * 默认关 —— MCP / 脚本走同一函数，它们要的是精确集合，不能被列表偏好污染。
+           */
+          includePinned: q.get('includePinned') === '1' || q.get('includePinned') === 'true',
         });
         return sendJson(res, 200, {
           ok: true,
@@ -807,6 +812,7 @@ export async function handleGovernanceRoutes(
             const result = await askEventAnalysis(scope, event as unknown as AskTargetEvent, {
               question: str(b.question) ?? '',
               onDelta: (text) => send({ type: 'delta', text }),
+              onEvent: (progress) => send(progress),
             });
             send({ type: 'done', turn: result.turn });
           } catch (err) {

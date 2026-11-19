@@ -1164,6 +1164,43 @@
 .gov-ev--closed.gov-ev--active { background: var(--ki-color-primary-soft); }
 
 /**
+ * 置顶（2026-11-19）
+ *
+ * 只加「分区标题 + 行内图钉」两处视觉，**不动行底色**：
+ * 行底色已被 选中 / 已收口 两个状态占满（见上面两条注释），再叠一层置顶色，
+ * 三个状态同时出现时就没人分得清哪个颜色代表什么了。
+ */
+.gov-evgroup {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 8px 3px;
+  margin-top: var(--ki-space-2);
+  border-top: 1px solid var(--ki-color-border);
+  font-size: 11.5px;
+  color: var(--ki-color-text-subtle);
+  /* 分组标题只是标签，不该被当成可选项：不参与行 hover，也不吃点击 */
+  user-select: none;
+}
+.gov-evgroup:first-child { margin-top: 0; border-top: none; }
+.gov-evgroup__label { font-weight: 700; color: var(--ki-color-text-muted); }
+.gov-evgroup__hint { font-size: 11px; }
+
+/* 行内图钉：与「当前阶段」同一行的说明性元素，不描边不成按钮 */
+.gov-ev--pinned .gov-ev__pin { color: var(--ki-color-primary); }
+.gov-ev__pin { display: inline-flex; align-items: center; }
+.gov-ev__pin svg { width: 11px; height: 11px; display: block; }
+
+/* 动作区的置顶开关：已置顶时用主色淡底，与 btn--ai 的紫色入口区分开 */
+.gov-btn--pinned {
+  border-color: transparent;
+  background: var(--ki-color-primary-soft);
+  color: var(--ki-color-primary);
+}
+.gov-btn--pinned:hover:not(:disabled) { background: var(--ki-color-primary-soft); filter: brightness(0.97); }
+.gov-btn__pin { width: 12px; height: 12px; flex: none; }
+
+/**
  * 类型徽标三色是**语义色**（bug / 性能 / 需求），不属于中性色板，因此单独提成变量：
  * 取值集中在这里，深色只需覆盖变量，不必复制一套选择器。
  */
@@ -1615,6 +1652,50 @@
 }
 .gov-ask__msg--user .gov-ask__bubble {
   background: var(--ki-color-primary-soft); border-color: transparent; color: var(--ki-color-text);
+}
+/* 追问答案：平铺正文（不套气泡壳 —— 与 AI 对话页助手回答同款呈现） */
+.gov-ask__answer {
+  font-size: 12px; line-height: 1.75; color: var(--ki-color-text);
+  min-width: 0; padding: 2px 0;
+}
+.gov-ask__answer p { margin: 0 0 8px; }
+.gov-ask__answer p:last-child { margin-bottom: 0; }
+.gov-ask__answer ul,
+.gov-ask__answer ol { margin: 5px 0; padding-left: 20px; }
+.gov-ask__answer li { margin: 2px 0; }
+.gov-ask__answer code {
+  font-family: var(--ki-font-mono, monospace); font-size: 11px;
+  padding: 1px 4px; border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-bg-tertiary);
+}
+.gov-ask__answer pre {
+  overflow-x: auto; padding: 8px; border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-bg-tertiary);
+}
+.gov-ask__answer strong { font-weight: 600; }
+.gov-ask__answer h1, .gov-ask__answer h2, .gov-ask__answer h3 { margin: 8px 0 4px; font-size: 12px; font-weight: 600; }
+.gov-ask__answer table { border-collapse: collapse; margin: 6px 0; }
+.gov-ask__answer th, .gov-ask__answer td { border: 1px solid var(--ki-color-border); padding: 3px 7px; }
+
+/* ── 追问过程步骤流（2026-11-19）：平铺、逐步累积、实时滚动（不套气泡壳） ── */
+.gov-ask__steps {
+  max-height: 180px; overflow-y: auto; margin: 2px 0 6px;
+  padding: 2px 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.gov-ask__step { display: flex; gap: 7px; font-size: 11px; line-height: 1.55; }
+.gov-ask__step-kind {
+  flex: none; padding: 0 5px; height: 16px; line-height: 16px;
+  border-radius: var(--ki-radius-tag); font-size: 10px; font-weight: 600;
+  color: var(--ki-color-text-subtle); background: var(--ki-color-bg-tertiary);
+}
+.gov-ask__step--thinking .gov-ask__step-kind { color: var(--ki-color-primary); }
+.gov-ask__step--tool .gov-ask__step-kind { color: #2e7d32; }
+.gov-ask__step-body { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.gov-ask__step-label { color: var(--ki-color-text); font-weight: 500; }
+.gov-ask__step-text {
+  color: var(--ki-color-text-subtle); white-space: pre-wrap; word-break: break-word;
+  max-height: 72px; overflow-y: auto;
 }
 /* 抽屉遮罩：比弹窗遮罩淡，侧滑抽屉不该像弹窗那样把页面压黑 */
 .gov-drawer-mask {
@@ -2124,3 +2205,224 @@
 .gov-upload-group { display: flex; align-items: center; gap: var(--ki-space-2); }
 .gov-upload-group > span { flex: none; }
 .gov-upload-group > *:last-child { flex: 1 1 auto; min-width: 0; }
+
+/* ════════ 分析结论：因果链（2026-11-19）════════
+   取代「一段最长 300 字、根因/影响/建议揉在一起」的纯文本。设计口径：
+   · 竖轨 + 节点 + 流向箭头表达顺序，节点类型用 11px 弱色标签（不做彩色徽章）；
+   · 全块只有一个强调色：根因的菱形 + 紫色轨道；其余一律 text-subtle / text-muted
+     （影响面特意不用 amber —— 会与「未确认点」的 warning 语义撞车）；
+   · 窄屏（≤560）类型标签落到正文上一行，轨道仍与内容对齐。 */
+.gov-conclusion--chain { gap: 8px; }
+.gov-chain-wrap { display: flex; flex-direction: column; gap: 8px; }
+.gov-chain__head { display: flex; align-items: baseline; gap: 8px; }
+.gov-chain__head-title { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--ki-color-purple); }
+.gov-chain__head-meta { font-size: 10.5px; color: var(--ki-color-text-subtle); white-space: nowrap; }
+.gov-chain__head-meta::before { content: "·"; margin-right: 6px; color: var(--ki-color-border); }
+.gov-chain__sum {
+  margin: 0 0 2px;
+  font-size: 13px; font-weight: 600; line-height: 1.55;
+  color: var(--ki-color-text); text-wrap: pretty;
+}
+
+.gov-chain {
+  --gov-rail: color-mix(in srgb, var(--ki-color-text-subtle) 58%, transparent);
+  --gov-rail-strong: color-mix(in srgb, var(--ki-color-purple) 55%, transparent);
+  margin: 0; padding: 0; list-style: none;
+}
+/* 节点：12px 轨道列 + 58px 类型列 + 正文列 */
+.gov-chain__node {
+  position: relative;
+  display: grid;
+  grid-template-columns: 12px 58px minmax(0, 1fr);
+  column-gap: 10px;
+  padding-bottom: 18px;
+}
+.gov-chain__node:last-child { padding-bottom: 0; }
+/* 竖轨：贯穿到下一个节点（末节点不出线） */
+.gov-chain__node::before {
+  content: ""; position: absolute; left: 6px; top: 12px; bottom: -6px;
+  width: 2px; border-radius: 1px; background: var(--gov-rail);
+}
+.gov-chain__node:last-child::before { display: none; }
+/* 流向箭头：坐在两节点之间的轨道上 */
+.gov-chain__node:not(:first-child)::after {
+  content: ""; position: absolute; left: 3px; top: -8px;
+  border-left: 4.5px solid transparent;
+  border-right: 4.5px solid transparent;
+  border-top: 5px solid var(--gov-rail);
+}
+.gov-chain__track { position: relative; }
+.gov-chain__dot {
+  position: absolute; left: -1px; top: 4px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--ki-color-surface);
+  border: 1.5px solid var(--ki-color-text-subtle);
+  /* 白圈压住轨道：节点处轨道"断开"，视觉上才是节点而不是刻度 */
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--ki-color-surface) 88%, transparent);
+}
+/* 直接原因：实心 */
+.gov-chain__node--cause .gov-chain__dot {
+  background: color-mix(in srgb, var(--ki-color-text-subtle) 82%, var(--ki-color-surface));
+}
+/* 影响面：深灰实心 */
+.gov-chain__node--impact .gov-chain__dot {
+  background: color-mix(in srgb, var(--ki-color-text-muted) 85%, var(--ki-color-surface));
+  border-color: transparent;
+}
+/* 建议：主色空心 */
+.gov-chain__node--fix .gov-chain__dot { border-color: var(--ki-color-primary); }
+
+/* 根因：菱形 + 轨道转紫 */
+.gov-chain__node--root { padding-bottom: 20px; }
+.gov-chain__node--root::before { background: var(--gov-rail-strong); }
+.gov-chain__node--root::after { border-top-color: var(--gov-rail-strong); }
+.gov-chain__node--root .gov-chain__dot {
+  left: -3px; top: 3px; width: 13px; height: 13px;
+  border: 0; border-radius: 2px;
+  background: var(--ki-color-purple);
+  transform: rotate(45deg);
+  box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--ki-color-purple) 12%, var(--ki-color-surface));
+}
+.gov-chain__node--root .gov-chain__kind { color: var(--ki-color-purple); }
+.gov-chain__node--root .gov-chain__text { font-weight: 600; }
+
+.gov-chain__kind {
+  font-size: 11px; font-weight: 600; letter-spacing: .04em; line-height: 1.72;
+  color: var(--ki-color-text-subtle); padding-top: 1px;
+}
+.gov-chain__text {
+  margin: 0; font-size: var(--ki-font-size-sm); line-height: 1.72;
+  color: var(--ki-color-text); text-wrap: pretty;
+}
+.gov-chain__text code,
+.gov-chain__branches code,
+.gov-chain__sum code {
+  font-family: var(--ki-font-mono); font-size: 11px;
+  padding: 1px 4px; border-radius: 3px;
+  background: var(--ki-color-bg-muted); color: var(--ki-color-text);
+}
+.gov-chain__flag {
+  margin-left: 6px; white-space: nowrap;
+  font-size: 10px; font-weight: 700; letter-spacing: .03em;
+  color: color-mix(in srgb, var(--ki-color-purple) 78%, var(--ki-color-text-subtle));
+}
+
+/* 位置胶囊：点开是悬浮代码块（不跳走） */
+.gov-chain__ref {
+  appearance: none; cursor: pointer;
+  display: inline-flex; align-items: center;
+  margin-left: 6px; padding: 0 5px;
+  border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-bg-secondary);
+  font-family: var(--ki-font-mono); font-size: 10.5px; line-height: 1.7;
+  color: var(--ki-color-text-muted); vertical-align: 1px;
+  transition: border-color 120ms, color 120ms, background 120ms;
+}
+.gov-chain__ref:hover {
+  border-color: color-mix(in srgb, var(--ki-color-purple) 45%, var(--ki-color-border));
+  color: var(--ki-color-purple);
+  background: color-mix(in srgb, var(--ki-color-purple) 7%, var(--ki-color-surface));
+}
+.gov-chain__ref[aria-expanded="true"] {
+  border-color: color-mix(in srgb, var(--ki-color-purple) 55%, var(--ki-color-border));
+  color: var(--ki-color-purple);
+}
+.gov-chain__ref:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 1px; }
+/* 无快照（早期确认 / 手工录入）：只显示位置，不可点 */
+.gov-chain__ref--plain { cursor: default; }
+.gov-chain__ref--plain:hover {
+  border-color: var(--ki-color-border);
+  color: var(--ki-color-text-muted);
+  background: var(--ki-color-bg-secondary);
+}
+
+/* 分叉：触发条件 / 反例 */
+.gov-chain__branches { margin: 6px 0 0; padding: 0; list-style: none; }
+.gov-chain__branches li {
+  position: relative; padding: 0 0 3px 18px;
+  font-size: var(--ki-font-size-sm); line-height: 1.7;
+  color: var(--ki-color-text-muted); text-wrap: pretty;
+}
+.gov-chain__branches li::before {
+  content: ""; position: absolute; left: 3px; top: -2px; bottom: 0;
+  width: 1px; background: var(--gov-rail);
+}
+.gov-chain__branches li:last-child::before { bottom: auto; height: 11px; }
+.gov-chain__branches li::after {
+  content: ""; position: absolute; left: 3px; top: 9px;
+  width: 10px; height: 1px; background: var(--gov-rail);
+}
+
+/* ── 悬浮代码块：portal + fixed，贴在胶囊下方（空间不足翻上方）── */
+.gov-peek {
+  position: fixed; z-index: 80;
+  width: min(480px, calc(100vw - 24px));
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-surface);
+  box-shadow: var(--ki-shadow-2);
+  overflow: hidden;
+  animation: gov-peek-in 120ms ease-out;
+}
+@keyframes gov-peek-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .gov-peek { animation: none; } }
+.gov-peek__arrow {
+  position: absolute; width: 10px; height: 10px;
+  background: var(--ki-color-bg-secondary);
+  border: 1px solid var(--ki-color-border);
+  transform: rotate(45deg);
+}
+/* 默认在胶囊下方：箭头贴顶，藏掉朝上的两条边 */
+.gov-peek[data-above="0"] .gov-peek__arrow { top: -6px; border-right: 0; border-bottom: 0; }
+/* 翻到上方：箭头贴底 */
+.gov-peek[data-above="1"] .gov-peek__arrow { bottom: -6px; border-left: 0; border-top: 0; }
+.gov-peek__head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 8px 7px 10px;
+  background: var(--ki-color-bg-secondary);
+  border-bottom: 1px solid var(--ki-color-border);
+}
+.gov-peek__path {
+  font-family: var(--ki-font-mono); font-size: 11px; color: var(--ki-color-text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gov-peek__line { font-family: var(--ki-font-mono); font-size: 11px; color: var(--ki-color-text-subtle); flex: none; }
+.gov-peek__close {
+  margin-left: auto; flex: none;
+  width: 20px; height: 20px; display: grid; place-items: center;
+  padding: 0; border: 0; border-radius: var(--ki-radius-tag);
+  background: transparent; color: var(--ki-color-text-subtle);
+  font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+}
+.gov-peek__close:hover { background: var(--ki-color-hover); color: var(--ki-color-text); }
+.gov-peek__close:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 1px; }
+/* 代码区复用 `.gov-codeloc__codewrap/__ln/__snip`（深色快照 + 行号 + hljs 配色），
+   这里只补浮层自己的高度与圆角：不让两处代码块长得不一样 */
+.gov-peek__codewrap { margin: 0; border-radius: 0; max-height: 268px; overflow: auto; }
+/* 命中行的行号：只在行号列做标记（正文已整体高亮，再刷底色会与 token 色打架） */
+.gov-peek .gov-codeloc__ln span.is-hit { color: var(--ki-color-purple); font-weight: 700; }
+.gov-peek__foot {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-secondary);
+}
+.gov-peek__why {
+  font-size: 11px; color: var(--ki-color-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gov-peek__commit {
+  margin-left: auto; flex: none;
+  font-family: var(--ki-font-mono); font-size: 10px;
+  padding: 0 4px; border-radius: 3px;
+  background: var(--ki-color-bg-muted); color: var(--ki-color-text-subtle);
+}
+
+/* 窄屏：类型标签落到正文上一行，轨道仍与内容对齐 */
+@media (max-width: 560px) {
+  .gov-chain__node { grid-template-columns: 12px minmax(0, 1fr); row-gap: 2px; }
+  .gov-chain__track { grid-row: 1 / span 2; }
+  .gov-chain__kind { grid-column: 2; }
+  .gov-chain__body { grid-column: 2; }
+  .gov-peek { width: calc(100vw - 24px); }
+}

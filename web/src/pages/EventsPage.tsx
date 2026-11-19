@@ -41,7 +41,8 @@ import {
 type Status = 'open' | 'closed' | 'all';
 type Tab = 'list' | 'types';
 /**
- * 排序键（2026-11-17）：后端固定按 `updatedAt` 降序返回，前端只在此结果集内重排。
+ * 排序键（2026-11-17）：后端在**普通区**固定按 `updatedAt` 降序返回、置顶区按 `pinnedAt` 倒序
+ * （2026-11-19），前端只在这两个区内各自重排。
  * 保持「最近更新」为默认值 = 升级前后默认视图完全一致，不让人莫名多一次认知重排。
  */
 type SortKey = 'updated-desc' | 'created-desc' | 'created-asc';
@@ -51,6 +52,11 @@ const SORT_LABEL: Record<SortKey, string> = {
   'created-desc': '最新创建',
   'created-asc': '最早创建',
 };
+
+/** 已置顶 = `pinnedAt` 有正数（后端缺省为 undefined，详情 DTO 为 null） */
+function isPinnedEvent(e: Pick<EventView, 'pinnedAt'>): boolean {
+  return typeof e.pinnedAt === 'number' && e.pinnedAt > 0;
+}
 
 const VIS_TEXT: Record<string, string> = {
   full: '语义+全文',
@@ -107,11 +113,14 @@ export function EventsPage(): JSX.Element {
    */
   const [searchParams, setSearchParams] = useSearchParams();
   /**
-   * 进入页面时的 `?event=` 只认一次：之后点选写回的参数不参与下面「找不到就切全部 /
-   * 提示可能已删除」的兜底，否则用户一切换筛选就会被误报「事件可能已被删除」。
+   * 进入页面时的 `?event=` 只认一次：之后点选写回的参数不参与下面「找不到就提示可能已删除」的兜底，
+   * 否则每点一次事件、每切一次筛选都会重跑一遍深链判定。
    */
   const entryDeepLink = useRef(searchParams.get('event')).current;
-  /** 深链找不到只提示一次，避免每次列表刷新都弹 */
+  /**
+   * 深链兜底是否**已经判过**（不管结果）：找到、找不到、换库主动压掉，三种都置位。
+   * 只置「找不到」的话，用户第一次切筛选就会在按筛选后的列表上重判一次 → 误报「已删除」（2026-11-19）。
+   */
   const deepLinkWarned = useRef(false);
   /** 列表里按 id 或 `#shortId` 找事件：深链与选中态回写共用同一口径 */
   const findEventKey = useCallback((list: readonly EventView[], key: string | null): string | null => {
@@ -254,7 +263,17 @@ export function EventsPage(): JSX.Element {
   const loadList = useCallback(async () => {
     try {
       const [list, typeList, govCounts] = await Promise.all([
-        listEvents(scope, { status, ...(typeFilter ? { type: typeFilter } : {}), ...(keyword ? { q: keyword } : {}), limit: 100 }),
+        /*
+         * `includePinned: true`（2026-11-19）：置顶事件不受「类型 / 状态」筛选影响。
+         * 只开给事件页 —— MCP 与脚本走同一函数，它们要的是严格筛出来的集合。
+         */
+        listEvents(scope, {
+          status,
+          ...(typeFilter ? { type: typeFilter } : {}),
+          ...(keyword ? { q: keyword } : {}),
+          limit: 100,
+          includePinned: true,
+        }),
         listEventTypes(scope),
         getGovernanceCounts(scope).catch(() => null),
       ]);
@@ -285,23 +304,21 @@ export function EventsPage(): JSX.Element {
   }, [entryDeepLink, activeId]);
 
   /**
-   * 深链指向的事件不在当前列表里。
+   * 深链指向的事件不在**进入页面时**的列表里。
    *
-   * 最可能是被状态筛选挡住了（默认已是「全部」，但用户先手动切到「未收口」再进链接就会撞上）。
-   * 这种情况不该弹「没找到」，而应**自动切到「全部」再找一次**：
-   * 用户点链接的预期是「看到它」，不是「被要求手动改筛选」。切过去仍然找不到，才说明真被删了。
-   *
-   * 只对**进入页面时**的深链生效（`entryDeepLink`）：点选写回 URL 后的 `?event=` 不再走这里，
-   * 否则用户一改筛选就会被误报「事件可能已被删除」。
+   * **只判一次**（2026-11-19 误报修复）：判完就置位 `deepLinkWarned`，之后用户怎么切筛选都不再走这里。
+   * 旧实现只把「值」读一次、判定却随 `events` / `status` 反复重跑，于是：
+   *   · 切到「会把这条事件排除掉」的那一档 → 列表里自然找不到它 → 误报「可能已被删除」（事件明明在）；
+   *   · 切「未收口」更糟 → 旧兜底会 `setStatus('all')` 把用户刚选的筛选弹回去，而这一帧 `events`
+   *     还是上一份（未收口）列表 → 紧接着就弹误报。两条路径均已在真机复现。
+   * 默认筛选是「全部」，进入页面这份列表就是权威判据：找到即终结，找不到才提示。
+   * ⚠️ 若将来把状态筛选写进 URL（进页面就可能不是「全部」），这份列表不再是权威判据，
+   * 要改成「按未筛选的列表判定」，否则又会把「被筛掉」误报成「已删除」。
    */
   useEffect(() => {
     if (!entryDeepLink || deepLinkWarned.current || events.length === 0) return;
-    if (matchDeepLink(events)) return;
-    if (status === 'open') {
-      setStatus('all');
-      return;
-    }
     deepLinkWarned.current = true;
+    if (matchDeepLink(events)) return;
     /*
      * 不能只写「可能已被删除」：地址栏里的 `?event=` 是**库内** id（2026-11-19 起点选也会写回），
      * 换库 / 转发给用别的库的人都会走到这里，而事件其实一直在，只是不在当前库。
@@ -311,7 +328,7 @@ export function EventsPage(): JSX.Element {
       tone: 'err',
       text: `未找到事件 ${entryDeepLink}：它可能已被删除，或不在当前知识库「${scope}」中`,
     });
-  }, [entryDeepLink, events, status, matchDeepLink, scope]);
+  }, [entryDeepLink, events, matchDeepLink, scope]);
 
   /**
    * 操作提示自动收（2026-11-18）：成功 2.6s 自隐 —— 它已是 fixed 浮层、不占布局，
@@ -445,7 +462,9 @@ export function EventsPage(): JSX.Element {
    * 应给 `/governance/events` 加 `sort` 参数在服务端排 —— 否则第 101 条起永远排不进来。
    */
   const sortedEvents = useMemo(() => {
-    const arr = [...events];
+    // 先分区、后排序（2026-11-19）：置顶项由 `pinnedEvents` 单独渲染，
+    // 三种排序键都只在普通区内生效 —— 否则「最早创建」会把置顶项顶到下面去。
+    const arr = events.filter((e) => !isPinnedEvent(e));
     // `createdAt` 在 `EventRecord` 里是必填，但 `readAllEvents` 只校验 id/stageKey，
     // 2026-11 之前手工写入的老文件可能没有 → 回退到 updatedAt，避免整批沉到末尾。
     const created = (e: EventView): number => e.createdAt ?? e.updatedAt ?? 0;
@@ -456,11 +475,101 @@ export function EventsPage(): JSX.Element {
   }, [events, sort]);
 
   /**
+   * 置顶区（2026-11-19）：区内按「最近置顶在上」。
+   *
+   * 服务端已经这样排过，这里重排一次是**幂等的**：列表接口将来若换排序实现，
+   * 置顶区顺序也不会跟着漂。置顶区永远在普通区之上，不参与 `sort`。
+   */
+  const pinnedEvents = useMemo(
+    () => events.filter((e) => isPinnedEvent(e)).sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0)),
+    [events],
+  );
+
+  /**
    * 第二行时间标签跟着排序键走：按创建时间排却显示「更新于」会让人以为排序坏了。
    * 按更新时间排时保留原样（只一个相对时间），不额外加前缀词。
    */
   const listTimeText = (e: EventView): string =>
     sort === 'updated-desc' ? relTime(e.updatedAt) : `创建 ${relTime(e.createdAt ?? e.updatedAt)}`;
+
+  /** 状态筛选的显示名：下拉与置顶分区标题共用，避免两处措辞飘 */
+  const statusLabel = status === 'open' ? '未收口' : status === 'closed' ? '已收口' : '全部';
+
+  /**
+   * 单行事件卡。抽成函数而不是两段 JSX：置顶区与普通区必须**完全同构**，
+   * 复制一份的结果是改了一处、另一处悄悄不一致（例如新增的置顶标识只出现在一半行里）。
+   */
+  const renderEventRow = (event: EventView, pinned: boolean): JSX.Element => {
+    const t = types.find((x) => x.id === event.typeId);
+    // 已收口 = `closedAt` 非空（收口的唯一权威）。只降视觉权重、不禁用：
+    // 收口事件仍要能点开复盘，灰底 ≠ 不可操作。
+    const isClosed = event.closedAt !== null && event.closedAt !== undefined;
+    /*
+     * 当前阶段（2026-11-19）：列表里看不出「这条走到哪一步了」，只能点开详情看阶段线。
+     * 列表接口本来就下发 `stage`，直接用；类型还没加载到 / 老数据缺字段时按 stageKey
+     * 从类型定义里反查一次。`(未知阶段)` 是后端找不到阶段时的占位，显示出来只是噪音。
+     */
+    const stageOfType = t?.stages.find((s) => s.key === event.stageKey);
+    const rawStageName = event.stage?.name ?? stageOfType?.name ?? null;
+    const stageName = rawStageName && rawStageName !== '(未知阶段)' ? rawStageName : null;
+    const stageIdx2 = event.stage?.index ?? (stageOfType ? (t?.stages.indexOf(stageOfType) ?? -1) : -1);
+    const stageTotal = t?.stages.length ?? 0;
+    return (
+      <div
+        key={event.id}
+        data-event-id={event.id}
+        className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}`}
+        onClick={() => selectEvent(event.id)}
+      >
+        <div className="gov-ev__title">
+          <span className="gov-ev__id" title={`事件 #${event.shortId}`} aria-label={`事件 #${event.shortId}`}>
+            {event.shortId}
+          </span>
+          {/* 右列整块与标题左对齐：时间不再挂在编号下方 */}
+          <div className="gov-ev__main">
+            <div className="gov-ev__name">{event.title}</div>
+            {/* 列表只留时间 / 类型 / 当前阶段：文档数与可见性点开详情可见，行内不再重复 */}
+            <div className="gov-ev__meta">
+              {/*
+                * 置顶标识放在最前（2026-11-19）：分区标题说明「这一组是什么」，
+                * 行内标识说明「为什么它在筛选结果里」。只靠分组还不够 ——
+                * 一行滚到视口外时，标题已经看不见了。
+                */}
+              {pinned ? (
+                <span
+                  className="gov-ev__pin"
+                  role="img"
+                  title="已置顶：不受筛选与排序影响"
+                  aria-label="已置顶"
+                >
+                  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                    <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
+                  </svg>
+                </span>
+              ) : null}
+              <span>{listTimeText(event)}</span>
+              {t ? <span className={typeBadgeClass(t.name)}>{t.name}</span> : null}
+              {/*
+                * 当前阶段紧跟类型徽标：同一行读成「类型 → 走到哪」。
+                * **不做成带框徽标**（像按钮、会诱人点），只留圆点 + 文字；
+                * 序号这类精确位置放进 title，不占版面。
+                */}
+              {stageName ? (
+                <span
+                  className={`gov-badge gov-ev__stage${isClosed ? ' gov-ev__stage--closed' : ''}`}
+                  title={stageIdx2 >= 0 && stageTotal > 0
+                    ? `当前阶段 第 ${stageIdx2 + 1}/${stageTotal} 步「${stageName}」`
+                    : `当前阶段「${stageName}」`}
+                >
+                  {stageName}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   const closed = active?.closedAt !== null && active?.closedAt !== undefined;
   const stageIdx = type && active ? type.stages.findIndex((s) => s.key === active.stageKey) : -1;
@@ -506,7 +615,7 @@ export function EventsPage(): JSX.Element {
             onChange={setTypeFilter}
           />
           <DropdownFilter
-            label={status === 'open' ? '未收口' : status === 'closed' ? '已收口' : '全部'}
+            label={statusLabel}
             value={status}
             options={[
               { value: 'open', label: '未收口' },
@@ -696,60 +805,26 @@ export function EventsPage(): JSX.Element {
               <input className="gov-input" style={{ width: '100%' }} placeholder="搜索事件名或编号…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
             <div className="gov-pane__list">
-              {sortedEvents.map((event) => {
-                const t = types.find((x) => x.id === event.typeId);
-                // 已收口 = `closedAt` 非空（收口的唯一权威）。只降视觉权重、不禁用：
-                // 收口事件仍要能点开复盘，灰底 ≠ 不可操作。
-                const isClosed = event.closedAt !== null && event.closedAt !== undefined;
-                /*
-                 * 当前阶段（2026-11-19）：列表里看不出「这条走到哪一步了」，只能点开详情看阶段线。
-                 * 列表接口本来就下发 `stage`，直接用；类型还没加载到 / 老数据缺字段时按 stageKey
-                 * 从类型定义里反查一次。`(未知阶段)` 是后端找不到阶段时的占位，显示出来只是噪音。
-                 */
-                const stageOfType = t?.stages.find((s) => s.key === event.stageKey);
-                const rawStageName = event.stage?.name ?? stageOfType?.name ?? null;
-                const stageName = rawStageName && rawStageName !== '(未知阶段)' ? rawStageName : null;
-                const stageIdx = event.stage?.index ?? (stageOfType ? (t?.stages.indexOf(stageOfType) ?? -1) : -1);
-                const stageTotal = t?.stages.length ?? 0;
-                return (
-                  <div
-                    key={event.id}
-                    data-event-id={event.id}
-                    className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}`}
-                    onClick={() => selectEvent(event.id)}
-                  >
-                    <div className="gov-ev__title">
-                      <span className="gov-ev__id" title={`事件 #${event.shortId}`} aria-label={`事件 #${event.shortId}`}>
-                        {event.shortId}
-                      </span>
-                      {/* 右列整块与标题左对齐：时间不再挂在编号下方 */}
-                      <div className="gov-ev__main">
-                        <div className="gov-ev__name">{event.title}</div>
-                        {/* 列表只留时间 / 类型 / 当前阶段：文档数与可见性点开详情可见，行内不再重复 */}
-                        <div className="gov-ev__meta">
-                          <span>{listTimeText(event)}</span>
-                          {t ? <span className={typeBadgeClass(t.name)}>{t.name}</span> : null}
-                          {/*
-                            * 当前阶段紧跟类型徽标：同一行读成「类型 → 走到哪」。
-                            * **不做成带框徽标**（像按钮、会诱人点），只留圆点 + 文字；
-                             * 序号这类精确位置放进 title，不占版面。
-                            */}
-                          {stageName ? (
-                            <span
-                              className={`gov-badge gov-ev__stage${isClosed ? ' gov-ev__stage--closed' : ''}`}
-                              title={stageIdx >= 0 && stageTotal > 0
-                                ? `当前阶段 第 ${stageIdx + 1}/${stageTotal} 步「${stageName}」`
-                                : `当前阶段「${stageName}」`}
-                            >
-                              {stageName}
-                            </span>
-                          ) : null}
-                        </div>
-                      </div>
-                    </div>
+              {/*
+                * 置顶分区（2026-11-19）：只有真的存在置顶项时才画分隔与标题 ——
+                * 没人置顶时列表与升级前**像素级一致**（不给所有用户平白多两行标题）。
+                */}
+              {pinnedEvents.length > 0 ? (
+                <>
+                  <div className="gov-evgroup">
+                    <span className="gov-evgroup__label">置顶</span>
+                    <span className="gov-evgroup__hint">不受筛选与排序影响</span>
                   </div>
-                );
-              })}
+                  {pinnedEvents.map((event) => renderEventRow(event, true))}
+                  {/* 普通区被筛空时不画空标题：只剩一行「已收口」下面是空白，像页面没加载出来 */}
+                  {sortedEvents.length > 0 ? (
+                    <div className="gov-evgroup">
+                      <span className="gov-evgroup__label">{status === 'all' ? '其他事件' : statusLabel}</span>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+              {sortedEvents.map((event) => renderEventRow(event, false))}
               {events.length === 0 ? <div className="gov-cell-muted" style={{ padding: 16 }}>暂无事件</div> : null}
             </div>
           </div>
@@ -767,6 +842,7 @@ export function EventsPage(): JSX.Element {
                   memberCount={memberCount}
                   refCount={refs.length}
                   closed={closed}
+                  pinned={isPinnedEvent(active)}
                   canWrite={canWrite}
                   busy={busy}
                   delConfirm={delConfirm}
@@ -803,6 +879,14 @@ export function EventsPage(): JSX.Element {
                     setMessage({ tone: 'ok', text: '正在启动分析…' });
                     setStartSignal((n) => n + 1);
                   }}
+                  onTogglePin={() => void run(async () => {
+                    /*
+                     * 取反当前态而不是"永远置顶"：同一个按钮承担开关，
+                     * 文案由 `pinned` 决定（见 EventSummaryCard），两边必须同一口径。
+                     */
+                    const r = await setEventPinned(scope, active.id, !isPinnedEvent(active));
+                    return r.hint;
+                  })}
                   onReopen={() => void run(async () => {
                     const r = await reopenEvent(scope, active.id);
                     return r.hint;

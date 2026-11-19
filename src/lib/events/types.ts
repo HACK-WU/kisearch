@@ -57,6 +57,14 @@ export interface EventRecord {
   stageIndex: number;
   /** 收口唯一权威；非空即已收口 */
   closedAt: number | null;
+  /**
+   * 置顶时间（2026-11-19）：非空 = 已置顶，缺省 = 未置顶（老数据无需迁移）。
+   *
+   * 记时间而不是布尔：置顶区要按「最近置顶在上」排，布尔给不出顺序。
+   * **不参与 `updatedAt`** —— 置顶是列表偏好，不是内容变更，混进去会让
+   * 「最近更新」排序莫名变化（用户会以为数据被动过）。
+   */
+  pinnedAt?: number;
   revision: number;
   createdAt: number;
   updatedAt: number;

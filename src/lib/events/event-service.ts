@@ -24,7 +24,7 @@ import { getKbDir } from '../scope.js';
 import { readJson, writeJson } from '../store.js';
 import { moveToTrash } from '../trash-service.js';
 import {
-  readAllEvents, isEventClosed, writeEvent, removeEventFile, mustFindEvent,
+  readAllEvents, isEventClosed, isEventPinned, writeEvent, removeEventFile, mustFindEvent,
   allocateShortId, newEventId,
 } from './store.js';
 import { appendStageLog, removeStageLog } from './stage-log.js';
@@ -77,6 +77,17 @@ export interface ListEventsOptions {
   offset?: number;
   /** 每个事件附带的文档名条数（默认 3 / 上限 10，R42 防无界返回） */
   docsPreviewLimit?: number;
+  /**
+   * 返回置顶事件时**是否越过状态 / 类型筛选**（2026-11-19，默认 false）。
+   *
+   * 为什么要显式开关而不是默认免疫：本函数被 MCP `ki_event_list` 复用，
+   * AI 要的是「按条件筛出来的精确集合」，混进不在条件内的事件会污染推理。
+   * 所以"免疫"是 UI 的展示诉求，只能由 Web 端显式开启。
+   *
+   * **关键词 `q` 任何情况下都不免疫** —— 搜索是主动找特定事件，
+   * 硬塞一条不匹配的置顶项等于骗人。
+   */
+  includePinned?: boolean;
 }
 
 export interface EventListItemView {
@@ -113,13 +124,34 @@ export function listEvents(scope: string, opts: ListEventsOptions = {}): {
   const types = new Map<string, EventTypeRecord | null>();
   const all = readAllEvents(scope)
     .filter((e) => {
-      if (status === 'open' && isEventClosed(e)) return false;
-      if (status === 'closed' && !isEventClosed(e)) return false;
-      if (opts.typeId && e.typeId !== opts.typeId) return false;
+      /*
+       * 置顶免疫（2026-11-19）：`includePinned` 由 Web 端显式开启 —— 用户要的是
+       * 「无论切到哪个筛选，置顶那条都在」。**只豁免状态与类型**：
+       * 关键词搜索照旧严格匹配，否则搜 A 却冒出无关的 B 会让人以为搜索坏了。
+       */
+      const pinnedBypass = opts.includePinned === true && isEventPinned(e);
+      if (!pinnedBypass) {
+        if (status === 'open' && isEventClosed(e)) return false;
+        if (status === 'closed' && !isEventClosed(e)) return false;
+        if (opts.typeId && e.typeId !== opts.typeId) return false;
+      }
       if (q && !`${e.title} #${e.shortId}`.toLowerCase().includes(q)) return false;
       return true;
     })
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+    /*
+     * 置顶区恒在普通区之上（区内按「最近置顶在上」），普通区沿用 `updatedAt` 降序。
+     * 分页截断发生在这之后，所以置顶项不会被 `offset` 挤掉。
+     */
+    .sort((a, b) => {
+      const aPinned = isEventPinned(a);
+      const bPinned = isEventPinned(b);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      if (aPinned && bPinned) {
+        const diff = (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0);
+        if (diff !== 0) return diff;
+      }
+      return b.updatedAt - a.updatedAt;
+    });
 
   const page = all.slice(offset, offset + limit).map((event) => {
     if (!types.has(event.typeId)) types.set(event.typeId, getType(scope, event.typeId));
@@ -142,6 +174,11 @@ export function listEvents(scope: string, opts: ListEventsOptions = {}): {
     };
   });
 
+  /*
+   * `total` / `hasMore` 按**合并后**的集合算：`includePinned=true` 时它们包含
+   * 被筛选豁免的置顶项（页面只取 limit=100 的当前页，不受影响；
+   * 若将来有消费方拿 total 当"符合筛选的条数"，需另给一个 `matchedTotal`）。
+   */
   return { items: page, total: all.length, hasMore: offset + page.length < all.length };
 }
 
@@ -395,6 +432,31 @@ export async function updateEvent(
 
 export async function updateEventTitle(scope: string, eventRef: string, title: string, revision: number): Promise<EventRecord> {
   return updateEvent(scope, eventRef, { title, revision });
+}
+
+/**
+ * 置顶 / 取消置顶（2026-11-19）。
+ *
+ * 三条刻意的取舍：
+ *   1. **幂等**：已在目标态直接返回，不报错 —— 按钮连点两次不该出红条；
+ *   2. **不动 `revision` / `updatedAt`**：置顶是列表偏好，不是内容变更。
+ *      碰 `revision` 会让正在编辑描述的人莫名 409；碰 `updatedAt` 会改
+ *      「最近更新」排序，让人以为事件被人动过；
+ *   3. 取消置顶是**删字段**（不是写 0）：`pinnedAt === undefined` 才是唯一权威的"未置顶"。
+ *
+ * 与 `updateEvent` 分开而不是加进它的 patch：那条路径的错误码/乐观锁语义
+ * （`REVISION_CONFLICT`）已被前端与 MCP 依赖，塞进一个不需要 revision 的开关会把它搅浑。
+ */
+export async function setEventPinned(scope: string, eventRef: string, pinned: boolean): Promise<EventRecord> {
+  return withScopeWriteLock(scope, 'event-pin', async () => {
+    const event = mustFindEvent(scope, eventRef);
+    if (isEventPinned(event) === pinned) return event;
+    const next: EventRecord = { ...event };
+    if (pinned) next.pinnedAt = Date.now();
+    else delete next.pinnedAt;
+    writeEvent(scope, next);
+    return next;
+  });
 }
 
 // ─────────────────────────────────────────────────────────────

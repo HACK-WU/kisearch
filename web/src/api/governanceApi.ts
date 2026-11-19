@@ -189,6 +189,8 @@ export interface EventView {
   stageKey: string;
   stageIndex: number;
   closedAt: number | null;
+  /** 置顶时间；有值 = 已置顶（2026-11-19）。缺省与 null 都表示未置顶 */
+  pinnedAt?: number | null;
   revision: number;
   /** 创建时间（列表按创建时间排序时使用；后端 `...item.event` 一直有下发，此前前端未声明） */
   createdAt?: number;
@@ -316,6 +318,23 @@ export function updateEvent(
   return req(`/api/governance/events/${encodeURIComponent(eventId)}`, {
     method: 'PATCH',
     body: JSON.stringify({ scope, ...patch }),
+  });
+}
+
+/**
+ * 置顶 / 取消置顶（2026-11-19）。幂等：连点两次都返回 200。
+ *
+ * 为什么不复用 `updateEvent`：那条路径要 `revision` 且会 bump `updatedAt`，
+ * 而置顶是列表偏好 —— 不该被乐观锁挡，也不该改动「最近更新」排序。
+ */
+export function setEventPinned(
+  scope: string,
+  eventId: string,
+  pinned: boolean,
+): Promise<{ ok: true; scope: string; event: EventView; pinned: boolean; hint: string }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/pin`, {
+    method: 'POST',
+    body: JSON.stringify({ scope, pinned }),
   });
 }
 
@@ -591,11 +610,26 @@ export function askEventAnalysis(
  * 走 `POST /analysis/ask/stream`（SSE over fetch，不能用 EventSource —— 需要 POST body）。
  * 响应非 200 时按普通 JSON 错误解析；流内 `type:'error'` 转为抛错。
  */
+export interface AskStep {
+  id: string;
+  kind: 'thinking' | 'tool' | 'answer';
+  label: string;
+  /** 累积全文（同 id 覆盖即可） */
+  text: string;
+  at: number;
+}
+
+export type AskProgressEvent =
+  | { type: 'step'; step: AskStep }
+  | { type: 'tool'; name: string; label: string }
+  | { type: 'thinking'; text: string };
+
 export async function askEventAnalysisStream(
   scope: string,
   eventId: string,
   args: { question: string; runId?: string },
   onDelta: (text: string) => void,
+  onEvent?: (event: AskProgressEvent) => void,
 ): Promise<{ turn: AnalysisAskTurn }> {
   const res = await fetch(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/ask/stream`, {
     method: 'POST',

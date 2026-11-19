@@ -93,6 +93,16 @@ export function isEventClosed(event: EventRecord): boolean {
   return event.closedAt !== null && event.closedAt !== undefined;
 }
 
+/**
+ * 事件是否已置顶（2026-11-19）：`pinnedAt` 有值即为已置顶。
+ *
+ * 与 `isEventClosed` 一样只认字段本身，不做任何推导 —— 取消置顶是**删字段**，
+ * 不是写 0 / false，所以这里不判真假值而是判有无。
+ */
+export function isEventPinned(event: Pick<EventRecord, 'pinnedAt'>): boolean {
+  return typeof event.pinnedAt === 'number' && event.pinnedAt > 0;
+}
+
 // ─────────────────────────────────────────────────────────────
 // 写路径（B3）：事件 / 类型 / meta。调用方必须已持 scope 写锁
 // ─────────────────────────────────────────────────────────────

@@ -78,6 +78,9 @@ export function registerEventListTool(server: McpServer): void {
               visibility: item.stage.visibility,
               closed: item.event.closedAt !== null,
               ...(item.event.closedAt ? { closedAt: item.event.closedAt } : {}),
+              // 置顶只是「人看的列表偏好」：这里如实返回供 AI 判断轻重，
+              // 但**不影响本工具的筛选**（列表仍严格按 status/type 过滤）。
+              ...(item.event.pinnedAt ? { pinnedAt: item.event.pinnedAt } : {}),
               memberTotal: item.memberTotal,
               docsPreview: item.members.map((m) => ({ group: m.group, name: m.name })),
               ...(item.memberTotal > item.members.length

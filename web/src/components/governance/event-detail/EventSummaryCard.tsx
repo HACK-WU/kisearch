@@ -4,15 +4,17 @@ import type { EventSummaryCardProps } from './types';
  * 事件概要卡（含事件描述内联编辑）。
  *
  * 检查点：A-05/B-01~B-09/C-01~C-15。
- * - 动作区顺序固定：`[AI 分析] [重新打开｜流转] [删除事件]`（C-05）。
+ * - 动作区顺序固定：`[置顶｜取消置顶] [AI 分析] [重新打开｜流转] [删除事件]`（C-05，
+ *   2026-11-19 在最左追加置顶开关：它是「列表偏好」，比其它动作优先级低、破坏性也低，
+ *   放最左既不打乱主操作的位置，也不会让「删除事件」离「流转」更远）。
  * - 描述并入本卡（C-06），编辑态由父级 `descEdit` 承载（C-12：输入不丢焦点）。
  * - 未分析时给一行入口引导（C-15）——现状那句引导在「代码位置」空态里，改版后该段并入分析卡会消失。
  */
 export function EventSummaryCard(props: EventSummaryCardProps) {
   const {
-    event, typeName, stageName, memberCount, refCount, closed, canWrite, busy, delConfirm,
+    event, typeName, stageName, memberCount, refCount, closed, pinned, canWrite, busy, delConfirm,
     descEdit, stageSlot, showAnalyzeGuide,
-    onAnalyze, onReopen, onDelete, onTransition,
+    onAnalyze, onTogglePin, onReopen, onDelete, onTransition,
     onDescEdit, onDescChange, onDescSave, onDescCancel,
   } = props;
 
@@ -25,6 +27,26 @@ export function EventSummaryCard(props: EventSummaryCardProps) {
         <span className="gov-dcard__title">事件概要</span>
         <span className="gov-dcard__hint">阶段与可见性决定这些文档能被谁搜到</span>
         <span className="gov-dcard__actions">
+          {/*
+            置顶开关（2026-11-19）。`aria-pressed` 而不是两套按钮：
+            它是一个状态开关，屏幕阅读器要能读出「当前已置顶」，而不是听到两个不同动作。
+            文案在置顶后变「取消置顶」—— 只说「已置顶」会让人不知道点了会怎样。
+          */}
+          <button
+            type="button"
+            className={`gov-btn gov-btn--sm${pinned ? ' gov-btn--pinned' : ''}`}
+            aria-pressed={pinned}
+            disabled={busy || !canWrite}
+            title={readOnlyTitle ?? (pinned
+              ? '取消置顶：恢复为跟随筛选与排序'
+              : '置顶：无论列表选哪种筛选 / 排序，它都排在列表最前')}
+            onClick={onTogglePin}
+          >
+            <svg className="gov-btn__pin" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z" />
+            </svg>
+            {pinned ? '取消置顶' : '置顶'}
+          </button>
           <button
             type="button"
             className="gov-btn gov-btn--sm gov-btn--ai"

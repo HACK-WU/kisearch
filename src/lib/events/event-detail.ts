@@ -92,6 +92,8 @@ export interface EventDetailView {
     description: string | null;
     closed: boolean;
     closedAt: number | null;
+    /** 置顶时间；null = 未置顶（2026-11-19） */
+    pinnedAt: number | null;
     revision: number;
     createdAt: number;
     updatedAt: number;
@@ -320,6 +322,7 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
       description: event.description ?? null,
       closed: isEventClosed(event),
       closedAt: event.closedAt,
+      pinnedAt: event.pinnedAt ?? null,
       revision: event.revision,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
