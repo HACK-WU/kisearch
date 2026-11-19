@@ -416,6 +416,8 @@ export interface PromptSkill {
   /** 内置条目：可改内容、可禁用、**不可删除**（服务端强校验，前端据此隐藏删除入口） */
   builtin: boolean;
   enabled: boolean;
+  /** 内置条目是否被改过；缺省（历史配置）= 未知，界面标「内置已更新」引导恢复默认（2026-11-19） */
+  edited?: boolean;
   /** 最后修改时间（ISO）；未改过时等于内置默认时间戳 */
   at: string;
 }
@@ -484,6 +486,11 @@ export interface AnalysisConfig {
   skills: PromptSkill[];
   tools: Record<string, boolean>;
   /**
+   * 分析前预取（2026-11-19）：程序在开始分析前调一次 `ki_recall`，把「建议先读哪几篇」注入上下文。
+   * 旧后端不返回该字段 → 按「开启、上限 5」处理。
+   */
+  recall?: { enabled: boolean; limit: number };
+  /**
    * 思考级别。
    *
    * ⚠️ 2026-11-18：原 `maxRounds` / `maxFiles` 预算已整体取消，后端不再读取。
@@ -503,6 +510,8 @@ export interface AnalysisToolGroup {
 export interface CapabilityPrompt {
   content: string;
   at: string;
+  /** 内置条目是否被用户改过；false = 读取时跟随代码升级（2026-11-19） */
+  edited?: boolean;
 }
 
 /** AI 查找 · 检索范围（`extraScopes` 不含"当前事件所在库"，它恒定在范围内） */

@@ -647,6 +647,21 @@ describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
     assert.equal(base.tools['fs_read'], undefined, '对话 tools 不得混入 fs_read');
   });
 
+  it('内置 code-locate 带「先查知识库」纪律（不再把检索写成可选步骤）', () => {
+    const content = defaultPromptConfig().analysis!.skills[0]!.content;
+    /*
+     * 2026-11-19 真机 #48：33 轮 60 次调用全是 fs_*，一次 ki_search 都没发。
+     * 原因是「无文档时可用 ki_search」被写成可选建议，且正文按需加载从不生效。
+     * 现在正文常驻 + 检索写成每轮必做，这里钉住关键措辞，防止改回去。
+     */
+    assert.ok(content.includes('先看预取清单'), '必须让模型先吃程序预取的清单');
+    assert.ok(content.includes('ki_search'), '必须点名检索工具（预取不可用时的兜底）');
+    assert.ok(content.includes('次数你判断'), '检索次数交给模型判断，不再写死硬限制');
+    assert.ok(content.includes('limit: 5'), '检索口径要写死（limit），避免模型随手放大');
+    assert.ok(content.includes('unconfirmed'), '0 命中要留痕到 unconfirmed，不能静默跳过');
+    assert.equal(content.includes('至少检索 2 次'), false, '硬限制已撤回：改由程序预取保证确定性');
+  });
+
   it('targetDirs 支持 defaultDir + byScope 映射，拒绝相对路径与系统敏感路径', () => {
     const saved = savePromptConfig(cfg, {
       analysis: {
@@ -729,5 +744,105 @@ describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
     const r = readPromptConfig(cfg);
     assert.equal(r.config.analysis!.skills[0]!.enabled, false);
     assert.ok(r.issue && r.issue.includes('fs_read'));
+  });
+});
+
+describe('内置条目「未改动则跟随代码升级」（2026-11-19）', () => {
+  const writeRaw = (obj: unknown): void => {
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify(obj, null, 2), 'utf-8');
+  };
+  const base = defaultPromptConfig();
+
+  it('保存：与代码默认一致 → edited=false；改过 → edited=true', () => {
+    const saved = savePromptConfig(cfg, { prompt: { content: DEFAULT_CHAT_PROMPT } });
+    assert.equal(saved.prompt.edited, false, '未改过的内置提示词应标记为可跟随升级');
+
+    const custom = `${DEFAULT_CHAT_PROMPT}\n补充一句。`;
+    const saved2 = savePromptConfig(cfg, { prompt: { content: custom } });
+    assert.equal(saved2.prompt.edited, true, '改过就要钉住，不能被代码默认覆盖');
+    assert.equal(saved2.prompt.content, custom);
+  });
+
+  it('读取：edited=false 的内置条目换成代码最新默认（四个域都算）', () => {
+    writeRaw({
+      version: 1,
+      prompt: { content: '旧的基础提示词', at: '2020-01-01T00:00:00.000Z', edited: false },
+      skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', description: '旧描述', content: '旧正文', enabled: true, edited: false }],
+      analysis: {
+        prompt: { content: '旧的分析提示词', at: '2020-01-01T00:00:00.000Z', edited: false },
+        skills: [{ id: 'builtin-code-locate', name: 'code-locate', description: '旧描述', content: '旧正文', enabled: true, edited: false }],
+        targetDirs: { byScope: {} },
+      },
+    });
+    const { config } = readPromptConfig(cfg);
+    assert.equal(config.prompt.content, DEFAULT_CHAT_PROMPT, 'AI 对话基础提示词应跟随代码升级');
+    assert.equal(config.skills.find((s) => s.id === 'builtin-retrieval')!.content, RETRIEVAL_SKILL_PROMPT);
+    assert.equal(config.analysis!.prompt.content, base.analysis!.prompt.content, 'AI 分析提示词应跟随代码升级');
+    assert.equal(
+      config.analysis!.skills.find((s) => s.id === 'builtin-code-locate')!.content,
+      base.analysis!.skills[0]!.content,
+      'AI 分析内置 skill 正文应跟随代码升级',
+    );
+  });
+
+  it('读取：edited=true 或历史配置（无该字段）一律保留用户内容', () => {
+    writeRaw({
+      version: 1,
+      prompt: { content: '我改过的提示词', at: '2020-01-01T00:00:00.000Z', edited: true },
+      skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', description: '我改的描述', content: '我改的正文', enabled: true, edited: true }],
+    });
+    const kept = readPromptConfig(cfg).config;
+    assert.equal(kept.prompt.content, '我改过的提示词');
+    assert.equal(kept.skills.find((s) => s.id === 'builtin-retrieval')!.content, '我改的正文');
+
+    // 历史配置：没有 edited 字段 → 同样保留（保守，不猜用户改没改过）
+    writeRaw({
+      version: 1,
+      prompt: { content: '历史提示词', at: '2020-01-01T00:00:00.000Z' },
+      skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', description: '历史描述', content: '历史正文', enabled: true }],
+    });
+    const legacy = readPromptConfig(cfg).config;
+    assert.equal(legacy.prompt.content, '历史提示词');
+    assert.equal(legacy.skills.find((s) => s.id === 'builtin-retrieval')!.content, '历史正文');
+  });
+
+  it('保存：页面拿着旧快照保存，不得把"未知"钉成 edited=true', () => {
+    /*
+     * 真机症状：设置页在代码升级前打开（里面是旧正文），用户只改了个无关开关就保存，
+     * 旧正文被写成 edited:true → 从此永久停止跟随升级。
+     */
+    writeRaw({
+      version: 1,
+      prompt: { content: '升级前的旧提示词', at: '2020-01-01T00:00:00.000Z' },
+      skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', description: '旧描述', content: '旧正文', enabled: true }],
+    });
+    // 用户没动正文，原样提交回来
+    const saved = savePromptConfig(cfg, {
+      prompt: { content: '升级前的旧提示词' },
+      skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', description: '旧描述', content: '旧正文', enabled: true }],
+    });
+    assert.equal(saved.prompt.edited, undefined, '没动过的旧快照应保持"未知"，界面继续提示内置已更新');
+    assert.equal(
+      saved.skills.find((s) => s.id === 'builtin-retrieval')!.edited,
+      undefined,
+      '内置 skill 同理：内容与描述都没变就不该判成改过',
+    );
+
+    // 真改了正文 → 才算改过
+    const edited = savePromptConfig(cfg, {
+      prompt: { content: '升级前的旧提示词 + 我加的一句' },
+    });
+    assert.equal(edited.prompt.edited, true, '内容真的变了才钉住');
+  });
+
+  it('读取：历史配置内容恰好等于默认 → 补 edited=false（下次保存即跟随升级）', () => {
+    writeRaw({ version: 1, prompt: { content: DEFAULT_CHAT_PROMPT, at: '2020-01-01T00:00:00.000Z' } });
+    const { config } = readPromptConfig(cfg);
+    assert.equal(config.prompt.edited, false, '内容等于默认时没有理由判成"用户改过"');
+    assert.equal(
+      config.skills.find((s) => s.id === 'builtin-retrieval')!.edited,
+      false,
+      '内置 skill 同理：内容/描述都等于默认就补标记',
+    );
   });
 });

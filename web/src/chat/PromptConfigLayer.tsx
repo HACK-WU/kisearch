@@ -153,6 +153,7 @@ const EMPTY_ANALYSIS_CONFIG: AnalysisConfig = {
   prompt: { content: '', at: '' },
   skills: [],
   tools: {},
+  recall: { enabled: true, limit: 5 },
 };
 
 /** `find` 缺失时的兜底（旧后端不返回 find 域时，界面不能崩） */
@@ -1011,6 +1012,17 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   const isDefaultPrompt = (content: string): boolean => data?.defaults.prompt.content === content;
 
   /**
+   * 「内置内容已更新」判定（2026-11-19）。
+   *
+   * 后端在读取时会把 `edited === false` 的内置条目刷成代码最新版；能走到这里的只剩两种：
+   * 用户改过的（`edited === true`，不该提示）和历史配置（没有该字段 ⇒ 不知道改没改过）。
+   * 后者内容又与当前默认不一致 ⇒ 标「内置已更新」，提示点开卡片恢复默认。
+   */
+  const isStaleBuiltin = (item: { content: string; edited?: boolean }, defContent: string | undefined): boolean => (
+    defContent !== undefined && item.edited !== true && item.content !== defContent
+  );
+
+  /**
    * 「去启用」：把依赖工具那一行滚到视野中间并短暂高亮。
    *
    * 刻意**不代替用户打开工具** —— 用户明确要求「必须手动先启用 ki_edit_relation」，
@@ -1207,6 +1219,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                   name="基础提示词"
                   content={draft.prompt.content}
                   isDefault={isDefaultPrompt(draft.prompt.content)}
+                  stale={isStaleBuiltin(draft.prompt, data?.defaults.prompt.content)}
                   onClick={() => setModal({ kind: 'prompt' })}
                 />
               </div>
@@ -1232,6 +1245,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                       description={s.description}
                       content={s.content}
                       isDefault={isDefaultSkill(s)}
+                      stale={isStaleBuiltin(s, data?.defaults.skills.find((d) => d.id === s.id)?.content)}
                       disabled={!s.enabled}
                       // 依赖工具没开时点明「为什么开不了」，并顺手指路（点它直接滚到那行工具）。
                       // 文案刻意短：卡片剩余宽度只有 ~210px，写全「工具与权限 → 写入」会被省略号吃掉，
@@ -1702,6 +1716,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                   name="代码定位提示词"
                   content={analysisCfg.prompt.content}
                   isDefault={isDefaultAnalysisPrompt(analysisCfg.prompt.content)}
+                  stale={isStaleBuiltin(analysisCfg.prompt, data?.defaults.analysis?.prompt.content)}
                   onClick={() => setModal({ kind: 'analysis' })}
                 />
               </div>
@@ -1727,6 +1742,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                       description={s.description}
                       content={s.content}
                       isDefault={isDefaultAnalysisSkill(s)}
+                      stale={isStaleBuiltin(s, data?.defaults.analysis?.skills.find((d) => d.id === s.id)?.content)}
                       disabled={!s.enabled}
                       {...(need && analysisCfg.tools[need] !== true ? { note: `需先启用 ${need} 工具` } : {})}
                       {...(need ? { onNoteClick: () => revealTool(need) } : {})}
@@ -1779,6 +1795,36 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                 </button>
               </div>
               {analysisEffortView.warn !== null && <p className="ki-chat-cfg__warn">{analysisEffortView.warn}</p>}
+            </div>
+
+            {/* 4.5 分析前预取：程序调一次 ki_recall，模型调不到（无递归风险） */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">分析前预取</span>
+              <p className="ki-chat-cfg__hint">
+                开始分析前由<b>程序</b>调一次 <b>ki_recall</b>（沿用「AI 查找」的配置），把「建议先读哪几篇 + 整体结论」放进上下文；
+                模型无法反复调用它。预取失败（未配模型 / 未确认外发 / 限流 / 超时）只记一条过程步骤，不影响分析。
+              </p>
+              <div className="ki-chat-cfg__tool" data-tool="recall">
+                <span className="ki-chat-cfg__tool-main">
+                  <span className="ki-chat-cfg__tool-name">ki_recall</span>
+                  <span className="ki-chat-cfg__tool-desc">
+                    每次分析调用一次 · 候选上限 {analysisCfg.recall?.limit ?? 5} 篇
+                  </span>
+                </span>
+                <span className="ki-chat-cfg__tool-sp" />
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={analysisCfg.recall?.enabled !== false}
+                  aria-label="分析前预取"
+                  disabled={readOnly}
+                  className="ki-chat-cfg__sw"
+                  onClick={() => mutateAnalysis((a) => ({
+                    ...a,
+                    recall: { enabled: !(a.recall?.enabled !== false), limit: a.recall?.limit ?? 5 },
+                  }))}
+                />
+              </div>
             </div>
 
             {/* 5. 工具与权限（全部只读 · 默认全开） */}
@@ -1922,6 +1968,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                   name="检索定位提示词"
                   content={findCfg.prompt.content}
                   isDefault={findCfg.prompt.content === (data.defaults.find?.prompt.content ?? '')}
+                  stale={isStaleBuiltin(findCfg.prompt, data.defaults.find?.prompt.content)}
                   onClick={() => { if (!readOnly) setModal({ kind: 'find' }); }}
                 />
               </div>
@@ -1951,6 +1998,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                       description={s.description}
                       content={s.content}
                       isDefault={s.content === defContent}
+                      stale={isStaleBuiltin(s, defContent)}
                       disabled={!s.enabled}
                       {...(need && findCfg.tools[need] !== true ? { note: `需先启用 ${need} 工具` } : {})}
                       {...(need ? { onNoteClick: () => revealTool(need!) } : {})}
@@ -2322,6 +2370,8 @@ function ItemCard(props: {
   description?: string;
   content: string;
   isDefault: boolean;
+  /** 内置内容已更新（历史配置未跟随代码升级）：meta 显示「内置已更新」而不是「已修改」 */
+  stale?: boolean;
   disabled?: boolean;
   /** 依赖提示（如「需先启用 ki_edit_relation 工具」）：有则渲染在描述下一行 */
   note?: string;
@@ -2337,7 +2387,7 @@ function ItemCard(props: {
    */
   onClick?: () => void;
 }) {
-  const { group, name, description, content, isDefault, disabled, note, onToggleEnabled, onNoteClick, onClick } = props;
+  const { group, name, description, content, isDefault, stale, disabled, note, onToggleEnabled, onNoteClick, onClick } = props;
   const mod = !isDefault;
   const desc = (description ?? '').trim();
   return (
@@ -2384,8 +2434,11 @@ function ItemCard(props: {
             </span>
           ) : null}
         </span>
-        <span className={`ki-chat-cfg__item-meta${mod ? ' ki-chat-cfg__item-meta--mod' : ''}`}>
-          {content.length} 字 · {mod ? '已修改' : '默认'}
+        <span
+          className={`ki-chat-cfg__item-meta${stale ? ' ki-chat-cfg__item-meta--stale' : mod ? ' ki-chat-cfg__item-meta--mod' : ''}`}
+          title={stale ? '代码里的内置内容已更新，点开卡片可「恢复默认」跟上' : undefined}
+        >
+          {content.length} 字 · {stale ? '内置已更新' : mod ? '已修改' : '默认'}
         </span>
         <svg className="ki-chat-cfg__chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
           <path d="M6.5 4 10.5 8 6.5 12" />

@@ -339,6 +339,8 @@ export interface PromptSkill {
   /** 内置条目：**不可删除**（可禁用、可改内容、可恢复默认内容） */
   builtin: boolean;
   enabled: boolean;
+  /** 内置条目是否被改过；语义同 `CapabilityPrompt.edited`（2026-11-19） */
+  edited?: boolean;
   /** 最后修改时间（ISO）；未改过时等于内置默认时间戳 */
   at: string;
 }
@@ -443,11 +445,29 @@ export interface AnalysisTargetConfig {
   byScope: Record<string, string>;
 }
 
+/** 分析前预取的配置：`limit` 是交给 `ki_recall` 的候选条数上限 */
+export interface AnalysisRecallConfig {
+  enabled: boolean;
+  limit: number;
+}
+
+export const ANALYSIS_RECALL_DEFAULT_LIMIT = 5;
+
 export interface AnalysisConfig {
   targetDirs: AnalysisTargetConfig;
   prompt: CapabilityPrompt;
   skills: PromptSkill[];
   tools: Record<string, boolean>;
+  /**
+   * 分析前知识库预取（2026-11-19）。
+   *
+   * 由**程序**在开始分析前调一次 `ki_recall`，把它返回的「建议先读哪几篇 + 整体结论」
+   * 塞进上下文；模型看不到也调不到这个工具（不是工具面成员），所以没有递归风险。
+   * 预取失败（模型不可用 / 未确认外发 / 超时）不阻塞分析，只记一条过程步骤。
+   *
+   * 缺省 `{ enabled: true, limit: 5 }`；旧配置缺该键时按缺省处理。
+   */
+  recall: AnalysisRecallConfig;
   /**
    * 思考级别。
    *
@@ -540,6 +560,14 @@ export interface RecallSectionConfig {
 export interface CapabilityPrompt {
   content: string;
   at: string;
+  /**
+   * 内置条目是否被用户改过（2026-11-19）。
+   *
+   * · `false` = 保存时内容与当时的**代码默认**一致 ⇒ 读取时自动跟随代码升级（改内置文案后用户能收到）；
+   * · `true` = 用户改过 ⇒ 原样保留，不覆盖；
+   * · `undefined` = 历史配置（没有该字段）⇒ 保守保留，由界面标「内置已更新」引导点恢复默认。
+   */
+  edited?: boolean;
 }
 
 /** 能力级提示词的字段名（校验 / 时间戳 / 前端遍历共用，避免三处各写一份字符串） */
@@ -852,6 +880,7 @@ export function defaultAnalysisConfig(): AnalysisConfig {
     prompt: { content: DEFAULT_ANALYSIS_PROMPT, at: BUILTIN_AT },
     skills: BUILTIN_ANALYSIS_SKILL_IDS.map((id) => builtinAnalysisSkill(id)),
     tools: defaultAnalysisTools(),
+    recall: { enabled: true, limit: ANALYSIS_RECALL_DEFAULT_LIMIT },
   };
 }
 
@@ -926,6 +955,138 @@ export interface ReadPromptConfigResult {
   issue: string | null;
 }
 
+/* ─── 内置条目「未改动则跟随代码升级」（2026-11-19）──────────────
+ * 问题：内置提示词 / skill 一旦写进 prompt-config.json 就是**快照** —— 代码里改了默认文案，
+ *      用户不点「恢复默认」就永远停在旧版。真机案例：#48 之后设置页看不到新写的
+ *      「先看预取清单，再搜代码」章节，因为配置里是更早保存的正文（1121 字 vs 代码 1716 字）。
+ * 口径（见 `CapabilityPrompt.edited`）：
+ *   · 保存路径：只标记 `edited = content !== 当前代码默认`，不改内容；
+ *   · 读取路径：`edited === false` ⇒ 换成代码最新默认（提示词 + skill 正文 + skill 描述）；
+ *   · `edited` 缺省（历史配置）⇒ 保守保留，由界面标「内置已更新」引导用户点恢复默认。
+ * 四个域一起处理：AI 对话 / AI 分析 / AI 查找 / AI 预取（各自的 prompt + skills 结构相同）。
+ */
+function builtinSnapshots(): {
+  chat: { prompt: string; skills: Map<string, { content: string; description: string }> };
+  analysis: { prompt: string; skills: Map<string, { content: string; description: string }> };
+  find: { prompt: string; skills: Map<string, { content: string; description: string }> };
+  recall: { prompt: string; skills: Map<string, { content: string; description: string }> };
+} {
+  const snap = (list: readonly PromptSkill[] | undefined) =>
+    new Map((list ?? []).map((sk) => [sk.id, { content: sk.content, description: sk.description }] as const));
+  const base = defaultPromptConfig();
+  return {
+    chat: { prompt: base.prompt.content, skills: snap(base.skills) },
+    analysis: { prompt: base.analysis?.prompt.content ?? '', skills: snap(base.analysis?.skills) },
+    find: { prompt: base.find?.prompt.content ?? '', skills: snap(base.find?.skills) },
+    recall: { prompt: base.recall?.prompt.content ?? '', skills: snap(base.recall?.skills) },
+  };
+}
+
+function applyBuiltinRefresh(
+  config: PromptConfig,
+  mode: 'read' | 'save',
+  /** 保存路径必传：盘上读出来的**已刷新**配置，用来区分"用户改了"和"页面发来的旧快照" */
+  previous?: PromptConfig,
+): PromptConfig {
+  const snap = builtinSnapshots();
+  type PromptLike = { content: string; at: string; edited?: boolean };
+
+  /**
+   * 保存路径的 `edited` 判定（2026-11-19 修订）。
+   *
+   * 只比 `content !== def` 是不够的：设置页可能是在**代码升级前**打开的，页面里拿着旧正文，
+   * 用户只改了个无关开关就保存 → 旧正文被写成 `edited: true`，从此**永久停止跟随升级**
+   * （真机就是这个症状：find 提示词一直是"内置已更新"，一保存就变成"已修改"再也回不来）。
+   *
+   * 所以分三步：等于默认 → false；与盘上一致（用户没动）→ **保留原判断**（可能是 undefined 未知）；
+   * 只有真的改了内容才判 true。
+   */
+  const markPrompt = (p: PromptLike, def: string, prev?: PromptLike): PromptLike => {
+    if (p.content === def) return { ...p, edited: false };
+    if (prev && p.content === prev.content) return { ...p, edited: prev.edited };
+    return { ...p, edited: true };
+  };
+
+  const prompt = (p: PromptLike, def: string, prev?: PromptLike): PromptLike => {
+    if (mode === 'save') return markPrompt(p, def, prev);
+    if (p.edited === false) return p.content === def ? p : { ...p, content: def };
+    /*
+     * 历史配置（没有 edited）但内容**恰好等于当前默认** ⇒ 可以确定用户没改过，
+     * 就地补上 `edited: false`：下次保存即持久化，从此跟随代码升级。
+     * 内容与默认不同则不动（可能真被改过，不能猜）。
+     */
+    return p.edited === undefined && p.content === def ? { ...p, edited: false } : p;
+  };
+
+  const skills = (
+    list: PromptSkill[],
+    defs: Map<string, { content: string; description: string }>,
+    prevList?: PromptSkill[],
+  ): PromptSkill[] => list.map((sk) => {
+    if (!sk.builtin) return sk;
+    const def = defs.get(sk.id);
+    if (!def) return sk;
+    // 正文或描述任一被改过都算「改过」：只改描述的条目也不该被代码默认静默覆盖
+    if (mode === 'save') {
+      const sameAsDefault = sk.content === def.content && sk.description === def.description;
+      if (sameAsDefault) return { ...sk, edited: false };
+      const prev = prevList?.find((item) => item.id === sk.id);
+      const untouched = prev !== undefined
+        && sk.content === prev.content
+        && sk.description === prev.description;
+      // 用户没动过（与盘上一致）就别把"未知"钉成"改过"，否则永久失去跟随升级的机会
+      return { ...sk, edited: untouched ? prev!.edited : true };
+    }
+    if (sk.edited === false) {
+      const content = sk.content === def.content ? sk.content : def.content;
+      const description = sk.description === def.description ? sk.description : def.description;
+      return content === sk.content && description === sk.description ? sk : { ...sk, content, description };
+    }
+    // 历史配置且与当前默认一致 ⇒ 补 edited:false（同上，下次保存即持久化）
+    if (
+      sk.edited === undefined
+      && sk.content === def.content
+      && sk.description === def.description
+    ) {
+      return { ...sk, edited: false };
+    }
+    return sk;
+  });
+
+  return {
+    ...config,
+    prompt: prompt(config.prompt, snap.chat.prompt, previous?.prompt) as PromptConfig['prompt'],
+    skills: skills(config.skills, snap.chat.skills, previous?.skills),
+    ...(config.analysis
+      ? {
+        analysis: {
+          ...config.analysis,
+          prompt: prompt(config.analysis.prompt, snap.analysis.prompt, previous?.analysis?.prompt) as AnalysisConfig['prompt'],
+          skills: skills(config.analysis.skills, snap.analysis.skills, previous?.analysis?.skills),
+        },
+      }
+      : {}),
+    ...(config.find
+      ? {
+        find: {
+          ...config.find,
+          prompt: prompt(config.find.prompt, snap.find.prompt, previous?.find?.prompt) as FindConfig['prompt'],
+          skills: skills(config.find.skills, snap.find.skills, previous?.find?.skills),
+        },
+      }
+      : {}),
+    ...(config.recall
+      ? {
+        recall: {
+          ...config.recall,
+          prompt: prompt(config.recall.prompt, snap.recall.prompt, previous?.recall?.prompt) as RecallSectionConfig['prompt'],
+          skills: skills(config.recall.skills, snap.recall.skills, previous?.recall?.skills),
+        },
+      }
+      : {}),
+  };
+}
+
 export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
   const file = promptConfigPath(config);
   let raw: string;
@@ -961,7 +1122,8 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
   }
-  return { config: normalized, issue: softNotes.length > 0 ? softNotes.join('；') : null };
+  // 内置提示词 / skill 未改动 ⇒ 跟随代码升级（2026-11-19）
+  return { config: applyBuiltinRefresh(normalized, 'read'), issue: softNotes.length > 0 ? softNotes.join('；') : null };
 }
 
 // ─── 校验 / 归一化 ─────────────────────────────────────
@@ -1192,6 +1354,7 @@ function normalizeFindSection(
         out.prompt = {
           content,
           at: typeof pObj.at === 'string' ? String(pObj.at) : BUILTIN_AT,
+          ...(typeof pObj.edited === 'boolean' ? { edited: pObj.edited } : {}),
         };
       }
     }
@@ -1290,6 +1453,7 @@ function normalizeFindSection(
           description,
           content,
           builtin: BUILTIN_FIND_SKILL_IDS.includes(id),
+          ...(typeof it.edited === 'boolean' ? { edited: it.edited } : {}),
           enabled: it.enabled !== false,
           at: typeof it.at === 'string' ? it.at : BUILTIN_AT,
         });
@@ -1431,6 +1595,9 @@ function normalizeAnalysisSection(
         out.prompt = {
           content,
           at: typeof (p as Record<string, unknown>).at === 'string' ? String((p as Record<string, unknown>).at) : BUILTIN_AT,
+          ...(typeof (p as Record<string, unknown>).edited === 'boolean'
+            ? { edited: (p as Record<string, unknown>).edited as boolean }
+            : {}),
         };
       }
     }
@@ -1455,6 +1622,32 @@ function normalizeAnalysisSection(
         tools[name] = value;
       }
       out.tools = tools;
+    }
+  }
+
+  // recall（分析前预取）
+  if (obj.recall !== undefined) {
+    const rc = obj.recall;
+    if (rc === null || typeof rc !== 'object' || Array.isArray(rc)) {
+      failField('analysis.recall', '应为对象 { enabled, limit }');
+    } else {
+      const rcObj = rc as Record<string, unknown>;
+      const next: AnalysisRecallConfig = { ...out.recall };
+      if (rcObj.enabled !== undefined) {
+        if (typeof rcObj.enabled !== 'boolean') {
+          failField('analysis.recall.enabled', '应为布尔值');
+        } else {
+          next.enabled = rcObj.enabled;
+        }
+      }
+      if (rcObj.limit !== undefined) {
+        if (typeof rcObj.limit !== 'number' || !Number.isInteger(rcObj.limit) || rcObj.limit < 1 || rcObj.limit > 10) {
+          failField('analysis.recall.limit', '应为 1–10 的整数');
+        } else {
+          next.limit = rcObj.limit;
+        }
+      }
+      out.recall = next;
     }
   }
 
@@ -1527,6 +1720,7 @@ function normalizeAnalysisSection(
           description,
           content,
           builtin: BUILTIN_ANALYSIS_SKILL_IDS.includes(id),
+          ...(typeof it.edited === 'boolean' ? { edited: it.edited } : {}),
           enabled: it.enabled !== false,
           at: typeof it.at === 'string' ? it.at : BUILTIN_AT,
         });
@@ -1645,7 +1839,11 @@ function normalizeRecallSection(
       } else if (content.length > CAPABILITY_PROMPT_MAX_CHARS) {
         failField('recall.prompt.content', `不得超过 ${CAPABILITY_PROMPT_MAX_CHARS} 字，实际 ${content.length}`);
       } else {
-        out.prompt = { content, at: typeof pObj.at === 'string' ? String(pObj.at) : BUILTIN_AT };
+        out.prompt = {
+          content,
+          at: typeof pObj.at === 'string' ? String(pObj.at) : BUILTIN_AT,
+          ...(typeof pObj.edited === 'boolean' ? { edited: pObj.edited } : {}),
+        };
       }
     }
   }
@@ -1731,6 +1929,7 @@ function normalizeRecallSection(
           description,
           content,
           builtin: false,
+          ...(typeof it.edited === 'boolean' ? { edited: it.edited } : {}),
           enabled: it.enabled === undefined ? true : it.enabled === true,
           at: typeof it.at === 'string' ? String(it.at) : BUILTIN_AT,
         });
@@ -1795,7 +1994,13 @@ export function normalizePromptConfig(
       } else if (content.length > PROMPT_MAX_CHARS) {
         issues.push({ path: 'prompt.content', message: `不得超过 ${PROMPT_MAX_CHARS} 字，实际 ${content.length}` });
       } else {
-        out.prompt = { content, at: typeof (p as Record<string, unknown>).at === 'string' ? String((p as Record<string, unknown>).at) : BUILTIN_AT };
+        out.prompt = {
+          content,
+          at: typeof (p as Record<string, unknown>).at === 'string' ? String((p as Record<string, unknown>).at) : BUILTIN_AT,
+          ...(typeof (p as Record<string, unknown>).edited === 'boolean'
+            ? { edited: (p as Record<string, unknown>).edited as boolean }
+            : {}),
+        };
       }
     }
   }
@@ -1906,6 +2111,7 @@ export function normalizePromptConfig(
           content,
           // ★ 服务端强制：内置与否由 id 决定，不看客户端传的 builtin
           builtin: BUILTIN_SKILL_IDS.includes(id),
+          ...(typeof it.edited === 'boolean' ? { edited: it.edited } : {}),
           enabled: it.enabled !== false,
           at: typeof it.at === 'string' ? it.at : BUILTIN_AT,
         });
@@ -2184,8 +2390,10 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
   }
   const file = promptConfigPath(config);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  atomicWriteConfig(file, JSON.stringify(next, null, 2) + '\n');
-  return next;
+  // 写盘前标记「内置条目是否被改过」：读取路径据此决定要不要跟随代码升级（2026-11-19）
+  const marked = applyBuiltinRefresh(next, 'save', existing);
+  atomicWriteConfig(file, JSON.stringify(marked, null, 2) + '\n');
+  return marked;
 }
 
 // ─── 注入（供 tool-loop 使用）──────────────────────────

@@ -264,6 +264,8 @@ export interface RefSearchStepDto {
    * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
    */
   thinking?: string;
+  /** `thinking` 截断前的原始字符数（2026-11-18）：> thinking.length 时前端提示「已截断」 */
+  thinkingChars?: number;
   calls?: RefSearchCallDto[];
 }
 
@@ -411,6 +413,8 @@ export interface AnalysisStepDto {
    * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
    */
   thinking?: string;
+  /** `thinking` 截断前的原始字符数（2026-11-18）：> thinking.length 时前端提示「已截断」 */
+  thinkingChars?: number;
   calls?: AnalysisStepCallDto[];
 }
 
@@ -445,6 +449,11 @@ export interface AnalysisDraftDto {
   conclusion: string | null;
   /** 结论因果链；旧数据为空数组（此时前端只渲染 conclusion 纯文本） */
   chain: ConclusionNodeDto[];
+  /**
+   * 运行中当前这一轮的思考实时片段（2026-11-18）：后端按 ~1s 节流增量写，轮结束 / 收尾时置 undefined。
+   * 有值即表示「这一轮还在想」，前端用它渲染流式思考块（只在 running 期间出现）。
+   */
+  liveThinking?: { round: number; text: string; chars: number };
   candidates: AnalysisCandidateDto[];
   unconfirmed: string[];
   steps: AnalysisStepDto[];

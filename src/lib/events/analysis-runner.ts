@@ -48,6 +48,7 @@ import { withTimeout, TOOL_TIMEOUT } from '../mcp-tools/util.js';
 import { collectMembers } from './event-service.js';
 import { normalizeChain, pruneChainRefs } from './conclusion-chain.js';
 import { readRefs } from './refs-store.js';
+import { executeRecall } from '../mcp-tools/recall.js';
 import { readStageLogs } from './stage-log.js';
 import { findEventIn, getEventsDir, readAllEvents } from './store.js';
 import { getType } from './type-service.js';
@@ -164,6 +165,13 @@ export interface AnalysisRunnerDeps {
   resolveLlmStatusFn?: (cfg: KiConfig, configPath: string) => LlmStatus;
   streamChatFn?: typeof streamChat;
   nowFn?: () => number;
+  /**
+   * 仅测试：替换「分析前预取」。生产走 `executeRecall`（即 MCP 的 ki_recall 同一实现）。
+   *
+   * 返回类型是 `unknown`：生产返回 **MCP 工具信封**（`content[0].text` 里才是 JSON），
+   * 而测试常直接给裸 payload —— 两种形状都由 `unwrapRecallPayload` 吃下。
+   */
+  recallFn?: (args: { scope: string; task: string; limit: number }) => Promise<unknown>;
   /** 仅测试：注入 mock KB 工具执行，不连接真实向量库 */
   kbExecutor?: {
     getModuleInfo?: (args: { scope: string; group: string; relation: string; startLine?: number; startChar?: number; maxChars?: number }) => Promise<unknown>;
@@ -219,6 +227,173 @@ const SYSTEM_OUTPUT_TAIL = `【系统输出与安全规范（不可覆盖）】
 7. 正文（conclusion / chain / branches）里提到代码位置时，一律用反引号包住**相对路径**，有行号就写成
    \`src/a.ts:128\`：前端会把能对上已验证位置的反引号片段渲染成**可点开**的代码位置，写成裸文本就只是普通文字。
    ref 字段可选（只放最相关的一处），正文里提到的其他位置照常写反引号即可。`;
+
+/* ── 分析前知识库预取（2026-11-19）────────────────────────
+ * 由**程序**调一次 `ki_recall`（与 MCP 工具同一实现），把「建议先读哪几篇 + 整体结论」塞进上下文。
+ * 模型看不到这个工具（不在分析工具面里），所以**没有递归风险** —— 这与「不把 ki_recall 做成
+ * 分析工具」的既有决定一致：它只在开场跑一次，模型无法反复触发。
+ */
+const RECALL_PREFETCH_TIMEOUT_MS = 90_000;
+const RECALL_TASK_MAX_CHARS = 2000;
+const RECALL_BLOCK_MAX_CHARS = 1200;
+
+/** 预取的任务画像：事件标题 / 描述 + 关联与参考文档的 group 路径与名称（按用户口径直接放进去） */
+export function buildRecallPrefetchTask(args: {
+  event: EventRecord;
+  eventType: EventTypeRecord | null;
+  members: Array<{ group: string; name: string }>;
+  refs: Array<{ group: string; name: string }>;
+}): string {
+  const docLines = (list: Array<{ group: string; name: string }>): string =>
+    list.length > 0 ? list.map((d) => `- ${d.group} | ${d.name}`).join('\n') : '（无）';
+  const text = [
+    `事件：#${args.event.shortId} ${args.event.title}`,
+    `类型：${args.eventType?.name ?? args.event.typeId}`,
+    '描述：',
+    (args.event.description ?? '').trim() || '（无描述）',
+    '关联文档（group | name）：',
+    docLines(args.members),
+    '参考文档（group | name）：',
+    docLines(args.refs),
+  ].join('\n');
+  return text.length > RECALL_TASK_MAX_CHARS ? `${text.slice(0, RECALL_TASK_MAX_CHARS - 1)}…` : text;
+}
+
+/** 把预取结果渲染成上下文块（只是定位起点，明确告诉模型"这不是结论"） */
+export function formatRecallBlock(res: {
+  summary?: string;
+  candidates?: Array<{ group: string; name: string; why: string }>;
+  uncertainties?: string[];
+}, maxDocs = 5): string {
+  // 上限由调用方（`analysis.recall.limit`）决定：这里再写死 5 会把用户配置架空
+  const hits = (res.candidates ?? []).slice(0, Math.max(0, maxDocs));
+  const lines = ['【知识库预取（程序自动调用 ki_recall，仅供定位起点，不是结论）】'];
+  lines.push(`整体结论：${(res.summary ?? '').trim() || '（无）'}`);
+  if (hits.length > 0) {
+    lines.push('建议先读（正文仍需 ki_get_module_info）：');
+    for (const hit of hits) lines.push(`- ${hit.group} | ${hit.name} —— ${hit.why}`);
+  } else {
+    lines.push('建议先读：（0 篇）');
+  }
+  const unsure = (res.uncertainties ?? []).filter(Boolean).slice(0, 3);
+  if (unsure.length > 0) {
+    lines.push('判断不了的点：');
+    for (const item of unsure) lines.push(`- ${item}`);
+  }
+  const text = lines.join('\n');
+  return text.length > RECALL_BLOCK_MAX_CHARS ? `${text.slice(0, RECALL_BLOCK_MAX_CHARS - 1)}…` : text;
+}
+
+/**
+ * `executeRecall` 返回的是 **MCP 工具信封**（`{ content: [{ type:'text', text: JSON.stringify(payload) }] }`），
+ * 不是裸 payload —— 真机上这里踩过一次：`res.ok` 恒为 undefined，导致「预取成功但 0 命中」被记成
+ * 「跳过（不可用）」。测试注入的 fake 直接返回裸 payload，两种形状都要吃。
+ */
+function unwrapRecallPayload(raw: unknown): {
+  ok?: boolean;
+  code?: string;
+  summary?: string;
+  candidates?: Array<{ group: string; name: string; why: string }>;
+  uncertainties?: string[];
+} | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const env = raw as { content?: Array<{ text?: string }> };
+  if (!Array.isArray(env.content)) {
+    // 裸 payload（旧实现 / 测试注入）：按声明的形状直接透传，不要用 Record<string, never> 撒谎
+    return raw as { ok?: boolean; code?: string; summary?: string; candidates?: Array<{ group: string; name: string; why: string }>; uncertainties?: string[] };
+  }
+  const text = env.content.find((c) => typeof c?.text === 'string')?.text ?? '';
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as { ok?: boolean; code?: string };
+  } catch {
+    return null;
+  }
+}
+
+/** 跑一次预取：任何失败都只记一条步骤，绝不阻塞分析 */
+async function runRecallPrefetch(args: {
+  scope: string;
+  event: EventRecord;
+  eventType: EventTypeRecord | null;
+  members: Array<{ group: string; name: string }>;
+  refs: Array<{ group: string; name: string }>;
+  cfg: KiConfig;
+  limit: number;
+  signal: AbortSignal;
+  now: () => number;
+  deps?: AnalysisRunnerDeps;
+}): Promise<{ step: AnalysisStepRecord; text: string }> {
+  const started = args.now();
+  const task = buildRecallPrefetchTask(args);
+  const title = '预取知识库（ki_recall）';
+  try {
+    const call = args.deps?.recallFn
+      ?? ((input: { scope: string; task: string; limit: number }) =>
+        executeRecall(
+          { scope: input.scope, task: input.task, limit: input.limit },
+          { kiConfig: args.cfg, principalKey: 'analysis', signal: args.signal },
+        ) as unknown as Promise<{
+          ok: boolean;
+          code?: string;
+          summary?: string;
+          candidates?: Array<{ group: string; name: string; why: string }>;
+          uncertainties?: string[];
+        }>);
+    const raw = await withTimeout(call({ scope: args.scope, task, limit: args.limit }), RECALL_PREFETCH_TIMEOUT_MS, 'ki_recall');
+    const ms = Math.max(0, args.now() - started);
+    const res = unwrapRecallPayload(raw);
+    if (!res) {
+      return {
+        step: { name: 'recall', title: `${title}：返回无法解析（已跳过）`, ms, metrics: { failed: 1 } },
+        text: '',
+      };
+    }
+
+    if (!res.ok) {
+      return {
+        step: {
+          name: 'recall',
+          title: `${title}：跳过（${res.code ?? '不可用'}）`,
+          ms,
+          metrics: { skipped: 1, code: res.code ?? 'unknown' },
+        },
+        text: '',
+      };
+    }
+    const hits = (res.candidates ?? []).slice(0, args.limit);
+    return {
+      step: {
+        name: 'recall',
+        title: `${title}：建议先读 ${hits.length} 篇`,
+        ms,
+        metrics: { docs: hits.length, ...(res.uncertainties?.length ? { uncertain: res.uncertainties.length } : {}) },
+        /*
+         * 把「预取建议了哪几篇」落进步骤：否则用户在过程区只看到"N 篇"，
+         * 既没法核对模型有没有照着读，也没法判断预取是否跑偏。
+         */
+        detail: {
+          docs: hits.map((h) => `${h.group} | ${h.name}`),
+          ...(res.summary ? { summary: res.summary.slice(0, 300) } : {}),
+        },
+      },
+      text: formatRecallBlock({ ...res, candidates: hits }, args.limit),
+    };
+  } catch (err) {
+    const ms = Math.max(0, args.now() - started);
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      step: {
+        name: 'recall',
+        title: args.signal.aborted ? `${title}：已停止` : `${title}：失败（已跳过，不影响分析）`,
+        ms,
+        metrics: args.signal.aborted ? { aborted: 1 } : { failed: 1 },
+        detail: { reason: message.slice(0, 200) },
+      },
+      text: '',
+    };
+  }
+}
 
 /**
  * 「运行环境」段：把目标目录与**本次实际可用**的工具告诉模型。
@@ -776,28 +951,57 @@ async function executeAnalysisBackground(input: {
   const entryMap = new Map(enabledEntries.map((e) => [e.name, e] as const));
 
   const callableSkills = analysisCfg.skills.filter((s) => s.enabled);
-  const skillCatalog = buildAnalysisSkillCatalog(callableSkills);
+  /*
+   * 内置 skill 正文**直接注入**（2026-11-19 真机 #48 取证）：分析域只有一个内置 skill、
+   * 默认启用且恒定相关，把它挂在 `use_skill` 后面等价于不注入 —— 那次 33 轮 / 60 次调用里
+   * `use_skill` 一次都没调，正文里的「先查知识库 → 再读文档 → 再搜代码」从头到尾没进过上下文。
+   * 用户自建 skill 仍走目录 + `use_skill` 按需加载（不替用户决定他写的方法论该不该用）。
+   */
+  const inlineSkills = callableSkills.filter((s) => s.builtin);
+  const onDemandSkills = callableSkills.filter((s) => !s.builtin);
+  const skillCatalog = buildAnalysisSkillCatalog(onDemandSkills);
   const toolDefs: ToolDef[] = enabledEntries.map((e) => e.def);
-  if (callableSkills.length > 0) toolDefs.push(analysisUseSkillToolDef());
+  if (onDemandSkills.length > 0) toolDefs.push(analysisUseSkillToolDef());
 
   const messages: ChatTurn[] = [];
   const systemParts = [
     analysisCfg.prompt.content.trim(),
+    ...inlineSkills.map((s) => `【已加载 Skill：${s.name}】\n${s.content.trim()}`),
     skillCatalog ?? '',
     buildRuntimeEnv(realRoot, [
       ...enabledEntries.map((e) => e.name),
       // use_skill 不在 enabledEntries 里（它是按需加载器，不是数据工具），但不列出来模型会不敢用
-      ...(callableSkills.length > 0 ? ['use_skill'] : []),
+      ...(onDemandSkills.length > 0 ? ['use_skill'] : []),
     ]),
     SYSTEM_OUTPUT_TAIL,
   ].filter(Boolean);
   messages.push({ role: 'system', content: systemParts.join('\n\n') });
-  messages.push({
-    role: 'user',
-    content: buildLightEventContext({ event, type: eventType, members, refs, logs }),
-  });
 
   const steps: AnalysisStepRecord[] = [...input.initialSteps];
+
+  /*
+   * 开场预取（2026-11-19）：真机 #48 证明「把检索写进提示词」只是提高概率 —— 33 轮一次没搜。
+   * 改成程序开场调一次 ki_recall，把「建议先读哪几篇 + 整体结论」直接放进上下文；
+   * 失败（模型不可用 / 未确认外发 / 频控 / 超时）只记一条步骤，分析照常继续。
+   */
+  const userBlocks = [buildLightEventContext({ event, type: eventType, members, refs, logs })];
+  if (analysisCfg.recall.enabled) {
+    const prefetch = await runRecallPrefetch({
+      scope,
+      event,
+      eventType,
+      members,
+      refs,
+      cfg,
+      limit: analysisCfg.recall.limit,
+      signal: controller.signal,
+      now: nowFn,
+      ...(deps ? { deps } : {}),
+    });
+    steps.push(prefetch.step);
+    if (prefetch.text) userBlocks.push(prefetch.text);
+  }
+  messages.push({ role: 'user', content: userBlocks.join('\n\n') });
   const loadedSkillIds = new Set<string>();
   let turns = 0;
   let tokens = 0;

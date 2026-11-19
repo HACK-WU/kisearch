@@ -5153,6 +5153,9 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-cfg__item-ic--prompt { background: color-mix(in srgb, var(--ki-color-primary) 12%, transparent); color: var(--ki-color-primary); }
 .ki-chat-cfg__item-ic--skill { background: color-mix(in srgb, var(--ki-color-purple) 12%, transparent); color: var(--ki-color-purple); }
 .ki-chat-cfg__item-meta--mod { color: var(--ki-color-primary); }
+/* 内置内容已更新（历史配置未跟随代码升级）：用 warning 与「已修改」区分 ——
+   前者是「你该点一下恢复默认」，后者是「你自己改过、不用管」（2026-11-19） */
+.ki-chat-cfg__item-meta--stale { color: var(--ki-color-warning); font-weight: 600; }
 .ki-chat-cfg__group {
   display: flex; align-items: center; gap: 6px;
   margin: var(--ki-space-4) 0 6px; padding-bottom: 5px;

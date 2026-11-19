@@ -60,6 +60,8 @@ export interface EventListItem {
   type: EventTypeSummary;
   stage: EventStageSummary;
   closedAt: number | null;
+  /** 置顶时间；缺省 = 未置顶（2026-11-19）。置顶项在列表里恒排最前 */
+  pinnedAt?: number;
   docCount: number;
   docsPreview: PreviewDoc[];
   visibilitySummary: VisibilitySummary;

@@ -86,6 +86,11 @@ export interface RecallToolDeps {
   scopeDeps?: Omit<import('../events/find-targets.js').FindTargetDeps, 'tokenScopes'>;
   /** 调用方键（审计与频控维度） */
   principalKey?: string;
+  /**
+   * 取消信号（2026-11-19）：事件 AI 分析在开场预取时传入，用户点「停止」即中断，
+   * 不让一次没人要的预取继续烧模型调用。
+   */
+  signal?: AbortSignal;
   /** 运行期预算（缺省按配置合并默认值） */
   runtime?: RecallRuntimeConfig;
   now?: () => number;
@@ -328,6 +333,7 @@ export async function executeRecall(
           ...(seed.length > 0 ? { seed } : {}),
         }),
         ...(exclude.length > 0 ? { exclude } : {}),
+        ...(deps.signal ? { signal: deps.signal } : {}),
         limit,
         tools: recallCfg.tools,
         maxRounds: recallCfg.maxRounds,
