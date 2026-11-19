@@ -6,7 +6,7 @@ kisearch 面向 AI Agent 提供三类资产：**检索 Skill**、**记忆行为 
 |---|---|---|
 | `ki-search` | [`skills/ki-search/SKILL.md`](../skills/ki-search/SKILL.md) | 代码知识库检索/写入：四步走查询 + 白名单/黑名单 |
 | `task-recall` | [`skills/task-recall/SKILL.md`](../skills/task-recall/SKILL.md) | 开工前预取：任务画像 → `ki_recall` → 按清单读正文；含触发判据与 6 条禁忌 |
-| `agents-md-init` | [`skills/agents-md-init/SKILL.md`](../skills/agents-md-init/SKILL.md) | 记忆行为口径真源：初始化 AGENTS.md 结构 + 主动沉淀（何时写、写哪、怎么查重）+ 代码片段格式 + 会话收尾自查 + 近期工作归档 |
+| `agents-md-init` | [`skills/agents-md-init/SKILL.md`](../skills/agents-md-init/SKILL.md) | 记忆行为口径真源：初始化 AGENTS.md 结构 + 主动沉淀（何时写、写哪、怎么查重）+ 代码片段格式 + 会话收尾自查与汇报四要素 + 近期工作归档 |
 | `ki-search-first` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-search-first) | 所有任务的记忆前置：先查项目记忆，再进入代码/专家/解决方案路径 |
 | `ki-memory-lookup` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-lookup) | 只读查询 SSOT，按记忆类型选择目录导航或语义检索 |
 | `ki-memory-write` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-write) | 统一查重、格式校验、双写、刷新、校验与结账删除 |
@@ -113,7 +113,7 @@ curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill
 
 > 安装器基于 `npx skills`（需 Node.js ≥ 22），使用管理源 `~/.hackwu-skills/` 持续跟踪，支持 `update` / `remove` / `list`。
 
-**记忆行为规则**：无需单独放置 —— 记忆行为口径（主动沉淀、代码片段格式、会话收尾自查、归档）已并入 `agents-md-init` skill，装好该 skill 即可：
+**记忆行为规则**：无需单独放置 —— 记忆行为口径（主动沉淀、代码片段格式、会话收尾自查与汇报、归档）已并入 `agents-md-init` skill，装好该 skill 即可：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
