@@ -110,3 +110,60 @@ describe('⑤ 下拉浮层：左侧按钮上的菜单向右展开', () => {
     assert.match(css, /\.gov-dd__menu \{[^}]*left: 0;/);
   });
 });
+
+describe('⑥ 默认「全部」+ 选中态写回 URL（2026-11-19）', () => {
+  it('状态筛选默认「全部」：页头写着「已收口 N」却一条看不到会被当成事件丢了', () => {
+    assert.match(page, /useState<Status>\('all'\)/);
+  });
+
+  it('左栏点选走统一的 selectEvent，把 id 写回 ?event=', () => {
+    assert.match(page, /onClick=\{\(\) => selectEvent\(event\.id\)\}/);
+    assert.match(page, /next\.set\('event', id\)/);
+    // 点十次事件不该在浏览器历史里留十个台阶
+    assert.match(page, /\}, \{ replace: true \}\);\s*\n\s*\}, \[setSearchParams\]\)/);
+  });
+
+  it('深链兜底只认进入页面时的参数，点选写回不再触发「可能已被删除」误报', () => {
+    assert.match(page, /const entryDeepLink = useRef\(searchParams\.get\('event'\)\)\.current/);
+    // 响应式读取会让「点选 → 写 URL → 兜底 effect 重跑」串成误报链
+    assert.doesNotMatch(page, /deepLinkEvent/);
+  });
+});
+
+describe('⑦ 列表行显示当前阶段（2026-11-19）', () => {
+  it('类型徽标旁渲染阶段文字，已收口行挂 --closed 修饰', () => {
+    assert.match(page, /gov-badge gov-ev__stage\$\{isClosed \? ' gov-ev__stage--closed' : ''\}/);
+  });
+
+  it('阶段名优先取接口下发的 stage，缺失时按 stageKey 从类型定义反查', () => {
+    assert.match(page, /event\.stage\?\.name \?\? stageOfType\?\.name \?\? null/);
+    assert.match(page, /t\?\.stages\.find\(\(s\) => s\.key === event\.stageKey\)/);
+  });
+
+  it('后端占位「(未知阶段)」不进列表（只会制造噪音）', () => {
+    assert.match(page, /rawStageName !== '\(未知阶段\)'/);
+  });
+
+  it('阶段不做成带框徽标（描边 + 内边距像按钮，会被误认为可点）', () => {
+    const m = css.match(/\.gov-ev__stage \{([^}]*)\}/);
+    assert.ok(m, '未能定位 .gov-ev__stage 规则');
+    assert.doesNotMatch(m[1], /border:\s*1px/);
+    assert.match(m[1], /padding: 0/);
+    assert.match(m[1], /background: none/);
+  });
+
+  it('已收口行的阶段退回弱色（灰底上不浮出一块主色）', () => {
+    assert.match(css, /\.gov-ev__stage--closed \{ color: var\(--ki-color-text-subtle\); \}/);
+  });
+});
+
+describe('⑧ 换库清理选中态（2026-11-19）', () => {
+  it('scope 变化时清掉选中与 ?event=，并压掉深链告警', () => {
+    assert.match(page, /lastScope\.current === scope/);
+    assert.match(page, /deepLinkWarned\.current = true;\s*\n\s*selectEvent\(null\);/);
+  });
+
+  it('深链找不到时区分「已删除」与「不在当前库」（别让人以为数据丢了）', () => {
+    assert.match(page, /它可能已被删除，或不在当前知识库「\$\{scope\}」中/);
+  });
+});

@@ -89,7 +89,11 @@ export function EventsPage(): JSX.Element {
   // 也让「添加参考文档」去错库里搜（同一台机器上事件与文档可能不在同一 scope）
   const scope = useScopeValue();
   const [tab, setTab] = useState<Tab>('list');
-  const [status, setStatus] = useState<Status>('open');
+  /**
+   * 状态筛选默认「全部」（2026-11-19 用户拍板）：默认只看未收口时，
+   * 页头计数写着「已收口 N」却一条都看不到，容易让人以为事件丢了。
+   */
+  const [status, setStatus] = useState<Status>('all');
   /** 列表排序（默认「最近更新」降序 = 后端返回顺序；仅重排已取回的当前页，不改请求） */
   const [sort, setSort] = useState<SortKey>('updated-desc');
   const [keyword, setKeyword] = useState('');
@@ -97,18 +101,42 @@ export function EventsPage(): JSX.Element {
   const [types, setTypes] = useState<EventTypeView[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   /**
-   * 事件深链：`/governance/events?event=<evt_id 或 #shortId>`。
-   * 文档分类页的「事件」列用它在新标签里直跳；没有参数时行为与从前完全一致。
+   * 事件深链 + 选中态回写：`/governance/events?event=<evt_id 或 #shortId>`。
+   * 文档分类页 / 生命周期页的「事件」列用它在新标签里直跳；
+   * 左栏点选也会**写回同一个参数**（2026-11-19），刷新 / 分享链接后仍停在同一事件。
    */
-  const [searchParams] = useSearchParams();
-  const deepLinkEvent = searchParams.get('event');
+  const [searchParams, setSearchParams] = useSearchParams();
+  /**
+   * 进入页面时的 `?event=` 只认一次：之后点选写回的参数不参与下面「找不到就切全部 /
+   * 提示可能已删除」的兜底，否则用户一切换筛选就会被误报「事件可能已被删除」。
+   */
+  const entryDeepLink = useRef(searchParams.get('event')).current;
   /** 深链找不到只提示一次，避免每次列表刷新都弹 */
   const deepLinkWarned = useRef(false);
-  const matchDeepLink = useCallback((list: readonly EventView[]): string | null => {
-    if (!deepLinkEvent) return null;
-    const raw = deepLinkEvent.replace(/^#/, '');
-    return list.find((e) => e.id === deepLinkEvent || String(e.shortId) === raw)?.id ?? null;
-  }, [deepLinkEvent]);
+  /** 列表里按 id 或 `#shortId` 找事件：深链与选中态回写共用同一口径 */
+  const findEventKey = useCallback((list: readonly EventView[], key: string | null): string | null => {
+    if (!key) return null;
+    const raw = key.replace(/^#/, '');
+    return list.find((e) => e.id === key || String(e.shortId) === raw)?.id ?? null;
+  }, []);
+  const matchDeepLink = useCallback(
+    (list: readonly EventView[]): string | null => findEventKey(list, entryDeepLink),
+    [entryDeepLink, findEventKey],
+  );
+  /**
+   * 选中事件的唯一入口：切详情的同时把 id 写回 URL。
+   * `replace: true` —— 点十次事件不该在浏览器历史里留十个台阶，但刷新仍停在同一事件；
+   * 新 id 也顺手清掉上一个事件的深链标记，避免旧 id 留在地址栏里骗人。
+   */
+  const selectEvent = useCallback((id: string | null): void => {
+    setActiveId(id);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id) next.set('event', id);
+      else next.delete('event');
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
   const [detail, setDetail] = useState<EventDetail | null>(null);
   const [refs, setRefs] = useState<RefItem[]>([]);
   const [message, setMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
@@ -183,6 +211,22 @@ export function EventsPage(): JSX.Element {
    */
   useEffect(() => { setUploadRefOpen(false); }, [scope, activeId]);
 
+  /**
+   * 换库 = 换一批事件（2026-11-19）。事件 id 只在本库内有效，留着上一个库的选中态会有两处后果：
+   * 右栏立刻 404 弹红条（本来就会），以及地址栏 `?event=` 指向别库的事件（选中态回写带出来的新问题）——
+   * 刷新后还会被判成「可能已被删除」。
+   * 这里清空选中 + 参数，让 `loadList` 按新库重新挑一条；`deepLinkWarned` 同时置位，
+   * 否则紧跟着跑的深链兜底 effect 会把这次主动换库也报成「找不到事件」。
+   * `lastScope` 挡住首帧：初次挂载就是同一个 scope，不该清掉深链进来的选中。
+   */
+  const lastScope = useRef(scope);
+  useEffect(() => {
+    if (lastScope.current === scope) return;
+    lastScope.current = scope;
+    deepLinkWarned.current = true;
+    selectEvent(null);
+  }, [scope, selectEvent]);
+
   // 页面只判 capability，不判 role（authContext 的约定）
   const { can, status: authStatus } = useAuth();
   const canWrite = can('knowledge.write');
@@ -233,31 +277,41 @@ export function EventsPage(): JSX.Element {
    */
   const deepLinkScrolled = useRef(false);
   useEffect(() => {
-    if (!deepLinkEvent || !activeId || deepLinkScrolled.current) return;
+    if (!entryDeepLink || !activeId || deepLinkScrolled.current) return;
     const el = document.querySelector(`[data-event-id="${activeId}"]`);
     if (!(el instanceof HTMLElement)) return; // 列表还没渲染出来，等下一轮
     deepLinkScrolled.current = true;
     el.scrollIntoView({ block: 'nearest' });
-  }, [deepLinkEvent, activeId]);
+  }, [entryDeepLink, activeId]);
 
   /**
    * 深链指向的事件不在当前列表里。
    *
-   * 首要原因是**默认只看未收口**（`status='open'`）把它过滤掉了 —— 从文档分类页点进来的
-   * 往往是已收口事件。这种情况不该弹「没找到」，而应**自动切到「全部」再找一次**：
-   * 用户点链接的预期是「看到它」，不是「被要求手动改筛选」。
-   * 切过去仍然找不到，才说明真被删了。
+   * 最可能是被状态筛选挡住了（默认已是「全部」，但用户先手动切到「未收口」再进链接就会撞上）。
+   * 这种情况不该弹「没找到」，而应**自动切到「全部」再找一次**：
+   * 用户点链接的预期是「看到它」，不是「被要求手动改筛选」。切过去仍然找不到，才说明真被删了。
+   *
+   * 只对**进入页面时**的深链生效（`entryDeepLink`）：点选写回 URL 后的 `?event=` 不再走这里，
+   * 否则用户一改筛选就会被误报「事件可能已被删除」。
    */
   useEffect(() => {
-    if (!deepLinkEvent || deepLinkWarned.current || events.length === 0) return;
+    if (!entryDeepLink || deepLinkWarned.current || events.length === 0) return;
     if (matchDeepLink(events)) return;
     if (status === 'open') {
       setStatus('all');
       return;
     }
     deepLinkWarned.current = true;
-    setMessage({ tone: 'err', text: `未找到事件 ${deepLinkEvent}：它可能已被删除` });
-  }, [deepLinkEvent, events, status, matchDeepLink]);
+    /*
+     * 不能只写「可能已被删除」：地址栏里的 `?event=` 是**库内** id（2026-11-19 起点选也会写回），
+     * 换库 / 转发给用别的库的人都会走到这里，而事件其实一直在，只是不在当前库。
+     * 把两种原因都写出来，别让人以为数据丢了。
+     */
+    setMessage({
+      tone: 'err',
+      text: `未找到事件 ${entryDeepLink}：它可能已被删除，或不在当前知识库「${scope}」中`,
+    });
+  }, [entryDeepLink, events, status, matchDeepLink, scope]);
 
   /**
    * 操作提示自动收（2026-11-18）：成功 2.6s 自隐 —— 它已是 fixed 浮层、不占布局，
@@ -647,12 +701,22 @@ export function EventsPage(): JSX.Element {
                 // 已收口 = `closedAt` 非空（收口的唯一权威）。只降视觉权重、不禁用：
                 // 收口事件仍要能点开复盘，灰底 ≠ 不可操作。
                 const isClosed = event.closedAt !== null && event.closedAt !== undefined;
+                /*
+                 * 当前阶段（2026-11-19）：列表里看不出「这条走到哪一步了」，只能点开详情看阶段线。
+                 * 列表接口本来就下发 `stage`，直接用；类型还没加载到 / 老数据缺字段时按 stageKey
+                 * 从类型定义里反查一次。`(未知阶段)` 是后端找不到阶段时的占位，显示出来只是噪音。
+                 */
+                const stageOfType = t?.stages.find((s) => s.key === event.stageKey);
+                const rawStageName = event.stage?.name ?? stageOfType?.name ?? null;
+                const stageName = rawStageName && rawStageName !== '(未知阶段)' ? rawStageName : null;
+                const stageIdx = event.stage?.index ?? (stageOfType ? (t?.stages.indexOf(stageOfType) ?? -1) : -1);
+                const stageTotal = t?.stages.length ?? 0;
                 return (
                   <div
                     key={event.id}
                     data-event-id={event.id}
                     className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}`}
-                    onClick={() => setActiveId(event.id)}
+                    onClick={() => selectEvent(event.id)}
                   >
                     <div className="gov-ev__title">
                       <span className="gov-ev__id" title={`事件 #${event.shortId}`} aria-label={`事件 #${event.shortId}`}>
@@ -661,10 +725,25 @@ export function EventsPage(): JSX.Element {
                       {/* 右列整块与标题左对齐：时间不再挂在编号下方 */}
                       <div className="gov-ev__main">
                         <div className="gov-ev__name">{event.title}</div>
-                        {/* 列表只留时间与类型：文档数与可见性点开详情可见，行内不再重复 */}
+                        {/* 列表只留时间 / 类型 / 当前阶段：文档数与可见性点开详情可见，行内不再重复 */}
                         <div className="gov-ev__meta">
                           <span>{listTimeText(event)}</span>
                           {t ? <span className={typeBadgeClass(t.name)}>{t.name}</span> : null}
+                          {/*
+                            * 当前阶段紧跟类型徽标：同一行读成「类型 → 走到哪」。
+                            * **不做成带框徽标**（像按钮、会诱人点），只留圆点 + 文字；
+                             * 序号这类精确位置放进 title，不占版面。
+                            */}
+                          {stageName ? (
+                            <span
+                              className={`gov-badge gov-ev__stage${isClosed ? ' gov-ev__stage--closed' : ''}`}
+                              title={stageIdx >= 0 && stageTotal > 0
+                                ? `当前阶段 第 ${stageIdx + 1}/${stageTotal} 步「${stageName}」`
+                                : `当前阶段「${stageName}」`}
+                            >
+                              {stageName}
+                            </span>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -733,7 +812,8 @@ export function EventsPage(): JSX.Element {
                     setDelConfirm(false);
                     void run(async () => {
                       const r = await deleteEvent(scope, active.id, "wiki");
-                      setActiveId(null);
+                      // 连带清掉地址栏里的 `?event=`：留着会让刷新后的深链兜底报「可能已被删除」
+                      selectEvent(null);
                       return `已删除事件；${r.affected.docs} 篇文档改为长期保留`;
                     });
                   }}
@@ -1072,7 +1152,7 @@ export function EventsPage(): JSX.Element {
                 ...(docs.length > 0 ? { docs } : {}),
                 ...(refDocs.length > 0 ? { refs: refDocs } : {}),
               });
-              if (res.event) setActiveId(res.event.id);
+              if (res.event) selectEvent(res.event.id);
               const failed = res.binding.docs.failed.length + res.binding.refs.failed.length;
               return `已创建 #${res.event?.shortId} ${res.event?.title}`
                 + `（关联 ${res.binding.docs.bound.length} 篇、参考 ${res.binding.refs.added} 篇${failed > 0 ? `，${failed} 项被拒` : ''}）`

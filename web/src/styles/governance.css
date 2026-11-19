@@ -1111,6 +1111,43 @@
 .gov-ev__name { font-size: 13.5px; font-weight: 700; color: var(--ki-color-text); }
 .gov-ev__title { gap: 8px; }
 .gov-ev__meta { color: var(--ki-color-text-subtle); font-size: 12px; gap: 5px; }
+/**
+ * 列表行的「当前阶段」（2026-11-19）：以前只能点开详情看阶段线，列表里读不出走到哪一步。
+ *
+ * **不能做成带框徽标**：描边 + 内边距 + 圆角凑在一起就像个按钮，用户会以为能点（2026-11-19 反馈）。
+ * 现在只留「圆点 + 文字」，是行内说明而不是控件；颜色沿用详情页阶段线的语义
+ * （当前阶段 = 主色，与 `.gov-stage__node--current` 一致），
+ * 已收口行再用 `--closed` 退回弱色 —— 否则灰底上会浮出一块绿。
+ *
+ * 仍挂在 `.gov-badge` 上是为了继承字号与 nowrap，这里把它的 padding / 背景 / 圆角全清零。
+ * `display: inline-block`（而非 badge 的 inline-flex）是为了让超长阶段名能省略号收尾：
+ * flex 容器上的 text-overflow 不会作用于匿名文本项。
+ */
+.gov-ev__stage {
+  display: inline-block;
+  max-width: 10em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: 0;
+  color: var(--ki-color-primary);
+  font-weight: 600;
+  vertical-align: bottom;
+}
+/* 圆点用 currentColor：换色时圆点自动跟随，不必再写一条选择器 */
+.gov-ev__stage::before {
+  content: '';
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  vertical-align: 1px;
+}
+.gov-ev__stage--closed { color: var(--ki-color-text-subtle); }
 
 /**
  * 已收口事件：整行灰底降权，但**不禁用**——收口后还要能点开复盘，灰底 ≠ 不可操作。
