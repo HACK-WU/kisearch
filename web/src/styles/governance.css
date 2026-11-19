@@ -1241,6 +1241,47 @@
 .gov-ev__stage--closed { color: var(--ki-color-text-subtle); }
 
 /**
+ * 「分析中」标记（2026-11-19）：列表行尾。
+ *
+ * 用紫色而不是 primary：AI 分析在详情页整块都是紫的，行内标记跟它同色才读得出
+ * 「这条正在被 AI 分析」，用 primary 会和阶段圆点撞成同一个意思。
+ * 呼吸点用 1.4s 的 opacity 动画，`prefers-reduced-motion` 下退化为静止实心点。
+ */
+.gov-ev__running {
+  position: absolute;
+  top: 9px;
+  right: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px;
+  border-radius: var(--ki-radius-tag);
+  background: color-mix(in srgb, var(--ki-color-purple) 12%, var(--ki-color-surface));
+  color: var(--ki-color-purple);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+/* 浮标不占流，靠给标题让位避免压字：只在跑的行加，其余行宽度不变 */
+.gov-ev--running { position: relative; }
+.gov-ev--running .gov-ev__name { padding-right: 62px; }
+.gov-ev__running-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: gov-ev-running 1.4s ease-in-out infinite;
+}
+@keyframes gov-ev-running {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .28; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gov-ev__running-dot { animation: none; }
+}
+
+/**
  * 已收口事件（2026-11-19 改版）：中性灰底 + 文字降权，**不禁用** —— 收口后还要能点开复盘。
  *
  * 三条来自真机走查的硬约束：
@@ -2583,4 +2624,26 @@
 .gov-ai-final.gov-ask__answer {
   margin: 2px 0 0;
   padding: 8px 10px 9px;
+}
+
+/* 预取步骤的「建议先读」清单（2026-11-19）：只给数字看不出建议了哪篇 */
+.gov-step-docs { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+.gov-step-docs__label {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .04em;
+  color: var(--ki-color-text-subtle);
+}
+.gov-step-docs__list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.gov-step-docs__list li {
+  position: relative; padding-left: 12px;
+  font-size: var(--ki-font-size-sm); line-height: 1.6;
+  color: var(--ki-color-text-muted); text-wrap: pretty;
+}
+.gov-step-docs__list li::before {
+  content: ""; position: absolute; left: 3px; top: 8px;
+  width: 4px; height: 4px; border-radius: 50%;
+  background: var(--ki-color-text-subtle);
+}
+.gov-step-docs__sum {
+  margin: 6px 0 0; font-size: 11px; line-height: 1.6;
+  color: var(--ki-color-text-subtle); text-wrap: pretty;
 }

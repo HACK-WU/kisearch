@@ -452,6 +452,16 @@ export interface GovernanceCounts {
   pendingIndex: number;
 }
 
+/**
+ * 正在跑分析的事件 id 清单（2026-11-19）。
+ *
+ * 后端只读进程内 `activeRuns`，无磁盘 I/O —— 列表页可以低频轮询用来打「分析中」标记。
+ * 注意是**本进程视角**：daemon 重启后本就没有正在跑的任务，清单为空是如实的。
+ */
+export function listRunningAnalyses(scope: string): Promise<{ ok: true; scope: string; ids: string[] }> {
+  return req(`/api/governance/events/running?${new URLSearchParams({ scope }).toString()}`);
+}
+
 export function getGovernanceCounts(scope: string): Promise<GovernanceCounts> {
   return req(`/api/governance/counts?${new URLSearchParams({ scope }).toString()}`);
 }

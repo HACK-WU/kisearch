@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ThinkingBlock, ToolCallRow } from './ToolCallRow';
 import { StepMetrics } from './StepMetrics';
 import { ConclusionChain } from './event-detail/ConclusionChain';
+import { formatDurationMs } from '@/lib/duration';
 import {
   cancelEventAnalysis,
   confirmEventAnalysis,
@@ -43,8 +44,12 @@ export function shouldOpenAiSettingsForError(code?: string): boolean {
   return Boolean(code && SETTINGS_GUIDE_CODES.has(code));
 }
 
+/**
+ * 步骤耗时（2026-11-19 用户要求）：>1s 用秒。
+ * 实现统一在 `@/lib/duration`，与 AI 查找过程区 / 工具调用行共用同一口径。
+ */
 export function formatAnalysisMs(ms: number): string {
-  return ms <= 0 ? '<1ms' : `${ms}ms`;
+  return formatDurationMs(ms);
 }
 
 function formatError(err: unknown): { code?: string; message: string } {
@@ -263,6 +268,13 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
   };
 
   const steps = draft?.steps ?? [];
+  /**
+   * 「第 N 轮探索」只数 `round-*` 步骤。
+   *
+   * 用 `steps.length + 1` 会把 context / recall 这类非轮次步骤也算进去 —— 预取阶段只有
+   * 一条 context 时就会显示「第 2 轮探索」，用户以为跳轮了（2026-11-19 真机反馈）。
+   */
+  const roundCount = steps.filter((st) => st.name.startsWith('round-')).length;
   const callCount = steps.reduce((n, s) => n + (s.calls?.length ?? 0), 0);
   const elapsedSec = ((draft?.stats.ms ?? 0) / 1000).toFixed(1);
   const settingsFirst = shouldOpenAiSettingsForError(startError?.code ?? draft?.errorCode);
@@ -421,6 +433,24 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                           {expandable && expanded ? (
                             <div className="gov-ai-step__detail">
                               <StepMetrics data={step.metrics ?? {}} />
+                              {/*
+                               * 预取步骤的「建议先读」清单存在 detail 里（docs / summary）：
+                               * 只渲染 metrics 的话用户只能看到一个数字，不知道建议读的是哪篇
+                               * （2026-11-19 真机反馈「recall 的内容怎么看不到」）。
+                               */}
+                              {Array.isArray(step.detail?.docs) && step.detail.docs.length > 0 ? (
+                                <div className="gov-step-docs">
+                                  <span className="gov-step-docs__label">建议先读</span>
+                                  <ul className="gov-step-docs__list">
+                                    {(step.detail.docs as unknown[]).map((doc, di) => (
+                                      <li key={di}>{String(doc)}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              ) : null}
+                              {typeof step.detail?.summary === 'string' && step.detail.summary ? (
+                                <p className="gov-step-docs__sum">{step.detail.summary}</p>
+                              ) : null}
                             </div>
                           ) : null}
                         </div>
@@ -455,7 +485,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                   ) : (
                     <div className="gov-ai-live__head">
                       <span className="gov-ai-live__spin" aria-hidden="true" />
-                      {`第 ${steps.length + 1} 轮探索 · 正在思考…`}
+                      {`第 ${roundCount + 1} 轮探索 · 正在思考…`}
                     </div>
                   )}
                 </div>

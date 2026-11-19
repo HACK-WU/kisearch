@@ -30,6 +30,7 @@ import { GovernanceError } from '../../src/lib/governance-errors.js';
 import {
   cancelEventAnalysis,
   formatRecallBlock,
+  listActiveAnalysisIds,
   isAnalysisActive,
   readNormalizedAnalysisDoc,
   startEventAnalysis,
@@ -434,6 +435,53 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.equal(doc.draft?.conclusion, '十分钟后才给结论', '跑得久也要把结论完整落下来');
     // 无候选仍走 NO_RESULT（与超时无关的既有语义）
     assert.equal(doc.draft?.errorCode, 'NO_RESULT');
+  });
+
+  it('④-1 预取期间先落「检索中」占位步骤（不让过程区几十秒无反馈）', async () => {
+    const ev = await createEvent(scope, { title: '预取占位', typeId: 'et_1' });
+    savePromptConfig(cfg, {
+      analysis: { targetDirs: { byScope: { [scope]: repoDir } } },
+    });
+
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    await startEventAnalysis(scope, ev.id, {
+      deps: {
+        loadConfigFn: () => cfg,
+        resolveLlmStatusFn: okLlmStatus,
+        // 预取卡住不返回，模拟真机上 39s 的检索
+        recallFn: async () => {
+          await gate;
+          return { content: [{ type: 'text', text: JSON.stringify({ ok: true, summary: 's', candidates: [], uncertainties: [] }) }] };
+        },
+        streamChatFn: (async function* (): never {
+          throw new Error('占位阶段不应进入模型调用');
+        }) as never,
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+    // 列表页「分析中」标记的数据源：只读 activeRuns，跑的过程中必须能查到这条
+    assert.deepEqual(listActiveAnalysisIds(scope), [ev.id], '运行中应能列出该事件 id');
+    const midRecall = (readNormalizedAnalysisDoc(scope, ev.id).draft?.steps ?? []).find((st) => st.name === 'recall');
+    assert.ok(midRecall, '预取期间必须有 recall 步骤落盘');
+    assert.match(String(midRecall!.title), /检索中/, '标题要显示「检索中」而不是空等');
+
+    release!();
+    const doc = await waitDone(scope, ev.id);
+    const doneRecall = (doc.draft?.steps ?? []).find((st) => st.name === 'recall');
+    assert.ok(doneRecall, '结束后应保留 recall 步骤');
+    assert.equal(
+      /检索中/.test(String(doneRecall!.title)),
+      false,
+      '结束后必须替换成真实结果（不能停在「检索中」）',
+    );
+    assert.equal(
+      (doc.draft?.steps ?? []).filter((st) => st.name === 'recall').length,
+      1,
+      '占位与结果必须是同一条（不能出现两条 recall）',
+    );
+    assert.deepEqual(listActiveAnalysisIds(scope), [], '结束后不得再出现在「分析中」清单里');
   });
 
   it('④ 手动停止：running 时 cancel → 落 cancelled（不是 failed），且幂等', async () => {

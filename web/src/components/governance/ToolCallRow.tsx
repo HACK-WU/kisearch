@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { formatDurationMs } from '@/lib/duration';
 
 /**
  * 过程面板里的一行工具调用（2026-11-18 · 分析/查找共用）。
@@ -28,7 +29,7 @@ export interface ToolCallRowProps {
 }
 
 function msText(ms: number): string {
-  return ms <= 0 ? '<1ms' : `${Math.round(ms)}ms`;
+  return formatDurationMs(ms);
 }
 
 export function ToolCallRow(props: ToolCallRowProps): JSX.Element {

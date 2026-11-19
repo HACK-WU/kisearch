@@ -120,6 +120,8 @@ const RULES: Rule[] = [
   exact('GET', '/governance/events', 'permission', 'knowledge.read'),
   exact('POST', '/governance/events', 'permission', 'knowledge.write'),
   // 子路径必须先于单段短路（否则 /events/:id 会先命中）
+  // 正在跑分析的事件 id 清单（2026-11-19）：列表行「分析中」标记；漏登记同样是 404
+  exact('GET', '/governance/events/running', 'permission', 'knowledge.read'),
   // 关联文档增删（REQ-20261116-004）：漏登记会直接 404（matchRoute 未命中 = unknown = 404）
   // 置顶 / 取消置顶（2026-11-19）：漏登记同样是 404，不是 403
   pattern('POST', /^\/governance\/events\/[^/]+\/pin$/, 'permission', 'knowledge.write'),

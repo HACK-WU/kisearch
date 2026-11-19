@@ -30,7 +30,7 @@ import type { VisTone } from '@/components/governance/event-detail/types';
 import { getDocContent } from '@/api/httpApi';
 import {
   addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
-  listEventTypes, listEvents, listRefs, removeConfirmedCodeLocation, removeMember, removeRef,
+  listEventTypes, listEvents, listRefs, listRunningAnalyses, removeConfirmedCodeLocation, removeMember, removeRef,
   reopenEvent, setEventPinned, setEventStage, updateEvent, updateEventType,
   REF_LIMIT,
   GovernanceApiError,
@@ -170,6 +170,36 @@ export function EventsPage(): JSX.Element {
   const [newTypeOpen, setNewTypeOpen] = useState(false);
   /** 递增触发一次 AI 分析（面板用 useRef 比对上次值，挂载时不会误触发） */
   const [startSignal, setStartSignal] = useState(0);
+  /**
+   * 正在跑分析的事件 id（2026-11-19 用户要求：列表行要能看出哪条在分析）。
+   *
+   * 数据源是 `/governance/events/running`（后端只读进程内 activeRuns，无磁盘 I/O）。
+   * 4s 轮询、页面不可见时跳过、切回来立即补一次；响应只有一个 id 数组，成本可忽略。
+   * 不做「列表全量刷新」：那会带来滚动位置与请求竞态，而这里只需要一个标记。
+   */
+  const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    let alive = true;
+    const tick = async (): Promise<void> => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const res = await listRunningAnalyses(scope);
+        if (!alive) return;
+        setRunningIds(new Set(res.ids));
+      } catch {
+        // 轮询失败不打扰用户：下一轮会重试（刚重启 daemon 时这里会短暂为空）
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => { void tick(); }, 4000);
+    const onVisible = (): void => { if (!document.hidden) void tick(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [scope]);
   const [transOpen, setTransOpen] = useState(false);
   /** 「删除事件」两步确认（会清空阶段日志，不可恢复） */
   const [delConfirm, setDelConfirm] = useState(false);
@@ -589,7 +619,7 @@ export function EventsPage(): JSX.Element {
       <div
         key={event.id}
         data-event-id={event.id}
-        className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}`}
+        className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}${runningIds.has(event.id) ? ' gov-ev--running' : ''}`}
         onClick={() => selectEvent(event.id)}
       >
         <div className="gov-ev__title">
@@ -654,6 +684,18 @@ export function EventsPage(): JSX.Element {
             </div>
           </div>
         </div>
+        {/*
+          * 「分析中」（2026-11-19 用户要求）：不看右栏也知道哪条正在跑。
+          * 数据来自 /events/running（进程内 activeRuns，无磁盘 I/O），4s 轮询。
+          * **绝对定位到标题行右侧**：塞进 meta 会把「阶段」挤到第二行、行高跟着跳
+          * （真机验过两版：带文字/只留点，都会挤）；浮标不占流，只让标题提前 ellipsis。
+          */}
+        {runningIds.has(event.id) ? (
+          <span className="gov-ev__running" title="AI 分析进行中：已完成步骤会实时写盘，可随时停止">
+            <span className="gov-ev__running-dot" aria-hidden="true" />
+            分析中
+          </span>
+        ) : null}
       </div>
     );
   };

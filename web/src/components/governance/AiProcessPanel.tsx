@@ -14,6 +14,7 @@ import { useEffect, useState } from 'react';
 import { ThinkingBlock, ToolCallRow } from './ToolCallRow';
 import { StepMetrics } from './StepMetrics';
 import type { RefSearchReason, RefSearchStep } from '@/api/governanceApi';
+import { formatDurationMs } from '@/lib/duration';
 
 export interface AiProcessContext {
   /** 事件标题（understand 步骤要复述"我在理解什么"） */
@@ -86,9 +87,9 @@ function numOf(value: number | string | undefined): number {
   return 0;
 }
 
-/** 亚毫秒步显示 `<1ms`（后端不夹到 1ms，否则就是面板上编数字） */
+/** 亚毫秒步显示 `<1ms`；>1s 用秒（口径统一在 `@/lib/duration`） */
 function msText(ms: number): string {
-  return ms <= 0 ? '<1ms' : `${ms}ms`;
+  return formatDurationMs(ms);
 }
 
 /** 把一步的 metrics 翻成一句人话（数字全部取自 metrics，不臆造） */

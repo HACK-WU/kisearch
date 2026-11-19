@@ -140,6 +140,21 @@ export function isAnalysisActive(scope: string, eventId: string): boolean {
 }
 
 /**
+ * 该 scope 下正在跑分析的事件 id 清单（2026-11-19：列表页的「分析中」标记）。
+ *
+ * 只读内存里的 `activeRuns`，不碰磁盘 —— 前端可以按秒级轮询。
+ * 注意这是**本进程视角**：daemon 重启后正在跑的任务本来也就没了。
+ */
+export function listActiveAnalysisIds(scope: string): string[] {
+  const prefix = `${scope}\u0000`;
+  const ids: string[] = [];
+  for (const key of activeRuns.keys()) {
+    if (key.startsWith(prefix)) ids.push(key.slice(prefix.length));
+  }
+  return ids;
+}
+
+/**
  * 手动停止一次正在进行的分析（2026-11-16 用户要求「弹窗里要有停止按钮」）。
  *
  * · 只做两件事：置标记 + abort；**终态由后台任务自己落盘**（已完成步骤与候选保留），
@@ -985,21 +1000,60 @@ async function executeAnalysisBackground(input: {
    * 失败（模型不可用 / 未确认外发 / 频控 / 超时）只记一条步骤，分析照常继续。
    */
   const userBlocks = [buildLightEventContext({ event, type: eventType, members, refs, logs })];
+  /** 把当前 steps 立刻落盘（预取阶段没有轮次，靠它让过程区看到「在检索」） */
+  const persistSteps = async (): Promise<void> => {
+    const now = nowFn();
+    await updateDraftIfMatch(scope, event.id, runId, (cur) => ({
+      ...cur,
+      steps: [...steps],
+      updatedAt: now,
+    }));
+  };
+
   if (analysisCfg.recall.enabled) {
-    const prefetch = await runRecallPrefetch({
-      scope,
-      event,
-      eventType,
-      members,
-      refs,
-      cfg,
-      limit: analysisCfg.recall.limit,
-      signal: controller.signal,
-      now: nowFn,
-      ...(deps ? { deps } : {}),
-    });
-    steps.push(prefetch.step);
-    if (prefetch.text) userBlocks.push(prefetch.text);
+    /*
+     * 预取通常 15~40s（真机一次 39s）。此前只在「每轮结束」落盘，这 39s 里过程区
+     * 只有一条 context 步骤，用户看到的是「第 2 轮探索·正在思考」—— 像是卡住/跳轮。
+     * 改为：先占位落盘，期间每 5s 心跳更新耗时，结束再用真实结果替换并落盘。
+     */
+    const recallIdx = steps.length;
+    const placeholder: AnalysisStepRecord = {
+      name: 'recall',
+      title: '预取知识库（ki_recall）：检索中…',
+      ms: 0,
+      metrics: {},
+    };
+    steps.push(placeholder);
+    await persistSteps();
+    const recallStarted = nowFn();
+    const heartbeat = setInterval(() => {
+      const elapsed = nowFn() - recallStarted;
+      /*
+       * 只更 `ms`，标题保持静态：界面右侧已经按新口径显示秒（「12s」），
+       * 标题再写一遍「检索中 12s…」就是同一个数字出现两次。
+       */
+      steps[recallIdx] = { ...placeholder, ms: elapsed };
+      void persistSteps().catch(() => { /* 心跳失败不影响主流程 */ });
+    }, 5_000);
+    try {
+      const prefetch = await runRecallPrefetch({
+        scope,
+        event,
+        eventType,
+        members,
+        refs,
+        cfg,
+        limit: analysisCfg.recall.limit,
+        signal: controller.signal,
+        now: nowFn,
+        ...(deps ? { deps } : {}),
+      });
+      steps[recallIdx] = prefetch.step;
+      if (prefetch.text) userBlocks.push(prefetch.text);
+    } finally {
+      clearInterval(heartbeat);
+      await persistSteps();
+    }
   }
   messages.push({ role: 'user', content: userBlocks.join('\n\n') });
   const loadedSkillIds = new Set<string>();

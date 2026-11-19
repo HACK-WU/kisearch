@@ -46,6 +46,7 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['PATCH', '/governance/event-types/et_1', 'knowledge.write'],
   ['DELETE', '/governance/event-types/et_4', 'knowledge.write'],
   ['GET', '/governance/events', 'knowledge.read'],
+  ['GET', '/governance/events/running', 'knowledge.read'],
   ['POST', '/governance/events', 'knowledge.write'],
   ['GET', '/governance/events/evt_1', 'knowledge.read'],
   ['PATCH', '/governance/events/evt_1', 'knowledge.write'],
@@ -103,7 +104,7 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
   });
 
   it('表里正好 42 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 42);
+    assert.equal(ROUTES.length, 43);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {

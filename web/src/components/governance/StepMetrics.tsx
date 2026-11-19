@@ -17,6 +17,9 @@ const LABELS: Record<string, string> = {
   newReads: '本轮新读',
   verified: '保留候选',
   dropped: '剔除候选',
+  // 预取（2026-11-19）
+  docs: '建议先读',
+  uncertain: '待确认',
   // 查找
   understand: '理解',
   extract: '提取',

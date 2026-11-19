@@ -56,7 +56,13 @@ import {
   discardAnalysisDraft,
   removeConfirmedLocation,
 } from './events/analysis-store.js';
-import { cancelEventAnalysis, isAnalysisActive, readNormalizedAnalysisDoc, startEventAnalysis } from './events/analysis-runner.js';
+import {
+  cancelEventAnalysis,
+  isAnalysisActive,
+  listActiveAnalysisIds,
+  readNormalizedAnalysisDoc,
+  startEventAnalysis,
+} from './events/analysis-runner.js';
 import {
   ASK_DOC_MAX_BYTES,
   ASK_DOC_MAX_TURNS,
@@ -696,6 +702,15 @@ export async function handleGovernanceRoutes(
           pending: outcome.pending,
           hint: buildBindingHint(outcome),
         });
+      }
+
+      /*
+       * 正在跑分析的事件 id 清单（2026-11-19）：事件列表行上的「分析中」标记。
+       * 只读进程内 activeRuns，无磁盘 I/O，可以秒级轮询。
+       */
+      if (method === 'GET' && segs[1] === 'running' && !segs[2]) {
+        const scope = scopeFromQuery();
+        return sendJson(res, 200, { ok: true, scope, ids: listActiveAnalysisIds(scope) });
       }
 
       const id = segs[1];
