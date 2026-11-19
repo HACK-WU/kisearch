@@ -105,6 +105,8 @@ export function EventsPage(): JSX.Element {
   const [keyword, setKeyword] = useState('');
   const [events, setEvents] = useState<EventView[]>([]);
   const [types, setTypes] = useState<EventTypeView[]>([]);
+  /** 列表请求在途（2026-11-19）：驱动刷新按钮的转圈与防连点 */
+  const [listLoading, setListLoading] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   /**
    * 事件深链 + 选中态回写：`/governance/events?event=<evt_id 或 #shortId>`。
@@ -260,7 +262,45 @@ export function EventsPage(): JSX.Element {
   // 鉴权加载中（permissions 暂空）只禁用、不弹"只读"横幅，避免进页闪一下
   const showReadOnlyHint = !canWrite && authStatus !== 'loading';
 
+  /**
+   * 列表视图要真正「到底」：给主内容区挂 `--noscroll`（浏览页 / 资源页同款范式），
+   * 让左列表与右详情各自内滚。
+   *
+   * 为什么不再用 `max-height: calc(100vh - N)`：N 是猜的页头高度，猜小了吸附后底部跑出视口
+   * （永远看不到），猜大了滚到底还留半屏空白 —— 2026-11-19 用户三轮反馈都栽在这里。
+   *
+   * 两种情形必须摘掉 `--noscroll`：
+   *  · 「事件类型」视图 —— 普通长表格，必须能整页滚；
+   *  · 单列断点（≤1080）—— 两栏上下堆叠，禁滚会让下半页永远看不到。
+   */
+  const [narrowLayout, setNarrowLayout] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 1080px)').matches
+  ));
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 1080px)');
+    const onChange = (): void => setNarrowLayout(mq.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+  useEffect(() => {
+    const el = document.querySelector('.ki-content');
+    if (!el) return undefined;
+    if (tab !== 'list' || narrowLayout) return undefined;
+    el.classList.add('ki-content--noscroll');
+    // 卸载 / 切视图都要摘掉：这是挂在全局布局容器上的类，留着会污染其它页面
+    return () => el.classList.remove('ki-content--noscroll');
+  }, [tab, narrowLayout]);
+
+  /**
+   * 列表请求序号（2026-11-19）：搜索框每次输入都会重新取列表，刷新按钮还会再叠一次。
+   * 没有这层保护时，先发的慢响应会盖掉后发的快响应（敲完 "abc" 却看到 "ab" 的结果）。
+   * 只丢弃过期响应，不改请求本身、不改接口签名。
+   */
+  const listSeq = useRef(0);
+
   const loadList = useCallback(async () => {
+    const seq = ++listSeq.current;
+    setListLoading(true);
     try {
       const [list, typeList, govCounts] = await Promise.all([
         /*
@@ -277,12 +317,18 @@ export function EventsPage(): JSX.Element {
         listEventTypes(scope),
         getGovernanceCounts(scope).catch(() => null),
       ]);
+      // 晚到的响应直接丢弃：更新的请求已经在路上（或已经回来）
+      if (seq !== listSeq.current) return;
       setEvents(list.events);
       setTypes(typeList.types);
       if (govCounts) setCounts({ open: govCounts.eventsOpen, closed: govCounts.eventsClosed });
       setActiveId((prev) => prev ?? matchDeepLink(list.events) ?? list.events[0]?.id ?? null);
     } catch (err) {
+      if (seq !== listSeq.current) return;
       setMessage({ tone: 'err', text: (err as Error).message });
+    } finally {
+      // 只有「最后一次请求」能收掉转圈，否则中途的过期响应会提前把 loading 关掉
+      if (seq === listSeq.current) setListLoading(false);
     }
   }, [scope, status, keyword, typeFilter, matchDeepLink]);
 
@@ -356,6 +402,15 @@ export function EventsPage(): JSX.Element {
     if (activeId) void loadDetail(activeId);
     else { setDetail(null); setRefs([]); }
   }, [activeId, loadDetail]);
+
+  /*
+   * 切事件后右栏回到顶部（2026-11-19）：`--noscroll` 下右栏是独立滚动容器，
+   * 不回顶就会停在上一条的滚动位置，看着像「点了没反应」。
+   */
+  useEffect(() => {
+    const el = document.querySelector('.gov-pane--flat');
+    if (el instanceof HTMLElement) el.scrollTop = 0;
+  }, [activeId]);
 
   // 分析进度轮询已下沉到 AiAnalyzePanel（1.5s，单一真源）；页面不再持有轮询
 
@@ -522,13 +577,13 @@ export function EventsPage(): JSX.Element {
         onClick={() => selectEvent(event.id)}
       >
         <div className="gov-ev__title">
-          <span className="gov-ev__id" title={`事件 #${event.shortId}`} aria-label={`事件 #${event.shortId}`}>
-            {event.shortId}
-          </span>
-          {/* 右列整块与标题左对齐：时间不再挂在编号下方 */}
           <div className="gov-ev__main">
-            <div className="gov-ev__name">{event.title}</div>
-            {/* 列表只留时间 / 类型 / 当前阶段：文档数与可见性点开详情可见，行内不再重复 */}
+            {/*
+              * 标题缩略 1 行（2026-11-19 用户要求）：3-5 行折行会让行高在 60~120px 间跳，
+              * 整列读起来没有节奏。完整标题由 title 属性与右栏详情承担。
+              */}
+            <div className="gov-ev__name" title={event.title}>{event.title}</div>
+            {/* 列表只留编号 / 时间 / 类型 / 当前阶段：文档数与可见性点开详情可见，行内不再重复 */}
             <div className="gov-ev__meta">
               {/*
                 * 置顶标识放在最前（2026-11-19）：分区标题说明「这一组是什么」，
@@ -547,22 +602,38 @@ export function EventsPage(): JSX.Element {
                   </svg>
                 </span>
               ) : null}
+              {/*
+                * 编号（2026-11-19）：从标题行挪进 meta 行，标题因此吃满整行宽度；
+                * 正文只显示裸数字（`#` 留在 title / aria-label），样式与详情页编号 chip 同源。
+                */}
+              <span className="gov-ev__id" title={`事件 #${event.shortId}`} aria-label={`事件 #${event.shortId}`}>
+                {event.shortId}
+              </span>
+              <span className="gov-ev__sep" aria-hidden="true">·</span>
               <span>{listTimeText(event)}</span>
-              {t ? <span className={typeBadgeClass(t.name)}>{t.name}</span> : null}
+              {t ? (
+                <>
+                  <span className="gov-ev__sep" aria-hidden="true">·</span>
+                  <span className={typeBadgeClass(t.name)}>{t.name}</span>
+                </>
+              ) : null}
               {/*
                 * 当前阶段紧跟类型徽标：同一行读成「类型 → 走到哪」。
                 * **不做成带框徽标**（像按钮、会诱人点），只留圆点 + 文字；
                 * 序号这类精确位置放进 title，不占版面。
                 */}
               {stageName ? (
-                <span
-                  className={`gov-badge gov-ev__stage${isClosed ? ' gov-ev__stage--closed' : ''}`}
-                  title={stageIdx2 >= 0 && stageTotal > 0
-                    ? `当前阶段 第 ${stageIdx2 + 1}/${stageTotal} 步「${stageName}」`
-                    : `当前阶段「${stageName}」`}
-                >
-                  {stageName}
-                </span>
+                <>
+                  <span className="gov-ev__sep" aria-hidden="true">·</span>
+                  <span
+                    className={`gov-badge gov-ev__stage${isClosed ? ' gov-ev__stage--closed' : ''}`}
+                    title={stageIdx2 >= 0 && stageTotal > 0
+                      ? `当前阶段 第 ${stageIdx2 + 1}/${stageTotal} 步「${stageName}」`
+                      : `当前阶段「${stageName}」`}
+                  >
+                    {stageName}
+                  </span>
+                </>
               ) : null}
             </div>
           </div>
@@ -577,7 +648,8 @@ export function EventsPage(): JSX.Element {
   const memberCount = detail?.members.length ?? active?.memberTotal ?? 0;
 
   return (
-    <div className="gov-page">
+    // `--fill` 只在列表视图挂：它让高度链一路撑到视口底（见上方 `--noscroll` 的注释）
+    <div className={`gov-page${tab === 'list' ? ' gov-page--fill' : ''}`}>
       <header className="gov-head">
         <p className="gov-head__path">
           <span className="gov-badge gov-badge--kb">{scope}</span>
@@ -799,10 +871,40 @@ export function EventsPage(): JSX.Element {
         </>
       ) : (
         <div className="gov-split">
-          {/* 左：事件列表 */}
-          <div className="gov-pane">
+          {/* 左：事件列表（`--list` 让它吸附视口，列表本身内滚，见 `.gov-pane--list`） */}
+          <div className="gov-pane gov-pane--list">
             <div className="gov-pane__search">
-              <input className="gov-input" style={{ width: '100%' }} placeholder="搜索事件名或编号…" value={keyword} onChange={(e) => setKeyword(e.target.value)} />
+              <input
+                className="gov-input"
+                placeholder="搜索事件名或编号…"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+              />
+              {/*
+                * 刷新（2026-11-19）：只重取列表，**保留筛选 / 搜索 / 选中 / 滚动位置**。
+                * 只读账号也能用 —— 这是读操作，不该被 `canWrite` 挡住。
+                * 请求在途时禁用 + 转圈，避免连点打出并发请求。
+                */}
+              <button
+                type="button"
+                className={`gov-btn gov-btn--ghost gov-pane__refresh${listLoading ? ' is-loading' : ''}`}
+                onClick={() => {
+                  void loadList();
+                  /*
+                   * 详情不跟着刷会让人以为「刷了还是旧的」：列表里的标题变了、右栏还停在旧阶段。
+                   * 只在已有选中时刷，避免首次进页面并发两条同样的详情请求。
+                   */
+                  if (activeId) void loadDetail(activeId);
+                }}
+                disabled={listLoading}
+                aria-label="刷新事件列表"
+                title="刷新事件列表（保留筛选、搜索与选中）"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                  <path d="M21 3v6h-6" />
+                </svg>
+              </button>
             </div>
             <div className="gov-pane__list">
               {/*
@@ -811,15 +913,32 @@ export function EventsPage(): JSX.Element {
                 */}
               {pinnedEvents.length > 0 ? (
                 <>
+                  {/*
+                    * 分区标题（2026-11-19 改版）：带计数 + `sticky` 吸附列表顶部。
+                    * 解释句不再常驻（每屏都要读一遍的噪音），收进 ⓘ 的 title。
+                    */}
                   <div className="gov-evgroup">
                     <span className="gov-evgroup__label">置顶</span>
-                    <span className="gov-evgroup__hint">不受筛选与排序影响</span>
+                    <span className="gov-evgroup__count">{pinnedEvents.length}</span>
+                    <span
+                      className="gov-evgroup__info"
+                      role="img"
+                      title="置顶事件不受「类型 / 状态」筛选与排序影响"
+                      aria-label="置顶事件不受类型与状态筛选影响"
+                    >i</span>
                   </div>
                   {pinnedEvents.map((event) => renderEventRow(event, true))}
                   {/* 普通区被筛空时不画空标题：只剩一行「已收口」下面是空白，像页面没加载出来 */}
                   {sortedEvents.length > 0 ? (
                     <div className="gov-evgroup">
                       <span className="gov-evgroup__label">{status === 'all' ? '其他事件' : statusLabel}</span>
+                      <span className="gov-evgroup__count">{sortedEvents.length}</span>
+                      <span
+                        className="gov-evgroup__info"
+                        role="img"
+                        title={`${SORT_LABEL[sort]}在前`}
+                        aria-label={`排序：${SORT_LABEL[sort]}`}
+                      >i</span>
                     </div>
                   ) : null}
                 </>

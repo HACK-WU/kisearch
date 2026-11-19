@@ -820,21 +820,90 @@
   border-radius: var(--ki-radius-lg);
   overflow: hidden;
 }
+/**
+ * 左列表栏（2026-11-19 第二次改版）：跟着**视口**撑满，不再拿固定值估页头高度。
+ *
+ * 前两版都栽在同一处：用固定预留（`100vh-220` / `100vh-200`）猜页头占位 ——
+ * 猜多了列表短一截（滚到底还留 140px 空白），猜少了吸附后底部跑到视口外且永远看不到。
+ * 现在改成浏览页 / 资源页同款范式：列表视图给 `.ki-content` 挂 `--noscroll`，
+ * 主内容区不滚动，高度链 `.gov-page--fill → .gov-split → .gov-pane--list` 一路 flex 撑满，
+ * 左列表与右详情各自内部滚动 —— 页头多高（含只读提示行）都不影响「到底」。
+ */
+.gov-pane--list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* 兜底：单列断点会摘掉 `--noscroll`，高度链断掉时不让它无界伸缩 */
+  max-height: calc(100vh - 24px);
+}
 .gov-pane__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: var(--ki-space-3);
   border-bottom: 1px solid var(--ki-color-border);
+  flex: 0 0 auto;
 }
-.gov-pane__list { max-height: 560px; overflow: auto; padding: var(--ki-space-2); }
+.gov-pane__search .gov-input { flex: 1 1 auto; min-width: 0; }
+/* 刷新按钮：图标按钮，loading 时转圈并禁用（防连点重复请求） */
+.gov-pane__refresh { width: 28px; height: 28px; padding: 0; flex: none; }
+.gov-pane__refresh svg { width: 14px; height: 14px; display: block; }
+.gov-pane__refresh.is-loading svg { animation: gov-spin 700ms linear infinite; }
+@keyframes gov-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .gov-pane__refresh.is-loading svg { animation: none; }
+}
+/* 列表本体吃满 pane 余下高度、自己滚。
+   顶部不留内距：sticky 分区标题吸附在 padding box 上沿，留 6px 就会在标题上方
+   露出一条正滚过去的内容（2026-11-19「置顶怎么还有空隙」）。 */
+.gov-pane__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 var(--ki-space-2) 10px;
+  scrollbar-gutter: stable;
+}
 
-/* 列表项（demo .ev-item）：胶囊形块，选中用主色淡底 + 左侧主色描边 */
+/* ── 事件列表视图：主内容区不滚动，双栏各自内滚（左栏才能真正「到底」）──
+   由 EventsPage 在 `tab === 'list'` 且非单列断点时挂 `.ki-content--noscroll`。 */
+.ki-content--noscroll .gov-page--fill {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 撑满时底部留白交给滚动容器，页面自身不再补 32px */
+  padding-bottom: 0;
+}
+.ki-content--noscroll .gov-page--fill .gov-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  /* 两栏等高：左栏撑满是靠这里，不是靠 max-height */
+  align-items: stretch;
+}
+.ki-content--noscroll .gov-page--fill .gov-pane--list { height: 100%; }
+/* 右栏详情自己滚：撑满后内容必然溢出，不接管滚动就会被裁掉一截 */
+.ki-content--noscroll .gov-page--fill .gov-pane--flat {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+}
+/* 首行同理用直角贴住容器顶（无置顶分组时第一行就是它） */
+.gov-pane__list > .gov-ev:first-child { border-radius: 0 0 var(--ki-radius-sm) var(--ki-radius-sm); }
+
+/**
+ * 列表项（2026-11-19 改版）：条目之间用**实色 1px 分隔**，不再靠底色区分。
+ * 原来只有 padding 没有间距，长标题折 4-5 行时整列糊成一团（用户反馈「乱、不清晰」）。
+ * 上下 10px + 标题/元信息间 3px：8+2 那版压得太紧（用户反馈「上下间隔有点挤」），
+ * 再多就回到松散的旧观感 —— 这两档之间只有一个合适值，别再各加一点。
+ */
 .gov-ev {
   display: grid;
   gap: 3px;
-  padding: var(--ki-space-2) var(--ki-space-3);
+  padding: 10px;
   border-radius: var(--ki-radius-sm);
   cursor: pointer;
   transition: background var(--ki-motion-fast);
 }
+.gov-ev + .gov-ev { border-top: 1px solid var(--gov-line); }
 .gov-ev:hover { background: var(--ki-color-hover); }
 /* 提一档特异性：否则鼠标停在选中项上会被 :hover 盖掉 */
 .gov-ev.gov-ev--active {
@@ -852,14 +921,17 @@
   min-width: 0;
 }
 .gov-ev__main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+/* 分隔点由 `.gov-ev__sep` 节点提供（不能挂 ::before —— 徽标是 inline-flex，
+   伪元素会变成它内部的第一个 flex item，被包进徽标背景里，见 2026-11-19 走查） */
 .gov-ev__meta {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 0;
   flex-wrap: wrap;
   font-size: var(--ki-font-size-xs);
   color: var(--ki-color-text-subtle);
 }
+.gov-ev__sep { margin: 0 5px; color: var(--ki-color-text-subtle); opacity: 0.55; }
 
 .gov-detail { padding: var(--ki-space-5); display: flex; flex-direction: column; gap: var(--ki-space-4); }
 .gov-detail__head { display: flex; align-items: flex-start; flex-wrap: wrap; gap: var(--ki-space-2) var(--ki-space-3); }
@@ -1065,6 +1137,7 @@
   .gov-toolbar + .gov-split,
   .gov-toolbar + .gov-selbar,
   .gov-selbar + .gov-card { margin-top: calc(var(--ki-space-1) * -1); }
+  /* 单列（≤900px）：列表回到固定高度，不参与视口吸附 */
   .gov-pane__list { max-height: 320px; }
 
   .gov-tbl { table-layout: auto; }
@@ -1094,23 +1167,41 @@
 
 /* ════════ 事件列表行：对齐 demo（选中浅绿 + 左侧绿条、标题加粗、类型徽标三色）════════ */
 .gov-ev--active { background: var(--ki-color-primary-soft); box-shadow: inset 3px 0 0 var(--ki-color-primary); }
-/* 列表侧编号：与详情页同一口径（裸数字 + 弱色），但**不加 chip 框** —— 行内已有类型 badge，
-   再加一个框会两个 badge 争注意力。 */
+/**
+ * 列表侧编号（2026-11-19 改版）：裸数字 + 细框 chip，与详情页 `.gov-summary__id` 同一口径，
+ * 列表里缩一号；`#` 只留在 title / aria-label（用户要求列表里不显示 `#`）。
+ * 位置从标题行挪进 meta 行 —— 腾出的 28px 让标题吃满整行，折行显著减少。
+ */
 .gov-ev__id {
-  /* 标题行是 flex + align-items:center：编号必须显式贴顶，否则多行标题时它停在中间 */
-  align-self: flex-start;
-  margin-top: 2px;
-  margin-right: 4px;
-  color: var(--ki-color-text-subtle);
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-tag);
+  background: var(--ki-color-surface-muted);
+  color: var(--ki-color-text-muted);
   font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 11.5px;
+  font-size: 10.5px;
   font-weight: 600;
+  /* 1.6 会让 chip 高 19px、把整行顶高 1px；1.45 正好压在 meta 的 18px 内 */
   line-height: 1.45;
   font-variant-numeric: tabular-nums;
 }
-.gov-ev__name { font-size: 13.5px; font-weight: 700; color: var(--ki-color-text); }
-.gov-ev__title { gap: 8px; }
-.gov-ev__meta { color: var(--ki-color-text-subtle); font-size: 12px; gap: 5px; }
+/**
+ * 标题：**缩略 1 行**（2026-11-19 用户要求「事件名称就不能缩略显示么」）。
+ * 完整标题在 `title` 属性与右栏详情里，列表只负责让人认出是哪一条。
+ */
+.gov-ev__name {
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.5;
+  color: var(--ki-color-text);
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.gov-ev__title { gap: 0; }
+.gov-ev__meta { color: var(--ki-color-text-subtle); font-size: 11.5px; }
 /**
  * 列表行的「当前阶段」（2026-11-19）：以前只能点开详情看阶段线，列表里读不出走到哪一步。
  *
@@ -1150,45 +1241,90 @@
 .gov-ev__stage--closed { color: var(--ki-color-text-subtle); }
 
 /**
- * 已收口事件：整行灰底降权，但**不禁用**——收口后还要能点开复盘，灰底 ≠ 不可操作。
- * 与 `.gov-ev--active` 同为 (0,1,0)，谁生效靠先后顺序，所以本段必须留在选中态之后；
- * 再补一条 (0,2,0) 的联合选择器，防止「已收口 + 选中」时灰底吃掉主色底与左侧竖条。
- * hover 用 hover-strong：普通 `.gov-ev:hover` 只有 4.5% 不透明度，叠在灰底上几乎看不出变化。
+ * 已收口事件（2026-11-19 改版）：中性灰底 + 文字降权，**不禁用** —— 收口后还要能点开复盘。
+ *
+ * 三条来自真机走查的硬约束：
+ *  1) `--ki-color-bg-muted`(#f0f2ee) 是暖绿灰，肉眼发绿 —— 用户当场质疑「你这是灰色么」，
+ *     所以单独提 `--gov-closed-*` 给真正的中性灰（R=G=B，深色单独覆盖）；
+ *  2) 灰底不许深：整行铺一块明显灰会变成斑马块，比普通行更抢视线（用户：「关闭的要变暗，咋这么突出」）。
+ *     真正让它退后的是**字重 650 → 400**，颜色只是辅助；
+ *  3) 与选中态共存时以选中为准（联合选择器留在最后）。
  */
-.gov-ev--closed { background: var(--ki-color-bg-muted); }
-.gov-ev--closed .gov-ev__name { color: var(--ki-color-text-muted); }
-.gov-ev--closed:hover { background: var(--ki-color-hover-strong); }
+.gov-ev--closed { background: var(--gov-closed-bg); }
+.gov-ev--closed:hover { background: var(--gov-closed-bg-hover); }
+.gov-ev--closed .gov-ev__name { color: var(--gov-closed-fg); font-weight: 400; }
+.gov-ev--closed .gov-ev__meta { color: var(--gov-closed-fg-weak); }
+.gov-ev--closed .gov-ev__sep { opacity: 0.32; }
+/* 关闭项的编号退成裸数字：框 / 底 / 内边距全去掉，否则一列表灰字里还挂个带框 chip */
+.gov-ev--closed .gov-ev__id {
+  padding: 0;
+  border-color: transparent;
+  background: none;
+  color: var(--gov-closed-fg-weak);
+}
+.gov-ev--closed .gov-badge:not(.gov-ev__stage) { opacity: 0.45; }
+.gov-ev--closed .gov-ev__stage { color: var(--gov-closed-fg-weak); }
 /* 只覆盖底色：左侧竖条由 `.gov-ev.gov-ev--active` 的 box-shadow 提供，
-   这里再写一次会与它抢值（曾写成 3px，和普通选中行的 2px 对不上）。
-   `--ki-color-hover-strong` 在灰底上仍可辨，普通 hover 的 4.5% 几乎看不出。 */
+   这里再写一次会与它抢值（曾写成 3px，和普通选中行的 2px 对不上）。 */
 .gov-ev--closed.gov-ev--active { background: var(--ki-color-primary-soft); }
+/* 选中的即使是已收口项也要看得清：恢复深色与粗体，否则「我在看哪一条」都分辨不出 */
+.gov-ev--closed.gov-ev--active .gov-ev__name { color: var(--ki-color-text); font-weight: 650; }
 
 /**
- * 置顶（2026-11-19）
+ * 分区标题（2026-11-19 改版 + 置顶）：带计数、吸附列表顶部。
  *
- * 只加「分区标题 + 行内图钉」两处视觉，**不动行底色**：
- * 行底色已被 选中 / 已收口 两个状态占满（见上面两条注释），再叠一层置顶色，
- * 三个状态同时出现时就没人分得清哪个颜色代表什么了。
+ * · 解释句（「不受筛选与排序影响」）收进 ⓘ 的 title —— 常驻一行小字是纯噪音；
+ * · sticky 让滚到下面几屏时仍知道这一组是什么（行内图钉只能标识置顶，标识不了分组）；
+ * · 不再动行底色：行底色已被 选中 / 已收口 占满，再叠一层就没人分得清颜色含义了。
  */
 .gov-evgroup {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 6px;
-  padding: 4px 8px 3px;
-  margin-top: var(--ki-space-2);
-  border-top: 1px solid var(--ki-color-border);
+  /* 负左右内距抵消 `.gov-pane__list` 的 8px，分隔线才能通到卡片边缘；
+     底部不留边距 —— 留 2px 会让下面那行（尤其选中态）像一块浮起来的胶囊（2026-11-19 反馈） */
+  margin: 0 calc(var(--ki-space-2) * -1);
+  padding: 4px var(--ki-space-2);
+  border-bottom: 1px solid var(--ki-color-border);
+  background: var(--ki-color-surface);
   font-size: 11.5px;
   color: var(--ki-color-text-subtle);
+  position: sticky;
+  top: 0;
+  z-index: 2;
   /* 分组标题只是标签，不该被当成可选项：不参与行 hover，也不吃点击 */
   user-select: none;
 }
-.gov-evgroup:first-child { margin-top: 0; border-top: none; }
+/* 第二个分组（「其他事件」）与上面的置顶行之间也要有线：分组标题自身带的是底边线 */
+.gov-evgroup:not(:first-child) { border-top: 1px solid var(--gov-line); }
+/* 紧跟分区标题的第一行：顶部改直角，让它贴着标题线（否则圆角会在线下露出两道白弧） */
+.gov-evgroup + .gov-ev { border-radius: 0 0 var(--ki-radius-sm) var(--ki-radius-sm); }
 .gov-evgroup__label { font-weight: 700; color: var(--ki-color-text-muted); }
-.gov-evgroup__hint { font-size: 11px; }
+.gov-evgroup__count {
+  font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  opacity: 0.8;
+}
+/* ⓘ：解释性文案的载体，13px 圆点 + title，不占版面也不抢注意力 */
+.gov-evgroup__info {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: 50%;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--ki-color-text-subtle);
+  cursor: help;
+}
 
-/* 行内图钉：与「当前阶段」同一行的说明性元素，不描边不成按钮 */
+/* 行内图钉：与「当前阶段」同一行的说明性元素，不描边不成按钮。
+   后面不跟分隔点（见 renderEventRow），靠 margin 与编号 chip 拉开距离 —— 否则图标贴着 chip 边框。 */
 .gov-ev--pinned .gov-ev__pin { color: var(--ki-color-primary); }
-.gov-ev__pin { display: inline-flex; align-items: center; }
+.gov-ev__pin { display: inline-flex; align-items: center; margin-right: 5px; }
 .gov-ev__pin svg { width: 11px; height: 11px; display: block; }
 
 /* 动作区的置顶开关：已置顶时用主色淡底，与 btn--ai 的紫色入口区分开 */
@@ -1211,6 +1347,17 @@
   --gov-badge-perf-fg: #1f5c8b;
   --gov-badge-req-bg: #f3eefc;
   --gov-badge-req-fg: #6b3fa0;
+  /**
+   * 已收口态专用（2026-11-19）：**中性灰**，R=G=B。
+   * ki 调色板整体是暖绿中性（`--ki-color-bg-muted` = #f0f2ee），用户一眼看出"发绿、不是灰"，
+   * 所以单独提一组语义变量 —— 深色只覆盖变量，不复制选择器（与 `--gov-badge-*` 同一做法）。
+   */
+  --gov-closed-bg: #fafafa;
+  --gov-closed-bg-hover: #f3f3f3;
+  --gov-closed-fg: #8c8c8c;
+  --gov-closed-fg-weak: #9c9c9c;
+  /* 列表行的分隔线：比 `--ki-color-border` 深一档，否则灰底行之间会看不出线 */
+  --gov-line: #dcdcdc;
 }
 
 [data-theme='dark'] .gov-page {
@@ -1220,6 +1367,11 @@
   --gov-badge-perf-fg: #7dd3fc;
   --gov-badge-req-bg: #221733;
   --gov-badge-req-fg: #c4b5fd;
+  --gov-closed-bg: #1e1e1e;
+  --gov-closed-bg-hover: #242424;
+  --gov-closed-fg: #7d7d7d;
+  --gov-closed-fg-weak: #6f6f6f;
+  --gov-line: #333333;
 }
 
 .gov-badge--bug { background: var(--gov-badge-bug-bg); color: var(--gov-badge-bug-fg); }
@@ -1879,12 +2031,10 @@
   overflow: visible;
 }
 
-/* 2) 左栏事件列表：可视高度按视口给足（原来固定 560px 太矮）。
-      必须限定在单列断点**之上**：否则会盖掉 governance.css:1029 那条
-      `@media (max-width: 1080px) { .gov-pane__list { max-height: 320px } }`（媒体查询同特异性、后者更靠前）。 */
-@media (min-width: 1081px) {
-  .gov-pane__list { max-height: min(760px, calc(100vh - 220px)); }
-}
+/* 2) 左栏事件列表（2026-11-19 第二次改版）：**不再 sticky、不再估高**。
+      页面在列表视图已禁滚动（`.ki-content--noscroll`），左栏靠 flex 高度链撑满视口，
+      吸附与否已无意义；固定预留（曾有 560 / min(760,100vh-220) / 100vh-200 三代）全部移除。
+      窄屏不挂 `--noscroll`，列表回落到 `.gov-pane__list` 的 320px 上限。 */
 
 /* 3) 「清空对话」用普通小按钮的外观（原来只有描边+底色，缺圆角与内联布局） */
 .gov-ask__clear {

@@ -94,14 +94,16 @@ describe('④ 已收口事件：灰底但不禁用', () => {
     assert.match(page, /closedAt !== null && event\.closedAt !== undefined/);
   });
 
-  it('灰底只降背景，不覆盖选中态的左侧竖条', () => {
-    assert.match(css, /\.gov-ev--closed \{[^}]*--ki-color-bg-muted/);
+  it('灰底用中性灰专用变量（`--ki-color-bg-muted` 是暖绿灰，用户明确说"不是灰"）', () => {
+    assert.match(css, /\.gov-ev--closed \{[^}]*--gov-closed-bg\b/);
     // 竖条由 `.gov-ev.gov-ev--active` 提供，closed 联合选择器再写 box-shadow 会抢值
     assert.doesNotMatch(css, /\.gov-ev--closed\.gov-ev--active \{[^}]*box-shadow/);
   });
 
-  it('灰底行的 hover 用 hover-strong（普通 hover 叠在灰底上看不出）', () => {
-    assert.match(css, /\.gov-ev--closed:hover \{[^}]*--ki-color-hover-strong/);
+  it('关闭态靠字重降权（650 → 400），底色只做极轻下沉（2026-11-19 用户：「咋这么突出」）', () => {
+    assert.match(css, /\.gov-ev--closed \.gov-ev__name \{[^}]*font-weight: 400/);
+    assert.match(css, /--gov-closed-bg: #fafafa/);
+    assert.match(css, /\.gov-ev--closed:hover \{[^}]*--gov-closed-bg-hover/);
   });
 });
 
@@ -205,5 +207,69 @@ describe('⑨ 深链兜底只判一次（2026-11-19 误报修复）', () => {
   it('不随状态筛选重判（依赖数组不含 status）', () => {
     assert.ok(effectDeps.length > 0, '未能解析深链兜底 effect 的依赖数组');
     assert.ok(!effectDeps.includes('status'), `深链兜底依赖不应包含 status，实际=${effectDeps.join(',')}`);
+  });
+});
+
+describe('⑩ 列表行改版：缩略 / 编号 chip / 刷新 / 撑满视口（2026-11-19）', () => {
+  it('标题缩略 1 行，完整标题走 title 属性（否则折 4-5 行，行高在 60~120px 间跳）', () => {
+    assert.match(css, /\.gov-ev__name \{[^}]*-webkit-line-clamp: 1;/);
+    assert.match(page, /className="gov-ev__name" title=\{event\.title\}/);
+  });
+
+  it('编号移入 meta 行、正文只显示裸数字（`#` 只留在 title / aria-label）', () => {
+    const metaStart = page.indexOf('className="gov-ev__meta"');
+    assert.ok(metaStart > 0, '未能定位 gov-ev__meta');
+    const metaBlock = page.slice(metaStart, page.indexOf('</div>', metaStart));
+    assert.match(metaBlock, /className="gov-ev__id"/);
+    assert.match(page, /title=\{`事件 #\$\{event\.shortId\}`\}/);
+    assert.doesNotMatch(page, />\s*#\{event\.shortId\}/, '正文节点不能拼 `#`');
+  });
+
+  it('分隔点用真实节点，不用 ::before（徽标是 inline-flex，伪元素会跑进它自己的背景）', () => {
+    assert.match(page, /className="gov-ev__sep"/);
+    assert.match(css, /\.gov-ev__sep \{ margin: 0 5px;/);
+    assert.doesNotMatch(css, /\.gov-ev__meta > \* \+ \*::before/);
+  });
+
+  it('图钉与编号 chip 之间有间距（否则图标贴着 chip 边框）', () => {
+    assert.match(css, /\.gov-ev__pin \{[^}]*margin-right: 5px/);
+  });
+
+  it('刷新按钮同时刷列表与详情、在途禁用；请求序号丢弃过期响应（搜索与刷新并发不互相覆盖）', () => {
+    assert.match(page, /gov-pane__refresh/);
+    assert.match(page, /onClick=\{\(\) => \{[\s\S]{0,80}void loadList\(\);/);
+    // 只刷列表会让人以为「刷了还是旧的」：列表标题变了、右栏还停在旧阶段
+    assert.match(page, /if \(activeId\) void loadDetail\(activeId\);/);
+    assert.match(page, /disabled=\{listLoading\}/);
+    assert.match(page, /const seq = \+\+listSeq\.current;/);
+    assert.match(page, /if \(seq !== listSeq\.current\) return;/);
+    assert.match(page, /if \(seq === listSeq\.current\) setListLoading\(false\)/);
+  });
+
+  it('列表撑满视口靠 noscroll + flex 高度链，不再拿固定值估页头高度', () => {
+    assert.match(page, /ki-content--noscroll/);
+    assert.match(page, /gov-page--fill/);
+    assert.match(css, /\.ki-content--noscroll \.gov-page--fill \{[^}]*flex: 1 1 auto/);
+    assert.match(css, /\.ki-content--noscroll \.gov-page--fill \.gov-pane--list \{ height: 100%; \}/);
+    // 三代固定预留（560 / min(760,100vh-220) / 100vh-200）都不得回到生效规则里
+    assert.doesNotMatch(css, /max-height: min\(760px, calc\(100vh - 220px\)\)/);
+    assert.doesNotMatch(css, /max-height: calc\(100vh - 200px\)/);
+    assert.doesNotMatch(css, /\.gov-pane--list \{ position: sticky/);
+  });
+
+  it('「事件类型」视图与单列断点必须摘掉 noscroll（否则页面滚不动、下半页看不到）', () => {
+    assert.match(page, /tab !== 'list' \|\| narrowLayout/);
+    assert.match(page, /matchMedia\('\(max-width: 1080px\)'\)/);
+  });
+
+  it('右栏自己接管滚动，切事件后回顶（否则停在上一条位置像「点了没反应」）', () => {
+    assert.match(css, /\.ki-content--noscroll \.gov-page--fill \.gov-pane--flat \{[^}]*overflow-y: auto/);
+    assert.match(page, /el\.scrollTop = 0;/);
+  });
+
+  it('分区标题与首行无缝：吸顶不露内容、首行顶部直角', () => {
+    assert.match(css, /\.gov-evgroup \+ \.gov-ev \{ border-radius: 0 0/);
+    assert.match(css, /\.gov-pane__list \{[^}]*padding: 0 var\(--ki-space-2\) 10px/);
+    assert.match(page, /gov-evgroup__count/);
   });
 });
