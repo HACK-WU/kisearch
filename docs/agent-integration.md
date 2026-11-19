@@ -1,17 +1,17 @@
-# Agent 集成：Skill 与 Rule
+# Agent 集成：Skill 与记忆规则
 
-kisearch 面向 AI Agent 提供三类资产：**检索 Skill**、**记忆行为规则**、**外部配套 Skill**。
+kisearch 面向 AI Agent 提供三类资产：**检索 Skill**、**记忆行为 Skill**（`agents-md-init`，记忆规则也由它承载）、**外部配套 Skill**。
 
 | 资产 | 位置 | 作用 |
 |---|---|---|
 | `ki-search` | [`skills/ki-search/SKILL.md`](../skills/ki-search/SKILL.md) | 代码知识库检索/写入：四步走查询 + 白名单/黑名单 |
 | `task-recall` | [`skills/task-recall/SKILL.md`](../skills/task-recall/SKILL.md) | 开工前预取：任务画像 → `ki_recall` → 按清单读正文；含触发判据与 6 条禁忌 |
-| 记忆行为总控 | [`rules/ai-codekb-memory.md`](../rules/ai-codekb-memory.md) | 自动沉淀 + 查询三步走 + 归档 + 代码片段记忆 + 禁忌 |
+| `agents-md-init` | [`skills/agents-md-init/SKILL.md`](../skills/agents-md-init/SKILL.md) | 记忆行为口径真源：初始化 AGENTS.md 结构 + 主动沉淀（何时写、写哪、怎么查重）+ 代码片段格式 + 会话收尾自查 + 近期工作归档 |
 | `ki-search-first` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-search-first) | 所有任务的记忆前置：先查项目记忆，再进入代码/专家/解决方案路径 |
 | `ki-memory-lookup` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-lookup) | 只读查询 SSOT，按记忆类型选择目录导航或语义检索 |
 | `ki-memory-write` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-write) | 统一查重、格式校验、双写、刷新、校验与结账删除 |
 
-> 加载顺序与使用规则见 [`rules/ai-codekb-memory.md`](../rules/ai-codekb-memory.md)。
+> 加载顺序与使用规则见 [`skills/agents-md-init/SKILL.md`](../skills/agents-md-init/SKILL.md)。
 
 ## 工作流：先查、再判断、后写入
 
@@ -113,13 +113,14 @@ curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill
 
 > 安装器基于 `npx skills`（需 Node.js ≥ 22），使用管理源 `~/.hackwu-skills/` 持续跟踪，支持 `update` / `remove` / `list`。
 
-**Rules**（安装器目前只支持 Skills，Rules 需手动放置）：
+**记忆行为规则**：无需单独放置 —— 记忆行为口径（主动沉淀、代码片段格式、会话收尾自查、归档）已并入 `agents-md-init` skill，装好该 skill 即可：
 
 ```bash
-mkdir -p /path/to/your-project/rules
-curl -fsSL https://raw.githubusercontent.com/HACK-WU/kisearch/master/rules/ai-codekb-memory.md \
-  -o /path/to/your-project/rules/ai-codekb-memory.md
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
+  bash -s -- --repo HACK-WU/kisearch -n agents-md-init -t /path/to/your-project
 ```
+
+> 之前按旧指引放在 `<项目>/rules/ai-codekb-memory.md` 的文件可以删掉：内容已由 skill 承接，两份并存会出现两套口径。
 
 > 存量用户迁移：旧版 `ki setup` 使用 `~/.ki-targets`，现已由安装器的 `~/.skill-targets`（或当前目录 `./.skill-targets`）取代，旧配置不再生效；如需保留原目标列表，请迁移到新文件。
 

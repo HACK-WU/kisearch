@@ -1,7 +1,7 @@
 # ki 命令参考
 
 > 本文件是 Agent 规则（[codekb-agent-guide](./codekb-agent-guide.md)）的公共命令参考。
-> 规则文件通过引用本文件获取命令语法，自身专注行为逻辑。
+> 记忆行为口径（`agents-md-init` skill）通过引用本文件获取命令语法，自身专注行为逻辑。
 
 ---
 

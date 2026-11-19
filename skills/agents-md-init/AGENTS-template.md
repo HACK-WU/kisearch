@@ -12,7 +12,7 @@ description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search
 - 查询顺序：先 `ki_search(scope: "${scope}-memory", ...)` 查项目上下文与决策；确认主题在代码库时再查 `${scope}`（代码知识）。**项目已有既定检索口径时以项目为准**，不要按模板强行改写
 - **该看视图的两个信号**：① 单库 `ki_search` 结果不足或文不对题；② 问题横跨多域（代码 + 运维 + 专家经验 + 项目决策）。命中时先 `ki_view_list()` 找现成聚合视图；**没有合适视图时**再显式拼多段 scope（`ki_search(scope: "a,b", ...)`，勿长期硬拼）。视图是多个库的**只读**聚合，**视图名可直接当 scope** 传给 `ki_search` / `ki_group_list` / `ki_tag_list` / `ki_get_module_info`。**成员含 `${scope}`、`${scope}-memory` 或 `${scope}-*` 同词根的视图才与本项目相关**，其余忽略；本文件**不缓存视图列表**（会变），每次实时查。同时看 `usableCount / availableCount` 与 `degradedReason` —— 有降级说明时部分成员不参与语义检索。**`threshold` 量级不同**：单库 `0.02~0.03`、视图（多库）`0.6~0.8`，混用会全灭或全留
 - **视图只读**：写入（`ki_sync_relation` / 上传文档）必须用真实库名，用视图名会被拒
-- 同源约定：`rules/ai-codekb-memory.md`「第一性原则：遇事不决 ki-search」
+- 检索口径与工具分工见 `ki-search` skill；开工前预取见 `task-recall` skill
 
 ---
 
@@ -44,7 +44,7 @@ description: AGENTS.md 的标准格式模板。含置顶第一原则（ki-search
 >
 > **代码知识库（`${scope}`）索引不写入本文件**。检索走 `ki-search`：**默认优先查 `${scope}-memory`**（项目上下文/决策更精准，`${scope}` 仅作宏观兜底，与 `ki-search` 规则禁忌一致）；确认主题在代码库里时再查 `${scope}`；两者都确需时方可一次传两个 scope：`ki_search(scope: "${scope},${scope}-memory", query)`。
 >
-> **格式口径**：本文件是 AGENTS.md 格式的唯一真源；`agents-md-init` skill 与 `rules/ai-codekb-memory.md` 只引用不重定义。
+> **格式口径**：本文件是 AGENTS.md 格式的唯一真源；`agents-md-init` skill 正文只引用不重定义。
 >
 > **🔒 安全底线（置顶必留，缺失即补）**：**本文件与一切代码、测试、配置、示例禁止写入敏感信息** —— 私钥/证书内容、线上地址与生产域名、真实 IP/内网网段、账号口令/Token/AK-SK/Cookie、个人信息（真实姓名、手机号、邮箱、身份证、住址）、未脱敏业务数据，一律用占位符：`<API_KEY>` / `<PRIVATE_KEY>` / `https://example.com` / `192.0.2.10`（RFC 5737 文档网段）/ `user@example.com`。测试样例必须是**明显不可用的伪造值**（如 `sk-test-0000`），不得复制线上真实值；真实配置走环境变量或 `.env`（`.gitignore` 内），代码里只留占位符。
 

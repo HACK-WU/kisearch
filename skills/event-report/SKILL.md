@@ -239,7 +239,7 @@ ki_event_list(scope, q: "<模块名>", status: "open", limit: 10)
 | 对象 | 关系 |
 |---|---|
 | `agents-md-init` | 它负责把**触发约定**写进 AGENTS.md（第二原则）与模板；本 skill 负责**执行**。判据真源在本 skill §1，AGENTS.md 只留指针 |
-| `ai-codekb-memory` 规则 | 分流表里"结论 / 知识"分支由它执行（`ki_sync_relation` / `ki-upload`）；本 skill 只管"一件事"分支 |
+| `agents-md-init` skill（记忆口径） | 分流表里"结论 / 知识"分支由它执行（`ki_sync_relation` / `ki-upload`，见其 §2.5 / §2.6）；本 skill 只管"一件事"分支 |
 | `ki-upload` | `--event` 可把文档绑到已存在事件；其文档里"AI 不能创建事件"的说法已过时，**以本 skill 为准** |
 | `code-review` / `debug` / `design-craft` / `auto-review` | 它们的收尾出口检测到越界发现时，调 `use_skill("event-report")` 继续；不复制判据 |
 | `ki_event_list` / `ki_event_get` | **list 用来找**（模糊 + 摘要），**get 用来读**（全文 + 按需裁剪）；判断结论 / 未确认点一律用 get |
