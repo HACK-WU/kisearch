@@ -479,9 +479,8 @@ export interface FindRangeConfig {
 /**
  * **AI 查找独立配置域**（REQ-20261116-005），与 `analysis` 同级、物理独立。
  *
- * ⚠️ 生效范围：`ranges` 对**快速通道**（确定性五步）立即生效；其余字段只在
- *    **深度通道**（LLM 工具循环）读取。一期未上线深度通道时，后端 `capabilities.findDeep=false`，
- *    设置页据此把这些字段标为"深度查找上线后生效"。
+ * ⚠️ 生效范围（2026-11-18 起「AI 查找」只剩模型通道，确定性快速查找已下线）：
+ *    `ranges` 由 HTTP 层解析成本次的检索 targets，其余字段在模型工具循环里读取。
  */
 export interface FindConfig {
   ranges: FindRangeConfig;
@@ -498,6 +497,18 @@ export interface FindConfig {
    *    旧配置里的这些键读取时静默忽略（轮次与候选数不再设限，超时由内部 45s 兜底）。
    */
   reasoningEffort?: string;
+  /**
+   * **单次查找允许 AI 调用工具的次数上限**（2026-11-19）。
+   *
+   * 语义：一次查找请求内**实际执行**的工具调用总数（检索 / 读正文 / 列树 / 列标签合计），
+   *     计数口径与过程面板的 `metrics.calls` 同源（内核 `toolTrace.length`）；
+   *     **不是轮次**（轮次仍由 `deep-find-core` 内部固定），**不是跨请求频率额度**。
+   *
+   * **恒有上限，没有"不限制"**（2026-11-19 用户拍板）：缺省按 `FIND_DEFAULT_TOOL_CALLS`（15）算 ——
+   * 读取路径补齐缺字段，运行期内核再兜一次（手改坏配置也不会退化成无限调用）。
+   * 同一份数会写进系统提示词，让模型提前规划调用顺序。
+   */
+  maxToolCalls?: number;
 }
 
 /**
@@ -848,7 +859,8 @@ export function defaultFindConfig(): FindConfig {
     prompt: { content: DEFAULT_FIND_PROMPT, at: BUILTIN_AT },
     skills: BUILTIN_FIND_SKILL_IDS.map((id) => builtinFindSkill(id)),
     tools: defaultFindTools(),
-    // 三个预算字段缺省 = 未覆盖（"恢复默认" = 删字段，与 contextChars / effort 同语义）
+    // 默认就有上限（15 次）：AI 查找没有"不限制"档，缺字段按这个值算
+    maxToolCalls: FIND_DEFAULT_TOOL_CALLS,
   };
 }
 
@@ -1063,6 +1075,23 @@ function validateTargetDirString(raw: unknown): { ok: true; value: string } | { 
 
 /** 额外放开的检索单元上限（含视图；当前事件所在库不计入，故上限比较宽松） */
 export const FIND_MAX_TARGETS = 5;
+
+/**
+ * 工具调用次数上限的取值边界（2026-11-19）。
+ *
+ * 下界为什么是 2 而不是 1：`refs-locate` 的硬规则是「至少读完整一篇正文才允许给候选」，
+ * 而读正文之前通常还要先检索定位 —— 给 1 等于保证模型只能检索、无法读，结果必然是 0 候选。
+ * 上界 30：轮次固定 6 轮、每轮现实里并发 1–4 个调用，30 已远超正常需要，同时能兜住失控。
+ */
+export const FIND_MIN_TOOL_CALLS = 2;
+export const FIND_MAX_TOOL_CALLS = 30;
+/**
+ * 默认上限（2026-11-19 用户拍板：默认 15 次，**不允许"不限制"**）。
+ *
+ * 15 的来历：轮次固定 6 轮，正常一次查找是「1–2 次检索 + 3–5 次读正文」；
+ * 留出约一倍余量，够模型在拿不准时多读两篇，同时仍能在反复试探时及时收口。
+ */
+export const FIND_DEFAULT_TOOL_CALLS = 15;
 
 /**
  * `find` 独立配置域的归一化（REQ-20261116-005）。
@@ -1284,6 +1313,21 @@ function normalizeFindSection(
       failField('find.reasoningEffort', `"${REASONING_EFFORT_RESERVED}" 是内部保留值，不应提交`);
     } else {
       out.reasoningEffort = v;
+    }
+  }
+
+  // ── 工具调用次数上限（2026-11-19）：越界 fail-loud，不静默钳制 ──
+  // 静默把 1 钳到 2、把 99 钳到 30，界面会显示"你设的是 99"而实际跑 30 —— 属于说谎。
+  // 缺字段 = 沿用基底（读取路径的基底是默认值 10，因此**读出来恒有上限**）。
+  if (obj.maxToolCalls !== undefined) {
+    const v = obj.maxToolCalls;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < FIND_MIN_TOOL_CALLS || v > FIND_MAX_TOOL_CALLS) {
+      failField(
+        'find.maxToolCalls',
+        `应为 ${FIND_MIN_TOOL_CALLS}~${FIND_MAX_TOOL_CALLS} 之间的整数（没有"不限制"），实际=${String(v)}`,
+      );
+    } else {
+      out.maxToolCalls = v;
     }
   }
 

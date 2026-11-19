@@ -225,8 +225,11 @@ export interface DeepFindResult {
   /** 实际发给检索的 query（模型自己生成的，这里给的是首轮线索，仅作面板展示） */
   query: string;
   durationMs: number;
-  /** 因硬超时提前结束（结果不完整）；2026-11-18 起「轮次用尽」不再产生本字段 */
-  partial?: { reason: 'timeout'; usedRounds: number };
+  /**
+   * 提前结束（结果不完整）：`timeout` = 硬超时；`budget` = 工具调用次数用尽（2026-11-19）。
+   * `usedCalls` = 实际执行过的工具调用数，面板据此说出"用满 N 次"而不是只报轮次。
+   */
+  partial?: { reason: 'timeout' | 'budget'; usedRounds: number; usedCalls?: number };
   unconfirmedCount: number;
   /** 模型输出不可解析时置 false（前端据此显示"模型未给出可解析结果"而不是"没有相关文档"） */
   parsed: boolean;

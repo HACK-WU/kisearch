@@ -18,6 +18,7 @@ import { streamChat } from '../chat/llm-client.js';
 import { GROUNDED_OUTPUT_SPEC, runGroundedRecall } from '../recall/run-recall.js';
 import { makeRecallToolRunner } from '../recall/tool-runner.js';
 import { readAllGroupCaches } from '../group-cache.js';
+import { FIND_DEFAULT_TOOL_CALLS } from '../chat/prompt-config.js';
 import { resolveVisibilityOfRelation } from '../visibility-index.js';
 import { buildFindContext, type DeepFindDeps, type DeepFindResult, type UnconfirmedCandidate } from './find-runner.js';
 import type { RefCandidate, RefSearchStep } from './refs-service.js';
@@ -40,6 +41,13 @@ export interface DeepFindCoreArgs {
   skills: Array<{ name: string; content: string; enabled: boolean }>;
   /** 已关联 / 已参考文档的 key（`scope\0group\0name`），不进候选 */
   usedKeys: ReadonlySet<string>;
+  /**
+   * 单次查找允许的工具调用次数上限（来自 `prompt-config.find.maxToolCalls`）。
+   *
+   * 缺省按 `FIND_DEFAULT_TOOL_CALLS`（15）处理：AI 查找**没有"不限制"档**，
+   * 配置缺失或调用方漏传都不能退化成无限调用。
+   */
+  maxToolCalls?: number;
   llm: Record<string, unknown>;
   now?: () => number;
   signal?: AbortSignal;
@@ -64,6 +72,23 @@ function toolLabel(name: string): string {
 }
 
 /**
+ * 工具调用预算说明（每轮都会追加 —— 查找路径恒有上限，没有"不限制"档）。
+ *
+ * 为什么由**代码**追加、不放进用户可编辑的「检索定位提示词」：预算与执行侧的上限是同一份数，
+ * 让用户改提示词就能改预算的话，两边迟早对不上（改了提示词 ≠ 运行期真的限那么多）。
+ *
+ * 为什么非要说给模型：只硬截断的话，模型会把次数花在试探性检索上，撞墙后才被迫收口，
+ * 候选质量明显下降；提前告知它能按"先定位、再读正文"的顺序分配次数。
+ */
+function toolCallBudgetNote(maxToolCalls: number): string {
+  return [
+    '## 工具调用预算',
+    `本次最多可以调用 ${maxToolCalls} 次工具（检索与读正文合计），次数用尽后你会被要求立刻收口。`,
+    '先规划再动手：先用最少的检索定位，再读最可能相关的正文；不要用近似重复的检索反复试探。',
+  ].join('\n');
+}
+
+/**
  * 模型通道主流程：**共享内核** → 三重校验 → 面板装配。
  *
  * ⚠️ 并发队列仍由 `find-runner` 负责（调用方在切过来之前先取槽），本函数只管一次调用。
@@ -72,10 +97,22 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
   const now = args.now ?? Date.now;
   const started = now();
   const allowed = new Set(args.targets);
+  /*
+   * 没有"不限制"档：漏传 / 配置缺字段都按默认 15 次兜住。
+   *
+   * ⚠️ 必须与内核（`run-recall.ts`）用**同一套归一化**（整数 + 正数），否则会出现两类漂移：
+   *   · `Infinity` → 内核判非法降级成"不限制"，而提示词写着"最多 Infinity 次"；
+   *   · `2.5` → 提示词说 2.5，内核 floor 成 2，模型按 2.5 规划、实际只能跑 2 次。
+   */
+  const rawCalls = args.maxToolCalls;
+  const maxToolCalls = typeof rawCalls === 'number' && Number.isInteger(rawCalls) && rawCalls > 0
+    ? rawCalls
+    : FIND_DEFAULT_TOOL_CALLS;
 
   const systemPrompt = [
     args.prompt.trim(),
     ...args.skills.filter((s) => s.enabled).map((s) => `### ${s.name}\n${s.content.trim()}`),
+    toolCallBudgetNote(maxToolCalls),
     GROUNDED_OUTPUT_SPEC,
   ].filter(Boolean).join('\n\n');
 
@@ -94,6 +131,7 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     limit: 20,
     tools: { ki_search: true, ki_get_module_info: true, ki_group_list: true, ki_tag_list: true },
     maxRounds: DEFAULT_MAX_ROUNDS,
+    maxToolCalls,
     llm: args.llm,
     stream: args.stream ?? ((messages, opts) => streamChat(messages, opts as never)),
     runTool: args.runTool ?? makeRecallToolRunner({ targets: args.targets, toolChars: TOOL_RESPONSE_CHARS }),
@@ -180,7 +218,17 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     steps,
     query: '',
     durationMs: now() - started,
-    ...(grounded.partial ? { partial: { reason: 'timeout' as const, usedRounds: grounded.rounds } } : {}),
+    // 收口原因由内核给（budget = 工具调用次数用尽 / timeout = 超时）；只有片段降级时无原因，
+    // 按历史口径仍报 timeout（`usedCalls` 让面板能如实说"用满 N 次"）
+    ...(grounded.partial
+      ? {
+        partial: {
+          reason: grounded.stopReason === 'budget' ? 'budget' as const : 'timeout' as const,
+          usedRounds: grounded.rounds,
+          usedCalls: grounded.toolTrace.length,
+        },
+      }
+      : {}),
     unconfirmedCount: unconfirmed.length,
     parsed: grounded.parsedOk,
     // 与 `ki_recall` 同源的结论字段：MCP 侧一直在用，面板也应当能看到同一份

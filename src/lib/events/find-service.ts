@@ -17,7 +17,7 @@ import { readViews } from '../scope-view.js';
 import { countDocsByTargets } from './find-targets.js';
 import { acquireFindSlot, releaseFindSlot, type DeepFindDeps, type DeepFindResult, type UnconfirmedCandidate } from './find-runner.js';
 import { runDeepFindCore } from './deep-find-core.js';
-import { defaultFindConfig, readPromptConfig } from '../chat/prompt-config.js';
+import { defaultFindConfig, FIND_DEFAULT_TOOL_CALLS, readPromptConfig } from '../chat/prompt-config.js';
 import { findEnabledSkill } from '../chat/prompt-config.js';
 import { collectMembers } from './members.js';
 import { readRefs } from './refs-store.js';
@@ -95,6 +95,8 @@ async function runDeepFindSharedCore(
       prompt: findCfg.prompt.content,
       skills,
       usedKeys,
+      // 查找没有"不限制"档：配置缺字段按默认 15 次（内核同源再兜一次）
+      maxToolCalls: findCfg.maxToolCalls ?? FIND_DEFAULT_TOOL_CALLS,
       llm: {
         baseURL: cfg.llm?.baseURL ?? '',
         apiKey: cfg.llm?.apiKey ?? '',

@@ -46,6 +46,14 @@ export interface GroundedInput {
   tools: Record<string, boolean>;
   /** 轮次上限（用尽后自动走一次「收口轮」） */
   maxRounds: number;
+  /**
+   * 工具调用次数上限（缺省 = 不限制）。计数口径 = 本次**实际执行**的调用数
+   * （即结果里的 `toolTrace.length`），与过程面板的 `metrics.calls` 同一份数。
+   *
+   * 达到上限后：本轮剩余调用一律回错误文本（否则模型会一直等工具结果），并立即收口，
+   * 不再消耗后续轮次 —— 只在外层轮次判断会让"一轮并发 3 个调用"超发。
+   */
+  maxToolCalls?: number;
   /** 模型参数（baseURL / apiKey / model / temperature / maxTokens / reasoningEffort） */
   llm: Record<string, unknown>;
   /** 模型流式接口（生产 = `streamChat`） */
@@ -80,6 +88,13 @@ export interface GroundedResult {
   parsedOk: boolean;
   rounds: number;
   partial?: boolean;
+  /**
+   * 提前收口的原因（调用方据此如实告知用户）：
+   *   · `timeout` = 模型调用超时 / 被 abort；
+   *   · `budget`  = 工具调用次数用尽（`maxToolCalls`）。
+   * 缺失（而 `partial` 为真）= 只读到片段导致的降级，与收口无关。
+   */
+  stopReason?: 'timeout' | 'budget';
   durationMs: number;
 }
 
@@ -235,8 +250,27 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
   let finalText = '';
   let rounds = 0;
   let timedOut = false;
+  let stopReason: 'timeout' | 'budget' | undefined;
+  /*
+   * 工具调用预算：`undefined` = 不限制（**只有 `ki_recall` 会落到这一档** —— 预取不设上限；
+   * 「AI 查找」的调用方 `deep-find-core` 恒传一个归一化过的整数，故查找永远有限）。
+   * 归一化放在这里而不是调用方：入参可能来自手改文件或第三方调用方，非法值不能让内核崩。
+   */
+  const maxToolCalls = typeof input.maxToolCalls === 'number' && Number.isFinite(input.maxToolCalls) && input.maxToolCalls > 0
+    ? Math.floor(input.maxToolCalls)
+    : undefined;
 
   for (let round = 1; round <= input.maxRounds; round += 1) {
+    /*
+     * 轮首判配额（2026-11-19 review 抓到）：这里**必须**判，不能只靠"调用被拒时置位"。
+     *   ① 配额在轮末**恰好用满**时没有任何一次调用被拒，stopReason 不会置位 ——
+     *      少了这一判就会再发一整轮请求，既白烧一次模型调用，也让"已用满"丢了 budget 标记；
+     *   ② 它同时兜住了"本轮有调用被拒"的情形，故轮末不需要再 break 一次（去掉更省心）。
+     */
+    if (maxToolCalls !== undefined && toolTrace.length >= maxToolCalls) {
+      stopReason = 'budget';
+      break;
+    }
     rounds = round;
     let text = '';
     let calls: Array<{ id: string; name: string; arguments: string }> = [];
@@ -253,6 +287,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
     } catch (err) {
       if (err instanceof Error && /abort|timeout|超时/i.test(err.message)) {
         timedOut = true;
+        stopReason = 'timeout';
         finalText = text;
         break;
       }
@@ -275,6 +310,22 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
     });
 
     for (const call of calls) {
+      /*
+       * 预算判断必须在**单次调用**这一层：一轮里模型可以并发发起多个调用，
+       * 只在轮次层面判断会整轮超发（例：上限 2、一轮并发 3 个调用 → 实际执行 3 次）。
+       * 每个被拒的调用都要回一条 tool 消息，否则模型会一直等它的结果。
+       */
+      if (maxToolCalls !== undefined && toolTrace.length >= maxToolCalls) {
+        stopReason = 'budget';
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify({
+            error: `工具调用次数已达上限（${maxToolCalls} 次），不能再调用工具；请基于已读到的内容直接给出结论`,
+          }),
+          tool_call_id: call.id,
+        });
+        continue;
+      }
       let args: Record<string, unknown> = {};
       try {
         const parsed: unknown = JSON.parse(call.arguments || '{}');
@@ -320,19 +371,27 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
       }
       messages.push({ role: 'tool', content: outcome.text, tool_call_id: call.id });
     }
+
   }
 
   /*
    * 收口轮（2026-11-18 真机首调暴露）：轮次用完时模型**还在调工具**是常态 ——
    * 直接退出会拿到空结论（实测 rounds=5、candidates=0）。因此额外补一次**不带工具**的请求，
    * 明确要求它把已有证据收敛成 JSON。
+   *
+   * 收口原因要如实说：次数用尽却告诉它"轮次已用完"，模型会以为还有轮次可用而重新规划。
    */
   if (!finalText.trim()) {
+    const why = stopReason === 'budget'
+      ? `工具调用次数已用完（上限 ${maxToolCalls ?? 0} 次），不能再调用任何工具`
+      : stopReason === 'timeout'
+        ? '本次查找已超时，不能再调用任何工具'
+        : '轮次已用完，不能再调用任何工具';
     const closing: ChatTurn[] = [
       ...messages,
       {
         role: 'user',
-        content: '轮次已用完，不能再调用任何工具。请**现在**基于你已读到的内容输出最终 JSON：'
+        content: `${why}。请**现在**基于你已读到的内容输出最终 JSON：`
           + '{"summary":"…","candidates":[…],"uncertainties":[…],"needMore":[…]}。'
           + '没有候选就给空数组，并在 summary 里说明你查了什么、为什么没有。',
       },
@@ -367,6 +426,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
       dropped: 0,
       rounds,
       partial: true,
+      ...(stopReason ? { stopReason } : {}),
       toolTrace,
       parsedOk: false,
       durationMs: now() - started,
@@ -427,7 +487,8 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
     })),
     dropped,
     rounds,
-    ...(timedOut || snippetOnly > 0 ? { partial: true } : {}),
+    ...(timedOut || stopReason === 'budget' || snippetOnly > 0 ? { partial: true } : {}),
+    ...(stopReason ? { stopReason } : {}),
     toolTrace,
     parsedOk: true,
     durationMs: now() - started,

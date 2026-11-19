@@ -63,6 +63,8 @@ export const clonePromptConfig = (c: PromptConfig): PromptConfig => ({
           tools: { ...c.find.tools },
           // 2026-11-18：maxRounds / maxCandidates / timeoutMs 预算取消，不再搬运
           ...(c.find.reasoningEffort !== undefined ? { reasoningEffort: c.find.reasoningEffort } : {}),
+          // 2026-11-19：工具调用次数上限（漏搬 = 改别的配置一保存就被清空）
+          ...(c.find.maxToolCalls !== undefined ? { maxToolCalls: c.find.maxToolCalls } : {}),
         },
       }
     : {}),

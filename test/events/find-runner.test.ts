@@ -22,7 +22,7 @@ import { getKbDir } from '../../src/lib/scope.js';
 import { loadGroupCache, writeGroupCache } from '../../src/lib/group-cache.js';
 import type { Relation } from '../../src/lib/scoring.js';
 import type { KiConfig } from '../../src/lib/config.js';
-import { defaultFindConfig } from '../../src/lib/chat/prompt-config.js';
+import { defaultFindConfig, promptConfigPath } from '../../src/lib/chat/prompt-config.js';
 import { createEvent } from '../../src/lib/events/event-service.js';
 import { addRefs } from '../../src/lib/events/refs-service.js';
 import {
@@ -563,5 +563,94 @@ describe('⑦ auto-review 修复锁（硬超时语义 / 名次 / excluded 口径
     assert.equal(understand.metrics.timeoutMs, 45_000, '硬超时硬编码 45s，不被 llm.requestTimeoutMs 夹取');
     assert.equal(r.candidates[0]?.rankInScope, 1, '名次按分数降序算，不是命中出现顺序');
     assert.deepEqual(r.excluded.associated, [ART_A], 'excluded 与快速通道同口径：只给文档名');
+  });
+});
+
+/**
+ * ⑦ 生效门：`find.maxToolCalls` 从配置真的一路走到内核（2026-11-19）。
+ *
+ * 为什么要过服务层而不是只测 `deep-find-core`：本仓已出现过「配置项存在、设置页能改、
+ * 但生效路径根本不读它」的事故（`find.tools` 四开关，见事件 #43）。这里直接把提示词文件
+ * 写成带上限的样子，验证「读配置 → 装配 → 内核限流 → 结果标 budget」整条链。
+ */
+describe('⑦ 工具调用次数上限：配置 → 服务 → 内核', () => {
+  it('上限 2：一轮并发 3 个调用只执行 2 次；结果标 budget 且提示词带预算', async () => {
+    const file = promptConfigPath(cfg);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, find: { maxToolCalls: 2 } }));
+    try {
+      const ev = await createEvent(scope, { title: '工具调用上限验证', typeId: 'et_1' });
+      const script = scriptedStream([
+        {
+          calls: [
+            { name: 'ki_search', args: { query: '回滚' } },
+            { name: 'ki_search', args: { query: '发布' } },
+            { name: 'ki_search', args: { query: '值班' } },
+          ],
+        },
+        // 第 2 次请求若被当成"正常一轮"，这里会真的再执行一次工具 → 下面的 calls 断言会红
+        { calls: [{ name: 'ki_search', args: { query: '再次' } }] },
+        { text: '[]' },
+      ]);
+      const r = await runDeepFindAsSearchResult(scope, ev.id, deps({
+        stream: { stream: script.fn, status: () => okStatus() },
+      }));
+
+      assert.equal(r.steps[0]?.metrics?.calls, 2, '上限 2 ⇒ 一轮并发 3 个调用也只能执行 2 次');
+      assert.equal(r.partial?.reason, 'budget', '面板据此说"次数用满"而不是"超时"');
+      assert.equal(r.partial?.usedCalls, 2);
+
+      const systemPrompt = String(script.seen[0]?.[0]?.content ?? '');
+      assert.match(systemPrompt, /最多可以调用 2 次工具/, '上限必须提前告知模型');
+
+      // 达上限后不得再发"完整一轮"请求：只剩收口那一次（少了这条断言，删掉 break 也不会红）
+      assert.equal(script.turns(), 2, '达上限后只允许再请求一次（收口轮）');
+
+      // 每个被拒的调用都必须回一条 tool 消息：少一条上游会因 tool_calls/tool 不配对直接 400
+      const closingMessages = script.seen[1] ?? [];
+      const toolMessages = closingMessages.filter((m) => m.role === 'tool');
+      assert.equal(toolMessages.length, 3, '3 个调用 = 2 条执行结果 + 1 条"已达上限"');
+      assert.ok(
+        toolMessages.some((m) => String(m.content).includes('已达上限')),
+        `被拒的调用要如实回错误文本，实际：${JSON.stringify(toolMessages.map((m) => m.content))}`,
+      );
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  it('配额在轮末恰好用满（没有任何调用被拒）也必须收口并标 budget', async () => {
+    const file = promptConfigPath(cfg);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ version: 1, find: { maxToolCalls: 2 } }));
+    try {
+      const ev = await createEvent(scope, { title: '恰好用满验证', typeId: 'et_1' });
+      // 一轮正好 2 个调用（= 上限），没有第 3 个去触发拒绝分支
+      const script = scriptedStream([
+        { calls: [{ name: 'ki_search', args: { query: '回滚' } }, { name: 'ki_search', args: { query: '发布' } }] },
+        { text: '[]' },
+      ]);
+      const r = await runDeepFindAsSearchResult(scope, ev.id, deps({
+        stream: { stream: script.fn, status: () => okStatus() },
+      }));
+      assert.equal(r.steps[0]?.metrics?.calls, 2);
+      // 少了轮首补判：这里会变成 timeout（实际既没超时也没"被拒"），用户看到的原因就是错的
+      assert.equal(r.partial?.reason, 'budget', '恰好用满同样属于"次数用尽"');
+    } finally {
+      fs.rmSync(file, { force: true });
+    }
+  });
+
+  it('配置文件不存在时按默认 15 次下发（配置域默认值，不允许「不限制」）', async () => {
+    const ev = await createEvent(scope, { title: '默认上限验证', typeId: 'et_1' });
+    const script = scriptedStream([
+      { calls: [{ name: 'ki_search', args: { query: '回滚' } }] },
+      { text: '[]' },
+    ]);
+    await runDeepFindAsSearchResult(scope, ev.id, deps({
+      stream: { stream: script.fn, status: () => okStatus() },
+    }));
+    const systemPrompt = String(script.seen[0]?.[0]?.content ?? '');
+    assert.match(systemPrompt, /最多可以调用 15 次工具/, '配置缺字段也必须给模型一个具体次数');
   });
 });

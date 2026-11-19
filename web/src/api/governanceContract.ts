@@ -315,8 +315,11 @@ export interface RefSearchResultDto {
    * 面板据此解释"总结里说有几篇、候选却是空的"这种情况，避免看起来像 bug。
    */
   droppedCount?: number;
-  /** 提前结束（硬超时），结果不完整；2026-11-18 起轮次不再设限，`reason` 只剩 timeout */
-  partial?: { reason: 'timeout'; usedRounds: number };
+  /**
+   * 提前结束，结果不完整：`timeout` = 硬超时；`budget` = 工具调用次数用尽（2026-11-19）。
+   * `usedCalls` = 已执行的工具调用次数（面板据此说"用满 N 次"，而不是只报轮次）。
+   */
+  partial?: { reason: 'timeout' | 'budget'; usedRounds: number; usedCalls?: number };
   /** 0 候选的原因；有候选时省略。前端据此区分空态文案 */
   reason?: 'no-keywords' | 'empty-scope' | 'no-hits' | 'all-excluded';
   /** 实际检索模式：fulltext = 语义侧不可用已降级，面板必须如实显示 */

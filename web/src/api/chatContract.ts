@@ -544,6 +544,14 @@ export interface FindConfig {
    *    后端不再读取（旧配置残留静默忽略）。
    */
   reasoningEffort?: string;
+  /**
+   * 单次查找允许 AI 调用的工具次数上限（2026-11-19）。
+   *
+   * **没有"不限制"档**：缺省按 `limits.findToolCallsDefault` 算（服务端补齐，默认 15）。
+   * 计数口径 = 真正执行的工具调用数，与过程面板的 `metrics.calls` 同源；
+   * 上下界与默认值都读 `limits`，前端不硬编码。
+   */
+  maxToolCalls?: number;
 }
 
 export interface PromptConfigLimits {
@@ -584,6 +592,14 @@ export interface PromptConfigLimits {
    *    服务端不再下发，前端也不再有对应的输入框。
    */
   findMaxTargets?: number;
+  /**
+   * AI 查找 · 工具调用次数上限的边界与默认值（2026-11-19）。
+   * **缺失 = 旧版 daemon 不认这个配置项** → 设置页据此提示重启，而不是让用户以为设上了。
+   * `findToolCallsDefault` 是「恢复默认」的目标值（这项没有"不限制"档，必须给）。
+   */
+  findMinToolCalls?: number;
+  findMaxToolCalls?: number;
+  findToolCallsDefault?: number;
   /** AI 预取：轮次与单次工具结果字符的上下界（REQ-20261118-004） */
   recallMaxRoundsMin?: number;
   recallMaxRoundsMax?: number;

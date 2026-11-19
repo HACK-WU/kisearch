@@ -93,7 +93,10 @@ import {
   ANALYSIS_TOOL_GROUPS,
   CAPABILITY_PROMPT_MAX_CHARS,
   CONTEXT_CHARS_MAX,
+  FIND_DEFAULT_TOOL_CALLS,
   FIND_MAX_TARGETS,
+  FIND_MAX_TOOL_CALLS,
+  FIND_MIN_TOOL_CALLS,
   FIND_SKILL_REQUIRED_TOOLS,
   FIND_TOOL_GROUPS,
   MAX_SKILLS,
@@ -664,6 +667,12 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       // ── AI 查找（REQ-20261116-005）：范围上限，前端一律读这里 ──
       // 2026-11-18：分析 / 检索的轮次·文件·候选·超时预算整体取消，不再下发任何预算上下界
       findMaxTargets: FIND_MAX_TARGETS,
+      // ── AI 查找：工具调用次数上限的取值边界与默认值（2026-11-19）──
+      // 缺字段 = 旧版 daemon（不认这个配置项，提交会被静默丢弃）→ 前端据此 fail-loud 提示重启
+      // 默认值是「恢复默认」的目标值：查找没有"不限制"档，这个数必须由服务端给
+      findMinToolCalls: FIND_MIN_TOOL_CALLS,
+      findMaxToolCalls: FIND_MAX_TOOL_CALLS,
+      findToolCallsDefault: FIND_DEFAULT_TOOL_CALLS,
       // ── AI 预取（REQ-20261118-004）：轮次与工具结果字符的上下界，前端一律读这里 ──
       recallMaxRoundsMin: RECALL_MIN_ROUNDS,
       recallMaxRoundsMax: RECALL_MAX_ROUNDS,

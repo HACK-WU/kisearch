@@ -42,6 +42,7 @@ const base = () => ({
     maxCandidates: 12,
     timeoutMs: 45000,
     reasoningEffort: 'high',
+    maxToolCalls: 12,
   },
 });
 
@@ -55,6 +56,8 @@ describe('① 草稿拷贝必须搬运 find（整份替换语义）', () => {
     assert.equal(out.find.skills.length, 1);
     assert.equal(out.find.tools.ki_get_module_info, false);
     assert.equal(out.find.reasoningEffort, 'high');
+    // 2026-11-19：工具调用次数上限必须搬（漏搬 = 改别的配置一保存就被静默清空）
+    assert.equal(out.find.maxToolCalls, 12, 'maxToolCalls 必须被搬运');
     // 2026-11-18：轮次 / 候选 / 超时预算整体取消 —— 草稿即使带着旧值也不再搬运
     assert.equal('maxRounds' in out.find, false, 'maxRounds 已取消');
     assert.equal('maxCandidates' in out.find, false, 'maxCandidates 已取消');
@@ -92,6 +95,17 @@ describe('② 渲染标记', () => {
     assert.equal(/深度查找上线后生效/.test(layerSrc), false, '不得再出现「待生效」横幅');
     assert.match(layerSrc, /findToolGroups/, '工具清单由服务端下发，前端不硬编码');
     assert.match(layerSrc, /检索定位提示词/, '提示词卡名称已改口径');
+  });
+
+  it('find 分组含「工具调用上限」：边界与默认值都读服务端 limits，且没有"不限制"档', () => {
+    assert.match(layerSrc, /工具调用上限/, '新增块必须渲染');
+    assert.match(layerSrc, /findMinToolCalls[\s\S]{0,80}findMaxToolCalls/s, '取值边界由服务端下发，前端不硬编码');
+    assert.match(layerSrc, /findToolCallsDefault/, '默认值也由服务端下发（「恢复默认」的目标值）');
+    assert.match(layerSrc, /maxToolCalls/, '要写进 find 配置域');
+    // 2026-11-19 用户拍板：默认 10 次，不允许"不限制"
+    assert.equal(/留空\s*=\s*不限制/.test(layerSrc), false, '不得再有「留空 = 不限制」的口径');
+    // 旧版 daemon 不返回上下界 → 必须锁住并说明，不能让人改完以为生效了
+    assert.match(layerSrc, /findCallsSupported/, '缺字段时要有降级判断');
   });
 
   it('find 分支不再沿用「未接入」文案', () => {

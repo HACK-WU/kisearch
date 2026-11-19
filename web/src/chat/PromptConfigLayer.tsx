@@ -368,6 +368,10 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   //    输入单位：返回上限用 **K 字符**（与上面同口径）；条数用 **条**。
   const [toolRespText, setToolRespText] = useState('');
   const [hitsText, setHitsText] = useState('');
+  // ── AI 查找 · 工具调用次数上限（2026-11-19）：恒有值，没有「不限制」档 ──
+  const [findCallsText, setFindCallsText] = useState('');
+  /** 用户是否清空过输入框；决定"空串"该不该判非法（见下方 findCallsInvalid 的注释） */
+  const [findCallsTouched, setFindCallsTouched] = useState(false);
   // ── AI 分析独立配置（REQ-20261113-003 · S-01）──
   const [analysisDefaultDirText, setAnalysisDefaultDirText] = useState('');
   const [analysisByScopeRows, setAnalysisByScopeRows] = useState<Array<{ scope: string; dir: string }>>([]);
@@ -511,6 +515,31 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   const findCfg: FindConfig = draft?.find ?? data?.defaults.find ?? EMPTY_FIND_CONFIG;
   const findMaxTargets = data?.limits.findMaxTargets ?? 5;
   /**
+   * 工具调用次数上限的边界与默认值（2026-11-19）。
+   *
+   * **缺失 = 旧版 daemon 不认这个配置项**（提交会被它静默丢弃）：此时锁住输入并明说原因，
+   * 而不是让用户改完以为生效了 —— 同层 capability 提示词上限用的就是这套口径。
+   *
+   * 这一项**没有"不限制"档**：生效值 = 配置值 ?? 服务端默认（10），界面永远显示一个具体次数。
+   */
+  const findCallsMin = data?.limits.findMinToolCalls;
+  const findCallsMax = data?.limits.findMaxToolCalls;
+  const findCallsDefault = data?.limits.findToolCallsDefault;
+  const findCallsSupported = findCallsMin !== undefined && findCallsMax !== undefined;
+  const findCallsEffective = findCfg.maxToolCalls ?? findCallsDefault;
+  const findCallsParsed = parseStrictInt(findCallsText);
+  const findCallsEmpty = findCallsText.trim() === '';
+  /**
+   * 空串只在**用户清空过**之后才算非法：首帧 `findCallsText` 还没被基线 effect 填上，
+   * 直接判非法会先闪一下红字警告（同层的条数 / 上下文窗口用"空 = 未覆盖 → 不算非法"规避了这点，
+   * 本项虽不允许空值，但提示时机应当一致）。
+   */
+  const findCallsInvalid = findCallsEmpty
+    ? findCallsTouched
+    : findCallsParsed === null
+      || (findCallsMin !== undefined && findCallsParsed < findCallsMin)
+      || (findCallsMax !== undefined && findCallsParsed > findCallsMax);
+  /**
    * 可选库 = 库 + 视图。
    *
    * 视图不是物理库，`ScopeMultiPicker` 只认 `ScopeInfo`，这里补一份最小载体：
@@ -545,6 +574,37 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     });
   };
 
+  /**
+   * 工具调用次数上限：输入 → 草稿。
+   *
+   * 只在**合法整数且在范围内**时落盘（越界交给界面提示，不做静默钳制）。
+   * 这一项**没有"不限制"**：留空属于非法输入，不落盘也不清空配置 ——
+   * 失焦时输入框回填当前生效值，避免界面留着一个"空 = 不限"的错觉。
+   */
+  const handleFindCallsInput = (v: string): void => {
+    setFindCallsText(v);
+    setFindCallsTouched(true);
+    const parsed = parseStrictInt(v);
+    const inRange = parsed !== null
+      && (findCallsMin === undefined || parsed >= findCallsMin)
+      && (findCallsMax === undefined || parsed <= findCallsMax);
+    if (inRange) {
+      mutateFind((f) => ({ ...f, maxToolCalls: parsed }), true);
+    }
+  };
+  /** 失焦：把非法（含留空）的输入回退成当前生效值，别让框里留一个不生效的数字/空值 */
+  const handleFindCallsBlur = (): void => {
+    flushPending();
+    if (!findCallsInvalid) return;
+    setFindCallsText(findCallsEffective !== undefined ? String(findCallsEffective) : '');
+    setFindCallsTouched(false);
+  };
+  const handleFindCallsReset = (): void => {
+    if (findCallsDefault === undefined) return;
+    setFindCallsText(String(findCallsDefault));
+    setFindCallsTouched(false);
+    mutateFind((f) => ({ ...f, maxToolCalls: findCallsDefault }));
+  };
 
   // ── AI 查找思考级别 ──（2026-11-18：轮次 / 候选数 / 超时上限整体取消，只留思考级别）
   const findEffortCurrent = findCfg.reasoningEffort ?? data?.reasoningEffortDefault;
@@ -783,6 +843,10 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     // 工具预算两个输入同样只在「基线变化」时同步（不随草稿逐字符刷新，避免打断输入）
     setToolRespText(String((next.toolResponseChars ?? (data.limits.toolResponseCharsDefault ?? 10000)) / 1000));
     setHitsText(String(next.searchHitsPerCall ?? data.limits.searchHitsDefault ?? 5));
+    // 查找侧的工具调用上限同理：只在基线变化时铺回，避免打断正在敲的值
+    // （没有"不限制"档 ⇒ 缺字段时铺服务端默认值，而不是留空）
+    setFindCallsText(String(next.find?.maxToolCalls ?? data.limits.findToolCallsDefault ?? ''));
+    setFindCallsTouched(false);
     // AI 分析独立配置域同步
     const a = next.analysis ?? data.defaults.analysis ?? EMPTY_ANALYSIS_CONFIG;
     /*
@@ -1944,7 +2008,54 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               {findEffortView.warn !== null && <p className="ki-chat-cfg__warn">{findEffortView.warn}</p>}
             </div>
 
-            {/* 5. 工具与权限 */}
+            {/* 5. 工具调用上限（2026-11-19）：限流 + 同一份数写进系统提示词 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                工具调用上限
+                <em className="ki-chat-cfg__badge">
+                  {findCallsEffective !== undefined ? `${findCallsEffective} 次` : '—'}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                单次查找最多让 AI 调用几次工具（检索 + 读正文合计）。这个次数会一并写进发给 AI 的提示词，让它先做规划。
+                {findCallsSupported ? `默认 ${findCallsDefault} 次，可填 ${findCallsMin}–${findCallsMax}；不能取消上限。` : ''}
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="ki-chat-cfg__ctxinput"
+                  aria-label="AI 查找工具调用上限"
+                  aria-invalid={findCallsSupported && findCallsInvalid || undefined}
+                  disabled={readOnly || !findCallsSupported}
+                  value={findCallsText}
+                  onChange={(e) => handleFindCallsInput(e.target.value)}
+                  onBlur={handleFindCallsBlur}
+                />
+                <span className="ki-chat-cfg__ctxunit">次</span>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || findCallsDefault === undefined || findCfg.maxToolCalls === findCallsDefault}
+                  onClick={handleFindCallsReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              {!findCallsSupported && (
+                <p className="ki-chat-cfg__warn">
+                  后端没有返回这一项的取值边界（可能是旧版本服务仍在运行）：改不了，重启服务后再试。
+                </p>
+              )}
+              {findCallsInvalid && findCallsSupported && (
+                <p className="ki-chat-cfg__warn">
+                  要填 {findCallsMin}–{findCallsMax} 之间的整数，不能留空（这一项没有「不限制」）。
+                </p>
+              )}
+            </div>
+
+            {/* 6. 工具与权限 */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
                 工具与权限

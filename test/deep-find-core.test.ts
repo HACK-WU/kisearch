@@ -142,3 +142,88 @@ describe('⑤⑥ 不可解析与过程数据', () => {
     assert.equal(res.candidates.length, 0);
   });
 });
+
+describe('⑦ 工具调用次数上限（2026-11-19）', () => {
+  /** 第 1 轮并发 3 个调用，第 2 轮给最终 JSON */
+  function streamParallel3(final: unknown): StreamFn {
+    let round = 0;
+    return async function* gen() {
+      round += 1;
+      if (round === 1) {
+        yield {
+          type: 'tool_calls',
+          calls: [1, 2, 3].map((i) => ({
+            id: `c${i}`,
+            name: 'ki_search',
+            arguments: JSON.stringify({ query: `q${i}` }),
+          })),
+        } as LlmStreamPart;
+        return;
+      }
+      yield { type: 'content', text: JSON.stringify(final) } as LlmStreamPart;
+    } as unknown as StreamFn;
+  }
+
+  /** 抓系统提示词：第 1 轮调个工具，第 2 轮给 JSON */
+  function streamCapturing(get: (sys: string) => void): StreamFn {
+    let round = 0;
+    return async function* gen(messages: ChatTurn[]) {
+      get(String(messages[0]?.content ?? ''));
+      round += 1;
+      if (round === 1) {
+        yield { type: 'tool_calls', calls: [{ id: 'c1', name: 'ki_search', arguments: '{}' }] } as LlmStreamPart;
+        return;
+      }
+      yield { type: 'content', text: JSON.stringify(OK_FINAL) } as LlmStreamPart;
+    } as unknown as StreamFn;
+  }
+
+  it('上限=2：一轮并发 3 个调用只执行 2 次（按单次调用判，不按轮）', async () => {
+    const res = await runDeepFindCore(baseArgs({
+      maxToolCalls: 2,
+      stream: streamParallel3(OK_FINAL),
+      runTool: async () => ({ text: '{"ok":true}' }),
+      cachesOf: () => new Map(),
+    }));
+    assert.equal(res.steps[0]!.metrics?.calls, 2, '并发超发是这里最容易出的错');
+    assert.equal(res.partial?.reason, 'budget', '面板据此说"次数用满"而不是"超时"');
+    assert.equal(res.partial?.usedCalls, 2);
+    // 达上限后仍要能拿到结论：收口轮必须真的跑过（否则用户只会看到"模型没给出结果"）
+    assert.equal(res.parsed, true, '收口轮要把已读证据收敛成可解析 JSON');
+  });
+
+  it('非整数 / 非有限值一律回落默认 15（提示词与限流必须同源）', async () => {
+    for (const bad of [Number.POSITIVE_INFINITY, 2.5, Number.NaN]) {
+      let sys = '';
+      await runDeepFindCore(baseArgs({
+        maxToolCalls: bad,
+        stream: streamCapturing((s) => { sys = s; }),
+        runTool: async () => ({ text: '{"ok":true}' }),
+        cachesOf: () => new Map(),
+      }));
+      assert.match(sys, /最多可以调用 15 次工具/, `${String(bad)} 必须回落 15 次`);
+      assert.equal(/Infinity|2\.5/.test(sys), false, `提示词里不得出现 ${String(bad)}`);
+    }
+  });
+
+  it('上限写进系统提示词；漏传时按默认 15 次兜住（没有"不限制"档）', async () => {
+    let sys = '';
+    await runDeepFindCore(baseArgs({
+      maxToolCalls: 3,
+      stream: streamCapturing((s) => { sys = s; }),
+      runTool: async () => ({ text: '{"ok":true}' }),
+      cachesOf: () => new Map(),
+    }));
+    assert.match(sys, /最多可以调用 3 次工具/, '上限必须提前告知模型，让它先规划');
+    assert.match(sys, /## 工具调用预算/);
+
+    sys = '';
+    const res = await runDeepFindCore(baseArgs({
+      stream: streamCapturing((s) => { sys = s; }),
+      runTool: async () => ({ text: '{"ok":true}' }),
+      cachesOf: () => new Map(),
+    }));
+    assert.match(sys, /最多可以调用 15 次工具/, '漏传上限时按默认 15 次注入（查找没有"不限制"档）');
+    assert.equal(res.partial, undefined, '只调了 1 次工具，不应产生 budget 收口');
+  });
+});

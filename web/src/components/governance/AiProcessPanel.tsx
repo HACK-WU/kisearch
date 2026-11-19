@@ -39,8 +39,11 @@ export interface AiProcessPanelProps {
   skippedTargets?: Array<{ name: string; reason: 'forbidden' | 'missing' | 'view-members-changed' }>;
   /** 部分库检索失败（其余结果仍有效）——「查不了」必须与「没内容」分开说 */
   targetErrors?: Array<{ name: string; error: string }>;
-  /** 深度通道：因硬超时提前结束（结果不完整，必须让用户知道）；2026-11-18 起轮次不再设限 */
-  partial?: { reason: 'timeout'; usedRounds: number };
+  /**
+   * 深度通道：提前结束（结果不完整，必须让用户知道）。
+   * `timeout` = 硬超时；`budget` = 工具调用次数用尽（2026-11-19）；`usedCalls` = 已执行的调用数。
+   */
+  partial?: { reason: 'timeout' | 'budget'; usedRounds: number; usedCalls?: number };
   /** 深度通道：模型给出但被校验剔除的条数 */
   unconfirmedCount?: number;
   /** 深度通道：模型输出是否可解析（false = 模型没给出结果，不是"没有相关文档"） */
@@ -198,7 +201,12 @@ export function AiProcessPanel(args: AiProcessPanelProps): JSX.Element {
       ) : null}
       {args.partial !== undefined ? (
         <p className="gov-ai-proc__degraded">
-          {`深度查找超时（已用 ${args.partial.usedRounds} 轮），下面的候选不完整；可缩小检索范围或改用快速查找。`}
+          {args.partial.reason === 'budget'
+            ? `工具调用次数已用满（${args.partial.usedCalls ?? '—'} 次），下面的候选不完整；可在「AI 设置 → AI 查找 → 工具调用上限」调高上限，或缩小检索范围后重试。`
+            : args.partial.reason === 'timeout'
+              ? `深度查找超时（已用 ${args.partial.usedRounds} 轮），下面的候选不完整；可缩小检索范围后重试。`
+              // 服务端 DTO 历史上还声明过 `rounds`，跨版本组合时按中性文案说，别把"轮次不够"说成"超时"
+              : `本次查找提前结束（已用 ${args.partial.usedRounds} 轮），下面的候选可能不完整；可缩小检索范围后重试。`}
         </p>
       ) : null}
       {args.unconfirmedCount !== undefined && args.unconfirmedCount > 0 ? (

@@ -70,6 +70,8 @@ describe('① 默认值', () => {
     assert.equal(d.maxRounds, undefined);
     assert.equal(d.maxCandidates, undefined);
     assert.equal(d.timeoutMs, undefined);
+    // 2026-11-19 用户拍板：工具调用上限**恒有值**（默认 15），没有"不限制"档
+    assert.equal(d.maxToolCalls, 15, '默认 15 次');
   });
 });
 
@@ -135,6 +137,35 @@ describe('④ 保存严格（400 且不落盘）', () => {
     const saved = savePromptConfig(cfg, legacy);
     assert.equal('timeoutMs' in (saved.find ?? {}), false, 'timeoutMs 已取消，不得写回');
     assert.equal('maxRounds' in (saved.find ?? {}), false, 'maxRounds 已取消，不得写回');
+  });
+
+  it('工具调用次数上限：越界 / 非整数 fail-loud 不落盘；读取路径只忽略该项', () => {
+    clearFile();
+    // 1 = 只够检索不够读正文（必然 0 候选）；31 = 超上界；2.5/0/-3/'5'/true = 类型或范围不对
+    for (const bad of [1, 31, 2.5, 0, -3, '5', true, null]) {
+      assert.throws(
+        () => savePromptConfig(cfg, { find: { maxToolCalls: bad } }),
+        PromptConfigError,
+        `maxToolCalls=${String(bad)} 必须被拒（不得静默钳制）`,
+      );
+    }
+    assert.equal(fs.existsSync(promptConfigPath(cfg)), false, '校验失败不得落盘');
+
+    const saved = savePromptConfig(cfg, { find: { maxToolCalls: 3 } });
+    assert.equal(saved.find?.maxToolCalls, 3, '合法值必须写回');
+    assert.equal(readPromptConfig(cfg).config.find?.maxToolCalls, 3, '读回同一份值');
+
+    // 读取路径：手改文件写坏 → 只忽略该项，其余配置照常（否则整份回退默认）
+    // 注意这里必须回落到**默认 15**而不是 undefined —— 查找不允许"不限制"
+    writeRaw({ version: 1, find: { maxToolCalls: 999, tools: { ki_search: false } } });
+    const r = readPromptConfig(cfg);
+    assert.equal(r.config.find?.maxToolCalls, 15, '非法值不得读回，回落到默认 15');
+    assert.equal(r.config.find?.tools.ki_search, false, '其余字段照常生效');
+    assert.ok(r.issue?.includes('find.maxToolCalls'), `应指出被忽略的字段，实际：${r.issue}`);
+
+    // 文件里根本没有这个键（老配置）→ 同样按默认 15 补齐
+    writeRaw({ version: 1, find: { tools: { ki_search: true } } });
+    assert.equal(readPromptConfig(cfg).config.find?.maxToolCalls, 15, '缺字段按默认 15 补齐');
   });
 
   it('未提交 find 时沿用磁盘既有值；提交 find 时镜像到 findPrompt', () => {
