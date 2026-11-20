@@ -1,9 +1,18 @@
 /**
  * 知识治理 · 对外契约（**形状 SSOT**）
  *
- * 本文件是 `/api/governance/*` 与 `ki_event_*` 工具返回体的权威定义。
+ * 本文件是 `/api/governance/*` 响应体的权威定义。
  * 前端副本：`web/src/api/governanceContract.ts`（web 是独立 package，不跨包 import）。
  * 两份形状一致性由 `test/governance-contract.test.ts` 机械比对，**任一侧改动都会红**。
+ *
+ * **覆盖边界（2026-11-20 校正）**：
+ *   · 已纳入：与 HTTP 响应对应的 DTO；`ki_event_get` 的详情体（`EventDetailResponseDto`）。
+ *   · **未纳入**：`ki_event_list` 的返回体 —— 它与 HTTP 列表是**两套形状**
+ *     （含 `type` 对象 / `visibility` / `closed` / 分析摘要等），且尚无契约类型，
+ *     改动时不要照 HTTP 的 `EventListItem` 改。
+ *   · 约束不止"两份副本一致"：实现层的响应组装函数返回类型直接标注本文件的 DTO
+ *     （如 `src/lib/events/event-view.ts`），改动会被 tsc 拦下；
+ *     `test/governance-contract-live.test.ts` 另守一条"契约必须被实现 import"。
  *
  * 改动规则：
  *   1. 字段只增不改名；确需改名要先改本文件 + 前端副本 + 测试，并回写 design/S06；
@@ -26,6 +35,13 @@ export interface VisibilitySummary {
   hidden: number;
 }
 
+/**
+ * 事件类型的摘要。
+ *
+ * 现状（2026-11-20 核对）：**没有消费方** —— HTTP 列表已不含 `type` 对象（只有 `typeName`），
+ * MCP `ki_event_list` 返回的 `{ id, name }` 是它的子集但未标注本类型。
+ * 保留是为后续把两条列表口径统一时复用；不要因为"看起来有人用"就照它改列表响应。
+ */
 export interface EventTypeSummary {
   id: string;
   name: string;
@@ -66,6 +82,10 @@ export interface EventRefSummary {
  * 三个实现层从不产出的幽灵字段；补上 `scope`/`typeId`/`typeName`/`stageKey`/`stageIndex`/
  * `description`/`revision`/`createdAt`/`memberTotal` 九个一直在返回却未被声明的字段。
  * 约束通道见 `src/lib/events/event-view.ts`（返回类型即本接口）。
+ *
+ * **仅 HTTP 列表**：MCP `ki_event_list` 是另一套形状（`shortId` 带 `#`、含 `type` 对象 /
+ * `visibility` / `closed` / 分析摘要，无 `scope`/`revision`/`visibilitySummary`），
+ * 别拿本接口去校 MCP 的返回体。
  */
 export interface EventListItem {
   id: string;

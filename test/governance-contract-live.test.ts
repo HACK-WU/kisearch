@@ -8,7 +8,8 @@
  * 本文件补的是那条缺失的边：
  *   ① 契约文件**必须被实现层 import**（根因守卫：退回「手工平行描述」立即红）；
  *   ② 列表响应的**真实键集**与契约字段集双向一致（幽灵 / 未声明都要红）；
- *   ③ 组装点**不得把返回类型放宽**为 `Record<string, unknown>`（编译期约束的唯一支点）。
+ *   ③ `EventRecord` 的每个字段都进响应（逐字段改造后不再有 spread 兜底，防静默丢字段）；
+ *   ④ 组装点**不得把返回类型放宽**为 `Record<string, unknown>`（编译期约束的唯一支点）。
  *
  * 运行：env -u NODE_OPTIONS -u BASH_ENV npx jiti test/governance-contract-live.test.ts
  */
@@ -76,17 +77,19 @@ describe('① 契约必须与实现耦合（根因守卫）', () => {
 });
 
 describe('② 列表响应键集与契约双向一致', () => {
-  /** 一份最小的服务层列表项（不依赖真实 kb 数据） */
+  /** 一份最小的服务层列表项（不依赖真实 kb 数据）；可选字段也填上，供④校验透传完整性 */
   const sample: EventListItemView = {
     event: {
       id: 'evt_test',
       shortId: 1,
       scope: 'kb',
       title: 'T',
+      description: 'D',
       typeId: 'et_1',
       stageKey: 'st_1',
       stageIndex: 0,
       closedAt: null,
+      pinnedAt: 5,
       revision: 1,
       createdAt: 1,
       updatedAt: 2,
@@ -119,7 +122,42 @@ describe('② 列表响应键集与契约双向一致', () => {
   });
 });
 
-describe('③ 组装点不得放宽返回类型', () => {
+describe('③ EventRecord 字段必须全部进入列表响应', () => {
+  /*
+   * 为什么需要：`toEventListView` 从 `...item.event` 展开改成了逐字段显式列出。
+   * 好处是幽灵字段能被 tsc 抓到，代价是 **`EventRecord` 以后新增字段不会自动进响应**
+   * （返回类型是 EventListItem 而非 EventRecord，tsc 不会报）。
+   * 这条用例就是那个代价的守卫：记录类型上的字段必须在真实响应里出现。
+   */
+  const recordFields = parseInterfaces(
+    fs.readFileSync(path.join(ROOT, 'src/lib/events/types.ts'), 'utf8'),
+  ).get('EventRecord') ?? [];
+  const view = toEventListView({
+    event: {
+      id: 'evt_test', shortId: 1, scope: 'kb', title: 'T', description: 'D',
+      typeId: 'et_1', stageKey: 'st_1', stageIndex: 0, closedAt: null, pinnedAt: 5,
+      revision: 1, createdAt: 1, updatedAt: 2,
+    },
+    type: null,
+    stage: { key: 'st_1', name: '排查中', index: 0, visibility: 'hidden' },
+    members: [],
+    memberTotal: 0,
+    visibilitySummary: { full: 0, ftsOnly: 0, hidden: 0 },
+  }, 'kb') as Record<string, unknown>;
+
+  it('解析到 EventRecord 且字段数 > 5', () => {
+    assert.ok(recordFields.length > 5, `EventRecord 解析异常：${recordFields.join(', ')}`);
+  });
+
+  it('每个 EventRecord 字段都出现在响应里', () => {
+    const missing = recordFields
+      .map((f) => f.replace(/\?$/, ''))
+      .filter((f) => !(f in view));
+    assert.deepEqual(missing, [], `以下记录层字段被逐字段改造漏掉了：${missing.join(', ')}`);
+  });
+});
+
+describe('④ 组装点不得放宽返回类型', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src/lib/events/event-view.ts'), 'utf8');
 
   it('`toEventListView` 返回类型必须是契约 DTO', () => {

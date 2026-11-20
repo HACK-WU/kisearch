@@ -23,7 +23,7 @@ import { readRefs } from './refs-store.js';
 import { readStageLogs } from './stage-log.js';
 import { readAnalysisDocRaw, normalizeAnalysisDocForRead } from './analysis-store.js';
 import type {
-  ConclusionNode, EventAnalysisDoc, EventRecord, EventStage, EventStageLog, EventTypeRecord, Visibility,
+  EventAnalysisDoc, EventRecord, EventStage, EventStageLog, EventTypeRecord, Visibility,
 } from './types.js';
 import type { EventDetailResponseDto } from '../governance-contract.js';
 

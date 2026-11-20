@@ -822,8 +822,7 @@ export async function handleGovernanceRoutes(
         const typeScope = typeRaw && typeSep > 0 ? typeRaw.slice(0, typeSep) : null;
         const typeId = typeRaw ? (typeSep > 0 ? typeRaw.slice(typeSep + 1) : typeRaw) : null;
 
-        // 形状组装已抽到 events/event-view.ts（返回类型绑契约 DTO）
-        const toView = toEventListView;
+        // 形状组装已抽到 events/event-view.ts（返回类型绑契约 DTO），这里不再本地拼
 
         if (targets.view) {
           const buckets: Array<{ scope: string; total?: number; error?: string }> = [];
@@ -880,7 +879,7 @@ export async function handleGovernanceRoutes(
              * 某库 total > limit 时会误报「没有更多」（47 条只加载 20 条却 hasMore=false）。
              */
             hasMore: offset + page.length < total,
-            events: page.map(({ scope: member, item }) => toView(item, member)),
+            events: page.map(({ scope: member, item }) => toEventListView(item, member)),
             buckets,
             ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
             ...(targets.truncated ? { truncated: true } : {}),
@@ -901,7 +900,7 @@ export async function handleGovernanceRoutes(
           scope: targets.requested,
           total: result.total,
           hasMore: result.hasMore,
-          events: result.items.map((item) => toView(item, targets.members[0])),
+          events: result.items.map((item) => toEventListView(item, targets.members[0])),
         });
       }
 
