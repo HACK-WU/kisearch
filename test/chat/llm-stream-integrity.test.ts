@@ -40,6 +40,28 @@ describe('LLM stream integrity', () => {
       ]);
     });
   });
+  /*
+   * 2026-11-20：上游「连接不断但也不出字」时的保护。
+   * 首块超时只管一个字节都没来；整体超时要等满预算（默认 5 分钟）。
+   * 两段之间的静默必须由 idle 超时兜住，否则用户看到的就是一直「正在思考」。
+   */
+  it('idle timeout: aborts and reports phase=idle when the stream goes silent after first chunk', async () => {
+    await withUpstream((res) => {
+      sse(res);
+      res.write(frame(content('第一段')));
+      // 故意既不 end 也不再写：模拟上游挂住（连接保持、心跳不出）
+    }, async (llm) => {
+      const events: LlmStreamPart[] = [];
+      await assert.rejects(async () => {
+        for await (const part of streamChat([{ role: 'user', content: 'hi' }], {
+          llm, firstByteTimeoutMs: 1000, requestTimeoutMs: 5000, idleTimeoutMs: 120,
+        })) events.push(part);
+      }, (err: unknown) => err instanceof LlmTimeoutError && (err as LlmTimeoutError).phase === 'idle');
+      // 中断前已收到的内容必须保留（与 abort 语义一致），否则用户白等
+      assert.deepEqual(events, [{ type: 'content', text: '第一段' }]);
+    });
+  });
+
   it('accepts finish_reason without DONE and flushes a terminal tail frame and split UTF-8', async () => {
     await withUpstream((res) => {
       sse(res);

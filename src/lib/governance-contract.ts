@@ -521,6 +521,8 @@ export interface ConfirmedCodeLocationDto {
 export interface EventAnalysisDto {
   draft: AnalysisDraftDto | null;
   confirmed: ConfirmedCodeLocationDto[];
+  /** 是否还有可继续的分析断点（2026-11-20）；前端据此显示「继续分析」 */
+  resumeAvailable?: boolean;
 }
 
 /** 一轮「追问这次分析」的问答（B2） */

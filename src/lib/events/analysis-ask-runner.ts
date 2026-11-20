@@ -32,6 +32,7 @@ import {
 } from '../chat/prompt-config.js';
 import { serializeToolResponse } from '../chat/retrieval/tool-response.js';
 import { GovernanceError } from '../governance-errors.js';
+import { inferAnalysisView } from './analysis-view.js';
 import { chainToLines } from './conclusion-chain.js';
 import {
   isAnalysisActive,
@@ -77,6 +78,12 @@ export interface AskTargetEvent {
   shortId?: number;
   title: string;
   description?: string | null;
+  /**
+   * 事件类型 id（2026-11-20）：只用于把结论链的措辞对齐到本次分析的视角 ——
+   * 卡面写「差距与成因」、喂给模型写「根本原因」会让模型顺着错词答。
+   * 缺省（旧调用方 / 测试）按原模板 `fault` 处理。
+   */
+  typeId?: string;
 }
 
 /**
@@ -153,7 +160,7 @@ function buildContext(args: {
    * 二者共用 `conclusionChars` 预算（口径是"结论区总字数"）。
    */
   const conclusion = draft.conclusion ?? '';
-  const chainLines = chainToLines(draft.chain ?? []);
+  const chainLines = chainToLines(draft.chain ?? [], inferAnalysisView(event.typeId));
   const conclusionBody = [conclusion, ...chainLines].filter(Boolean).join('\n');
   const cands = draft.candidates.slice(0, CANDIDATES_USED);
   const locs = confirmed.slice(0, CONFIRMED_USED);
@@ -372,6 +379,7 @@ export async function askEventAnalysis(
           signal: controller.signal,
           requestTimeoutMs: cfg.llm?.requestTimeoutMs ?? ANALYSIS_REQUEST_TIMEOUT_MS,
           firstByteTimeoutMs: cfg.llm?.firstByteTimeoutMs ?? 30_000,
+          idleTimeoutMs: cfg.llm?.idleTimeoutMs ?? 60_000,
           llm: {
             baseURL: cfg.llm?.baseURL ?? '',
             apiKey: cfg.llm?.apiKey ?? '',

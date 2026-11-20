@@ -125,6 +125,14 @@ export const GOVERNANCE_CODE_NUMBERS = {
   FIND_CANCELED: 1427,
   /** 排队等待超过上限（同事件串行；不无限等） */
   FIND_QUEUE_TIMEOUT: 1428,
+  /**
+   * 查找失败但没有更具体的码（上游模型传输错误、内部异常）。
+   *
+   * 存在的理由：流式（SSE）分支必须把错误当事件下发，此时 HTTP 状态码已发出（恒 200），
+   * 前端只能靠这个字段区分失败类型；把非 `GovernanceError` 的异常原样抛给上层会二次
+   * `writeHead`（ERR_HTTP_HEADERS_SENT），实测会让整个 daemon 退出。
+   */
+  FIND_FAILED: 1429,
 
   /** 通用 / 传输层（1500-1599）── */
   /** Token 无权访问该 scope（HTTP 层 403；**不复用** DATASOURCE_LIFECYCLE_LOCKED，
@@ -151,6 +159,8 @@ export const GOVERNANCE_CODE_NUMBERS = {
   ANALYSIS_ASK_BUSY: 1617,
   /** 追问：硬超时（45s）且未产出任何内容 */
   ANALYSIS_ASK_TIMEOUT: 1618,
+  /** 续跑：没有可继续的断点（已过期 / 已完成 / 与当前草稿不是同一次） */
+  ANALYSIS_RESUME_UNAVAILABLE: 1621,
   /** 追问（带工具再调查，2026-11-19）：独立限流 6 次/60s·scope 超限 */
   ANALYSIS_FOLLOWUP_RATE_LIMITED: 1619,
   /** 追问：独立并发闸（2）已满 */
@@ -209,6 +219,7 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   FIND_TIMEOUT: 504,
   FIND_CANCELED: 499,
   FIND_QUEUE_TIMEOUT: 429,
+  FIND_FAILED: 500,
   // ── 治理域历史码（原先只在 governance-http 的本地表里，2026-11-17 合并至此单表）──
   RESTORE_NAME_CONFLICT: 409,
   REVISION_CONFLICT: 409,
@@ -233,6 +244,7 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   ANALYSIS_FOLLOWUP_RATE_LIMITED: 429,
   ANALYSIS_FOLLOWUP_BUSY: 429,
   ANALYSIS_LLM_UNAVAILABLE: 503,
+  ANALYSIS_RESUME_UNAVAILABLE: 409,
   REF_LIMIT_EXCEEDED: 409,
   DOC_BOUND_TO_OTHER_EVENT: 409,
   EVENT_MEMBER_LIMIT_EXCEEDED: 409,

@@ -71,7 +71,9 @@ import {
   listActiveAnalysisIds,
   readNormalizedAnalysisDoc,
   startEventAnalysis,
+  listFinishedAnalysis,
 } from './events/analysis-runner.js';
+import { hasResume } from './events/analysis-resume.js';
 import {
   ASK_DOC_MAX_BYTES,
   ASK_DOC_MAX_TURNS,
@@ -188,6 +190,18 @@ function readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
 }
 
 function fail(res: ServerResponse, err: unknown): void {
+  /*
+   * **响应头已发出时不能再写 JSON**（流式 / SSE 分支）。
+   *
+   * 二次 `writeHead` 会抛 `ERR_HTTP_HEADERS_SENT`，而这里处于请求处理器的 `catch` 里，
+   * 该异常没有上层捕获 → `unhandledRejection` → **整个 daemon 退出**（实测复现，
+   * 见 `.debug/find-stream-error-20261120/`）。流式分支已自行以事件下发错误，这里只需收尾。
+   */
+  if (res.headersSent) {
+    console.error(`[governance] 响应头已发出后仍走了统一错误出口：${(err as Error)?.message ?? String(err)}`);
+    if (!res.writableEnded) res.end();
+    return;
+  }
   if (err instanceof GovernanceError) {
     sendJson(res, httpStatusFor(err.code), {
       ok: false,
@@ -937,11 +951,17 @@ export async function handleGovernanceRoutes(
         const targets = readTargets(str(q.get('scope')));
         // 分析中的 id 是 `evt_…`（近似全局唯一），直接合并即可
         const ids = targets.members.flatMap((member) => listActiveAnalysisIds(member));
+        /*
+         * `finished`（2026-11-20）：最近结束的分析，供列表行显示「分析完成 / 分析失败」。
+         * 与 `ids` 同源（进程内缓存，无磁盘 IO）—— 重启后为空，只是少一个提示，不会显示错状态。
+         */
+        const finished = targets.members.flatMap((member) => listFinishedAnalysis(member));
         return sendJson(res, 200, {
           ok: true,
           scope: targets.requested,
           ...(targets.view ? { view: targets.view } : {}),
           ids,
+          finished,
         });
       }
 
@@ -1019,7 +1039,15 @@ export async function handleGovernanceRoutes(
           event: detail.event,
           members: detail.members.map((m) => ({ group: m.group, name: m.name })),
           logs: detail.logs,
-          analysis: { draft: detail.analysis.draft, confirmed: detail.analysis.confirmed },
+          analysis: {
+            draft: detail.analysis.draft,
+            confirmed: detail.analysis.confirmed,
+            /*
+             * 是否还有可继续的断点（2026-11-20）：只 stat 一个文件，代价可忽略。
+             * 前端据此把「重新分析」换成「继续分析」—— 不能靠 status 猜，断点可能已过期或被清理。
+             */
+            resumeAvailable: hasResume(scope, detail.event.id),
+          },
         });
       }
 
@@ -1038,7 +1066,10 @@ export async function handleGovernanceRoutes(
       if (id && segs[2] === 'analyze' && method === 'POST' && !segs[3]) {
         const b = await body();
         const scope = scopeFromBody(b);
-        const started = await startEventAnalysis(scope, id, { forceOverwrite: b.forceOverwrite === true });
+        const started = await startEventAnalysis(scope, id, {
+          forceOverwrite: b.forceOverwrite === true,
+          resume: b.resume === true,
+        });
         return sendJson(res, started.reused ? 200 : 202, {
           ok: true,
           scope,
@@ -1471,6 +1502,25 @@ export async function handleGovernanceRoutes(
                 return true;
               }
               return sendJson(res, 200, payload);
+            } catch (err) {
+              /*
+               * **流式分支没有 HTTP 状态码可用**：200 + text/event-stream 在跑查找之前就发出去了，
+               * 门禁失败（FIND_LLM_UNAVAILABLE / FIND_TIMEOUT / FIND_BUSY …）只能以事件下发。
+               *
+               * 不加这段时的实测后果（2026-11-20 复现）：错误冒到下面的统一出口 → 二次 writeHead
+               * → ERR_HTTP_HEADERS_SENT → 未捕获 → daemon 退出；客户端只看到连接被掐断，
+               * 面板显示「流式响应未返回结果（连接可能被中断）」，真实原因（超时 / 模型不可用）全丢。
+               */
+              if (!sseStep) throw err;
+              const ge = err instanceof GovernanceError ? err : null;
+              res.write(`event: error\ndata: ${JSON.stringify({
+                ok: false,
+                code: ge?.code ?? 'FIND_FAILED',
+                error: (err as Error)?.message ?? String(err),
+                ...(ge?.details ? { details: ge.details } : {}),
+              })}\n\n`);
+              res.end();
+              return true;
             } finally {
               req.removeListener('close', onClose);
             }

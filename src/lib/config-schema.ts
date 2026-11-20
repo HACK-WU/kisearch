@@ -408,6 +408,7 @@ const CONFIG_SCHEMA: ConfigNode = {
         temperature: { type: 'number' },
         requestTimeoutMs: { type: 'number', validate: positiveInt },
         firstByteTimeoutMs: { type: 'number', validate: positiveInt },
+        idleTimeoutMs: { type: 'number', validate: positiveInt },
         defaultSystemPrompt: { type: 'string' },
         supportsImages: { type: 'boolean' },
         maxImagesPerMessage: { type: 'number', validate: positiveInt },

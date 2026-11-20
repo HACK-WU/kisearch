@@ -110,9 +110,10 @@ after(() => {
 beforeEach(() => {
   restoreUnlink();
   restoreWrite();
-  if (realExists(lockPath)) realUnlinkSync(lockPath);
-  if (realExists(lockPath2)) realUnlinkSync(lockPath2);
-  if (realExists(lockPath3)) realUnlinkSync(lockPath3);
+  for (const p of [lockPath, lockPath2, lockPath3]) {
+    if (realExists(p)) realUnlinkSync(p);
+    if (realExists(`${p}.stale`)) realUnlinkSync(`${p}.stale`);
+  }
 });
 
 async function loadLock() {
@@ -127,29 +128,40 @@ describe('scope 写锁的释放与残留自愈', () => {
     assert.equal(realExists(lockPath), false);
   });
 
-  it('2) 删除失败留下残留 → 同进程再次取锁自愈成功（核心回归）', async () => {
+  it('2) 删除被拦 → 改名让路（不留锁），下一次取锁直接成功', async () => {
     const { withScopeWriteLock } = await loadLock();
     installDeleteBlocker();
     const first = await withScopeWriteLock(SCOPE, 'probe', async () => 'first');
     assert.equal(first, 'first');
-    assert.equal(realExists(lockPath), true, '删除被拦后锁应残留');
+    // 2026-11-20 起：删除守卫拦截时改用 rename 让路，锁路径必须已让出
+    assert.equal(realExists(lockPath), false, '删除被拦后锁路径应已让出（改名为 .stale）');
+    assert.equal(realExists(`${lockPath}.stale`), true, '应留下 .stale 残骸作为证据');
     restoreUnlink();
 
-    // 修复前：这里抛 SCOPE_OPERATION_BUSY（用户看到的「正在同步」）
     const second = await withScopeWriteLock(SCOPE, 'probe', async () => 'second');
     assert.equal(second, 'second');
-    assert.equal(realExists(lockPath), false, '自愈后应正常释放');
+    assert.equal(realExists(lockPath), false, '正常释放');
   });
 
-  it('3) 残留且始终无法删除 → 报 SCOPE_LOCK_STALE_UNREMOVABLE，不谎称正在同步', async () => {
+  it('3) 删除与改名双双被拦 → 报 SCOPE_LOCK_STALE_UNREMOVABLE，不谎称正在同步', async () => {
     const { withScopeWriteLock } = await loadLock();
     installDeleteBlocker();
-    await withScopeWriteLock(SCOPE, 'probe', async () => 'first');
-    await assert.rejects(
-      () => withScopeWriteLock(SCOPE, 'probe', async () => 'second'),
-      (err: NodeJS.ErrnoException) => err.code === 'SCOPE_LOCK_STALE_UNREMOVABLE',
-    );
-    restoreUnlink();
+    // 连 rename 也拦掉（模拟「守卫涵盖所有清理手段」的最坏环境）
+    const realRename = fs.renameSync.bind(fs);
+    (fs as unknown as { renameSync: (a: string, b: string) => void }).renameSync = (a: string, b: string) => {
+      if (String(a).endsWith('.lock')) throw Object.assign(new Error('rename blocked'), { code: 'EPERM' });
+      return realRename(a, b);
+    };
+    try {
+      await withScopeWriteLock(SCOPE, 'probe', async () => 'first');
+      await assert.rejects(
+        () => withScopeWriteLock(SCOPE, 'probe', async () => 'second'),
+        (err: NodeJS.ErrnoException) => err.code === 'SCOPE_LOCK_STALE_UNREMOVABLE',
+      );
+    } finally {
+      (fs as unknown as { renameSync: typeof fs.renameSync }).renameSync = realRename;
+      restoreUnlink();
+    }
   });
 
   it('4) 锁归外部存活进程 → 仍然 busy', async () => {
@@ -206,7 +218,8 @@ describe('scope 写锁的释放与残留自愈', () => {
       installWriteBlocker();
       installDeleteBlocker();
       await assert.rejects(() => withScopeWriteLock(SCOPE3, 'probe', async () => 'x'), /mock ENOSPC/);
-      assert.equal(realExists(lockPath3), true, '半截锁应残留');
+      // 2026-11-20 起：删除被拦时改名让路，半截锁不在原位（否则会永久挡住该 scope）
+      assert.equal(realExists(lockPath3), false, '半截锁应已让路');
     } finally {
       restoreWrite();
       restoreUnlink();

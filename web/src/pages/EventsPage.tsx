@@ -58,6 +58,14 @@ const SORT_LABEL: Record<SortKey, string> = {
 };
 
 /** 已置顶 = `pinnedAt` 有正数（后端缺省为 undefined，详情 DTO 为 null） */
+/**
+ * 「这条事件的分析结果我看过了」的本地记录（eventId → runId）。
+ *
+ * 为什么放 localStorage 而不是后端字段：它只是**未读提示**，跨设备不同步可以接受；
+ * 放后端要改契约与 DTO，代价远大于收益。重新分析会产生新 runId → 提示自动回来。
+ */
+const SEEN_ANALYSIS_KEY = 'ki-web:analysis-seen';
+
 function isPinnedEvent(e: Pick<EventView, 'pinnedAt'>): boolean {
   return typeof e.pinnedAt === 'number' && e.pinnedAt > 0;
 }
@@ -218,6 +226,24 @@ export function EventsPage(): JSX.Element {
    * 不做「列表全量刷新」：那会带来滚动位置与请求竞态，而这里只需要一个标记。
    */
   const [runningIds, setRunningIds] = useState<Set<string>>(() => new Set());
+  /**
+   * 最近结束的分析（2026-11-20）：列表行据此显示「分析完成 / 分析失败」。
+   * 与 `runningIds` 同一个 4s 轮询；后端是进程内缓存，daemon 重启后为空
+   * —— 只是少一个提示，不会显示错状态（真实状态以详情页读盘为准）。
+   */
+  const [finishedRuns, setFinishedRuns] = useState<Record<string, { status: string; runId: string }>>({});
+  /**
+   * 用户已经「看过」的分析结果：`eventId → runId`，存 localStorage。
+   * 只有 `runId` 相同才算看过 —— 重新分析会产生新 runId，提示自动回来。
+   */
+  const [seenAnalysis, setSeenAnalysis] = useState<Record<string, string>>(() => {
+    try {
+      const raw = localStorage.getItem(SEEN_ANALYSIS_KEY);
+      return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  });
   useEffect(() => {
     let alive = true;
     const tick = async (): Promise<void> => {
@@ -226,6 +252,9 @@ export function EventsPage(): JSX.Element {
         const res = await listRunningAnalyses(scope);
         if (!alive) return;
         setRunningIds(new Set(res.ids));
+        const next: Record<string, { status: string; runId: string }> = {};
+        for (const f of res.finished ?? []) next[f.eventId] = { status: f.status, runId: f.runId };
+        setFinishedRuns(next);
       } catch {
         // 轮询失败不打扰用户：下一轮会重试（刚重启 daemon 时这里会短暂为空）
       }
@@ -406,6 +435,15 @@ export function EventsPage(): JSX.Element {
    * 只丢弃过期响应，不改请求本身、不改接口签名。
    */
   const listSeq = useRef(0);
+  /**
+   * 刷新按钮的最短转圈时长（2026-11-20 用户反馈「点了没动画」）。
+   *
+   * 本地请求常 30~80ms 就返回，`is-loading` 只存在一两帧，肉眼等于没反应。
+   * 手动点击后至少转 600ms 再复位 —— 不是假装在加载，而是让「我点了」有可感知的反馈；
+   * 列表已经在 `listLoading` 里，这里只负责把视觉时长兜住。
+   */
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshTimer = useRef<number | null>(null);
 
   const loadList = useCallback(async () => {
     const seq = ++listSeq.current;
@@ -538,6 +576,37 @@ export function EventsPage(): JSX.Element {
     }
   }, [scope]);
 
+  /**
+   * 刷新左侧列表（2026-11-20：刷新按钮归属列表，放回列表区，不再占页头）。
+   *
+   * 三件事一起做：重取列表 → 已选中时顺带刷新详情 → **至少转 600ms** 再复位。
+   * 最后一件事是为了让点击有可见反馈：本地请求常 30~80ms 返回，`listLoading` 只活一两帧，
+   * 用户会以为按钮没反应。
+   */
+  const refreshList = useCallback((): void => {
+    if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
+    setRefreshing(true);
+    const startedAt = Date.now();
+    void (async () => {
+      try {
+        await loadList();
+        /*
+         * 详情不跟着刷会让人以为「刷了还是旧的」：列表里的标题变了、右栏还停在旧阶段。
+         * 只在已有选中时刷，避免首次进页面并发两条同样的详情请求。
+         */
+        if (activeId) await loadDetail(activeId);
+      } finally {
+        const rest = Math.max(0, 600 - (Date.now() - startedAt));
+        refreshTimer.current = window.setTimeout(() => setRefreshing(false), rest);
+      }
+    })();
+  }, [loadList, loadDetail, activeId]);
+
+  /** 卸载时清掉「最短转圈」计时器：600ms 内切走页面不该留一个悬空 setTimeout */
+  useEffect(() => () => {
+    if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
+  }, []);
+
   useEffect(() => {
     setDelConfirm(false);
     setDescEdit({ open: false, draft: '', saving: false });
@@ -582,6 +651,25 @@ export function EventsPage(): JSX.Element {
     return () => { alive = false; };
   }, [active?.id, eventScope]);
   const activeAnalysis = detail?.event.id === active?.id ? (detail?.analysis ?? null) : null;
+  /**
+   * 点开事件 = 看过这次结果（2026-11-20）：把当前 draft 的 runId 记进 localStorage，
+   * 列表行上的「分析完成」随即消失。只认 runId —— 重新分析后徽标会再次出现。
+   */
+  const activeAnalysisRunId = activeAnalysis?.draft?.runId ?? null;
+  useEffect(() => {
+    const eventId = active?.id;
+    if (!eventId || !activeAnalysisRunId) return;
+    setSeenAnalysis((prev) => {
+      if (prev[eventId] === activeAnalysisRunId) return prev;
+      const next = { ...prev, [eventId]: activeAnalysisRunId };
+      try {
+        localStorage.setItem(SEEN_ANALYSIS_KEY, JSON.stringify(next));
+      } catch {
+        /* 存储不可用（隐私模式等）只是记不住已读，不影响其他行为 */
+      }
+      return next;
+    });
+  }, [active?.id, activeAnalysisRunId]);
   const type = useMemo(
     () => types.find((t) => t.id === (active?.typeId ?? '')) ?? null,
     [types, active],
@@ -716,7 +804,7 @@ export function EventsPage(): JSX.Element {
       <div
         key={`${event.scope ?? ''}:${event.id}`}
         data-event-id={event.id}
-        className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}${runningIds.has(event.id) ? ' gov-ev--running' : ''}`}
+        className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}${runningIds.has(event.id) || finishedRuns[event.id] ? ' gov-ev--running' : ''}`}
         onClick={() => selectEvent(event.id)}
       >
         <div className="gov-ev__title">
@@ -806,7 +894,37 @@ export function EventsPage(): JSX.Element {
             <span className="gov-ev__running-dot" aria-hidden="true" />
             分析中
           </span>
-        ) : null}
+        ) : (() => {
+          /*
+           * 「分析完成 / 分析失败」（2026-11-20）：跑完但用户还没点开的那条，行上要看得出来，
+           * 否则跑完与本就没分析过长一个样。点开详情即记为已读（runId 相同就不再提示）。
+           */
+          const done = finishedRuns[event.id];
+          if (!done) return null;
+          const seen = seenAnalysis[event.id] === done.runId;
+          if (done.status === 'ready' || done.status === 'partial') {
+            if (seen) return null;
+            return (
+              <span
+                className="gov-ev__running gov-ev__running--done"
+                title={done.status === 'partial' ? '分析已完成（有未定位到的部分），结果未查看' : '分析已完成，结果未查看'}
+              >
+                <span className="gov-ev__running-dot" aria-hidden="true" />
+                {/* 行内用 4 字以内，完整语义放 title：浮标压在标题右侧，文案越长标题让位越多 */}
+                {done.status === 'partial' ? '部分完成' : '分析完成'}
+              </span>
+            );
+          }
+          if (done.status === 'failed') {
+            return (
+              <span className="gov-ev__running gov-ev__running--failed" title="分析失败：点开详情可看失败原因">
+                <span className="gov-ev__running-dot" aria-hidden="true" />
+                分析失败
+              </span>
+            );
+          }
+          return null;
+        })()}
       </div>
     );
   };
@@ -819,7 +937,13 @@ export function EventsPage(): JSX.Element {
   return (
     // `--fill` 只在列表视图挂：它让高度链一路撑到视口底（见上方 `--noscroll` 的注释）
     <div className={`gov-page${tab === 'list' ? ' gov-page--fill' : ''}`}>
-      <header className="gov-head">
+      {/*
+       * 页头栅格（2026-11-20 用户要求「类型按钮与事件详情卡片左对齐」）：
+       * 只有事件页用 `--events` 三列（300 左列 / 中列 / 右列），与下方 `.gov-split` 的
+       * 300px+16 栅格一致 → 筛选按钮的 x 与右侧详情卡片的 x 天然相等。
+       * 不加修饰类会影响 TrashPage / LifecyclePage 复用同一个 `.gov-head`。
+       */}
+      <header className="gov-head gov-head--events">
         <p className="gov-head__path">
           <span className="gov-badge gov-badge--kb">{scope}</span>
           {/* 计数读取失败时整段不渲染：留空 span 会让 flex gap 多出一段空白，也会让人以为"0 个" */}
@@ -827,6 +951,66 @@ export function EventsPage(): JSX.Element {
             <span className="gov-cell-muted">未收口 {counts.open} · 已收口 {counts.closed}</span>
           ) : null}
         </p>
+        {/*
+         * 中列 = 筛选按钮 + 搜索框（2026-11-20 用户要求）：整列起点与右侧详情卡左边界对齐，
+         * 搜索框紧跟「最近更新」右侧。只在「事件列表」视图渲染 —— 「事件类型」页没有事件可过滤。
+         */}
+        <div className="gov-head__mid">
+        {/*
+         * 筛选：类型 / 状态 / 排序不再单独占一行。
+         */}
+        {tab === 'list' ? (
+          <div className="gov-head__filters">
+            <DropdownFilter
+              label="类型"
+              value={typeFilter}
+              options={[
+                { value: '', label: '全部类型' },
+                ...types.map((t) => ({
+                  /*
+                   * 视图下裸 id（`et_1`）在每个库都存在 → 必须用 `库:et_N` 精确定位；
+                   * label 带库名，否则两库里同名的自定义类型无法区分。
+                   */
+                  value: t.typeKey ?? t.id,
+                  label: t.scope ? `${t.scope} · ${t.name}` : t.name,
+                })),
+              ]}
+              onChange={setTypeFilter}
+            />
+            <DropdownFilter
+              label={statusLabel}
+              value={status}
+              options={[
+                { value: 'open', label: '未收口' },
+                { value: 'closed', label: '已收口' },
+                { value: 'all', label: '全部' },
+              ]}
+              onChange={(v) => setStatus(v as Status)}
+            />
+            <DropdownFilter
+              label={SORT_LABEL[sort]}
+              value={sort}
+              options={[
+                { value: 'updated-desc', label: '最近更新' },
+                { value: 'created-desc', label: '最新创建' },
+                { value: 'created-asc', label: '最早创建' },
+              ]}
+              onChange={(v) => setSort(v as SortKey)}
+            />
+          </div>
+        ) : null}
+          {/* 搜索框（2026-11-20）：紧跟「最近更新」右侧，与其同列；只过滤左侧列表 */}
+          {tab === 'list' ? (
+            <div className="gov-head__search">
+              <input
+                className="gov-input"
+                placeholder="搜索事件名或编号…"
+                value={keyword}
+                onChange={(e) => setKeyword(e.target.value)}
+              />
+            </div>
+          ) : null}
+        </div>
         <div className="gov-head__actions">
           {/* 视图切换挪到主操作左侧：它切的是整页内容（列表 / 类型），属页面级，
               放在下一行左端会与「列表过滤器」混成一条，看起来像在过滤自己 */}
@@ -845,49 +1029,6 @@ export function EventsPage(): JSX.Element {
           </button>
         </div>
       </header>
-
-      {/* 过滤器贴左：它只作用于下方的左侧列表，顶到视口右端会跨 1000px 才建立因果。
-          只在「事件列表」视图渲染 —— 「事件类型」页没有事件可过滤，留着是空转控件。 */}
-      {tab === 'list' ? (
-        <div className="gov-toolbar">
-          <DropdownFilter
-            label="类型"
-            value={typeFilter}
-            options={[
-              { value: '', label: '全部类型' },
-              ...types.map((t) => ({
-                /*
-                 * 视图下裸 id（`et_1`）在每个库都存在 → 必须用 `库:et_N` 精确定位；
-                 * label 带库名，否则两库里同名的自定义类型无法区分。
-                 */
-                value: t.typeKey ?? t.id,
-                label: t.scope ? `${t.scope} · ${t.name}` : t.name,
-              })),
-            ]}
-            onChange={setTypeFilter}
-          />
-          <DropdownFilter
-            label={statusLabel}
-            value={status}
-            options={[
-              { value: 'open', label: '未收口' },
-              { value: 'closed', label: '已收口' },
-              { value: 'all', label: '全部' },
-            ]}
-            onChange={(v) => setStatus(v as Status)}
-          />
-          <DropdownFilter
-            label={SORT_LABEL[sort]}
-            value={sort}
-            options={[
-              { value: 'updated-desc', label: '最近更新' },
-              { value: 'created-desc', label: '最新创建' },
-              { value: 'created-asc', label: '最早创建' },
-            ]}
-            onChange={(v) => setSort(v as SortKey)}
-          />
-        </div>
-      ) : null}
 
       {/*
        * 提示改成**脱离布局的浮层**（2026-11-18 报障「点删除页面抖一下」）：
@@ -1073,30 +1214,17 @@ export function EventsPage(): JSX.Element {
         <div className="gov-split">
           {/* 左：事件列表（`--list` 让它吸附视口，列表本身内滚，见 `.gov-pane--list`） */}
           <div className="gov-pane gov-pane--list">
-            <div className="gov-pane__search">
-              <input
-                className="gov-input"
-                placeholder="搜索事件名或编号…"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-              />
-              {/*
-                * 刷新（2026-11-19）：只重取列表，**保留筛选 / 搜索 / 选中 / 滚动位置**。
-                * 只读账号也能用 —— 这是读操作，不该被 `canWrite` 挡住。
-                * 请求在途时禁用 + 转圈，避免连点打出并发请求。
-                */}
+            {/*
+             * 列表工具条（2026-11-20 用户要求）：刷新按钮属于**事件列表**，所以放在列表右上角，
+             * 不跟搜索框走（搜索框已搬到页头）。这一条只占 30px，让「刷的是这个列表」有明确归属。
+             */}
+            <div className="gov-pane__bar">
+              <span className="gov-pane__bar-title">事件列表</span>
               <button
                 type="button"
-                className={`gov-btn gov-btn--ghost gov-pane__refresh${listLoading ? ' is-loading' : ''}`}
-                onClick={() => {
-                  void loadList();
-                  /*
-                   * 详情不跟着刷会让人以为「刷了还是旧的」：列表里的标题变了、右栏还停在旧阶段。
-                   * 只在已有选中时刷，避免首次进页面并发两条同样的详情请求。
-                   */
-                  if (activeId) void loadDetail(activeId);
-                }}
-                disabled={listLoading}
+                className={`gov-btn gov-btn--ghost gov-pane__refresh${(listLoading || refreshing) ? ' is-loading' : ''}`}
+                onClick={refreshList}
+                disabled={listLoading || refreshing}
                 aria-label="刷新事件列表"
                 title="刷新事件列表（保留筛选、搜索与选中）"
               >

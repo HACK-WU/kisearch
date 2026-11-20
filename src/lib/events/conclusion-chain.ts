@@ -12,6 +12,8 @@
  * 不可信的节点/引用直接丢弃，不抛错 —— 模型输出本来就是不可信输入，
  * 抛错会让整次分析白跑（结论区整块没有），丢掉一个节点只是少一句话。
  */
+import { BASE_KIND_LABELS, resolveKindLabel } from './analysis-view.js';
+import type { AnalysisView } from './analysis-view.js';
 import type { ConclusionNode, ConclusionNodeKind } from './types.js';
 
 /** 合法节点类型；数组顺序即阅读顺序 */
@@ -33,14 +35,13 @@ export const CHAIN_BRANCH_TEXT_MAX = 120;
  */
 const REF_PATTERN = /^([^\s:]+):(\d{1,7})$/;
 
-/** 节点类型的中文标签（前端渲染与追问上下文共用同一套，避免两处叫法不一致） */
-export const CONCLUSION_KIND_LABELS: Record<ConclusionNodeKind, string> = {
-  symptom: '现象',
-  cause: '直接原因',
-  root: '根本原因',
-  impact: '影响面',
-  fix: '建议',
-};
+/**
+ * 中性词表（= fault 视角的词表）。
+ *
+ * 2026-11-20 起定义搬到 `analysis-view.ts`（视角词表的唯一真源），此处保留同名导出
+ * 只为不破坏既有引用；新增调用方请用 `resolveKindLabel(view, kind)`。
+ */
+export const CONCLUSION_KIND_LABELS: Record<ConclusionNodeKind, string> = BASE_KIND_LABELS;
 
 function isKind(value: string): value is ConclusionNodeKind {
   return (CONCLUSION_KINDS as readonly string[]).includes(value);
@@ -111,11 +112,16 @@ export function pruneChainRefs(
   });
 }
 
-/** 追问上下文用：把链压成逐行文本（`- 根本原因：…（ref）`） */
-export function chainToLines(chain: ConclusionNode[]): string[] {
+/**
+ * 追问上下文用：把链压成逐行文本（`- 根本原因：…（ref）`）。
+ *
+ * `view` 必须与本次分析用的视角一致，否则追问上下文里的措辞会与用户看到的卡面不同
+ * （卡面写「差距与成因」、喂给模型写「根本原因」），模型会顺着错词答。
+ */
+export function chainToLines(chain: ConclusionNode[], view: AnalysisView = 'fault'): string[] {
   return chain.map((node) => {
     const ref = node.ref ? `（${node.ref}）` : '';
     const branches = node.branches?.length ? `；分支：${node.branches.join(' / ')}` : '';
-    return `- ${CONCLUSION_KIND_LABELS[node.kind]}：${node.text}${ref}${branches}`;
+    return `- ${resolveKindLabel(view, node.kind)}：${node.text}${ref}${branches}`;
   });
 }

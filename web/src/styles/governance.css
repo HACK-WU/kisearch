@@ -51,6 +51,63 @@
   font-size: var(--ki-font-size-sm);
 }
 .gov-head__actions { margin-left: auto; display: flex; align-items: center; gap: var(--ki-space-2); }
+/*
+ * 页头第二组：筛选按钮（2026-11-20 并入页头）。
+ * 紧跟 scope 与计数之后，因此**与左侧列表左边界自然对齐**；不设 margin-left:auto，
+ * 否则会被推到右侧、与列表错开（用户明确要求「类型筛选项和事件详情左对齐」）。
+ */
+.gov-head__filters {
+  display: flex;
+  align-items: center;
+  gap: var(--ki-space-2);
+  min-width: 0;
+}
+/* 页头搜索框：只过滤左侧列表，宽度固定一档，避免把右侧分段按钮挤走 */
+.gov-head__search { display: flex; align-items: center; gap: 6px; flex: none; }
+.gov-head__search .gov-input { width: 220px; }
+
+/*
+ * 事件页页头栅格（2026-11-20 用户要求「类型按钮与事件详情卡片左对齐」）。
+ *
+ * 与下方 `.gov-split` 用**同一套栅格**（300px + 16px gap）：左列放 scope 与计数，
+ * 中列从 x=300+16 起，正好等于右侧详情卡的左边界 —— 对齐由栅格保证，不靠手算边距。
+ * 仅事件页挂 `--events`：TrashPage / LifecyclePage 复用 `.gov-head` 且结构简单，
+ * 全局改成 grid 会把它们的一行内容拉成三列。
+ */
+.gov-head--events {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr) auto;
+  gap: var(--ki-space-4);
+}
+.gov-head--events .gov-head__actions { margin-left: 0; justify-self: end; }
+/*
+ * 左列固定 300px，但 scope 名可能是多库聚合视图（`kisearch-docs + kisearch-memory + …`）。
+ * 不设限时 badge 会把「未收口 48 · 已收口 5」挤成竖排（2026-11-20 审查实测）。
+ * 处理：badge 截断显示省略号，计数保持单行不压缩。
+ */
+.gov-head--events .gov-head__path { overflow: hidden; }
+.gov-head--events .gov-head__path .gov-badge {
+  display: inline-block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gov-head--events .gov-head__path .gov-cell-muted { flex: none; white-space: nowrap; }
+/* 中列：筛选按钮 + 搜索框，搜索框紧挨最后一个筛选按钮右侧 */
+.gov-head__mid { display: flex; align-items: center; gap: var(--ki-space-2); min-width: 0; }
+
+/* ≤1080（与 .gov-split 单列断点一致）：页头回退成可换行的一行，不再强行分三列 */
+@media (max-width: 1080px) {
+  .gov-head--events { display: flex; flex-wrap: wrap; }
+  .gov-head--events .gov-head__actions { margin-left: auto; }
+  .gov-head__mid { flex-wrap: wrap; }
+}
+@media (max-width: 1200px) {
+  /* 一行放不下时，搜索框先缩宽；再窄就整体换行（.gov-head 已 flex-wrap） */
+  .gov-head__search .gov-input { width: 160px; }
+}
 /* 页头说明跟全站页头副标题对齐：12px + 弱化色（表格里的 `.gov-cell-muted` 不受影响，仍是 12px subtle） */
 .gov-head__path .gov-cell-muted { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
 /* 页头 scope 芯片与全站 `.ki-badge` 同尺寸（20px 高 / 0 7px 内距 / 650）。
@@ -836,15 +893,7 @@
   /* 兜底：单列断点会摘掉 `--noscroll`，高度链断掉时不让它无界伸缩 */
   max-height: calc(100vh - 24px);
 }
-.gov-pane__search {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: var(--ki-space-3);
-  border-bottom: 1px solid var(--ki-color-border);
-  flex: 0 0 auto;
-}
-.gov-pane__search .gov-input { flex: 1 1 auto; min-width: 0; }
+/* `.gov-pane__search` 已于 2026-11-20 移除（搜索框搬到页头，DOM 不再有该节点） */
 /* 刷新按钮：图标按钮，loading 时转圈并禁用（防连点重复请求） */
 .gov-pane__refresh { width: 28px; height: 28px; padding: 0; flex: none; }
 .gov-pane__refresh svg { width: 14px; height: 14px; display: block; }
@@ -853,6 +902,21 @@
 @media (prefers-reduced-motion: reduce) {
   .gov-pane__refresh.is-loading svg { animation: none; }
 }
+/*
+ * 列表工具条（2026-11-20）：刷新按钮归属左侧事件列表，放在列表右上角。
+ * 只占 30px、不与列表项争空间；标题用 muted 小字，避免和正文抢注意力。
+ */
+.gov-pane__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--ki-space-2);
+  padding: 3px 8px 3px 10px;
+  border-bottom: 1px solid var(--ki-color-border);
+  flex: 0 0 auto;
+}
+.gov-pane__bar-title { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-muted); }
+.gov-pane__bar .gov-pane__refresh { margin-left: auto; }
+
 /* 列表本体吃满 pane 余下高度、自己滚。
    顶部不留内距：sticky 分区标题吸附在 padding box 上沿，留 6px 就会在标题上方
    露出一条正滚过去的内容（2026-11-19「置顶怎么还有空隙」）。 */
@@ -1263,9 +1327,23 @@
   letter-spacing: .02em;
   white-space: nowrap;
 }
-/* 浮标不占流，靠给标题让位避免压字：只在跑的行加，其余行宽度不变 */
+/*
+ * 「分析完成 / 分析失败」（2026-11-20）：保持「分析中」的粉色底与位置，**只换文案**。
+ * 2026-11-20 用户明确：完成后底色不要变，还是原来的粉色 —— 这块是同一个浮标的三种说法，
+ * 换色会让人以为多了个新标记。
+ * 唯一保留的差异是「不再呼吸」：呼吸点只在真正跑着时出现，否则会误导成"还在跑"。
+ */
+.gov-ev__running--done .gov-ev__running-dot,
+.gov-ev__running--failed .gov-ev__running-dot { animation: none; }
+/* 失败是另一件事（不是"等你看"），保留 danger 语气但同样不换底色结构 */
+.gov-ev__running--failed { color: var(--ki-color-danger); }
+
+/*
+ * 浮标不占流，靠给标题让位避免压字：只在有徽标的行加，其余行宽度不变。
+ * 76px = 「分析完成」实测 61px + 右内距 10px + 5px 余量（原先 62px 会压字 9px，真机量出来的）。
+ */
 .gov-ev--running { position: relative; }
-.gov-ev--running .gov-ev__name { padding-right: 62px; }
+.gov-ev--running .gov-ev__name { padding-right: 76px; }
 .gov-ev__running-dot {
   width: 6px;
   height: 6px;
@@ -2071,6 +2149,11 @@
   border-radius: 0;
   overflow: visible;
 }
+/*
+ * 注：这里曾有一条 `.gov-pane--detail { margin-top: -30px }`（2026-11-20 上午），
+ * 用来把右栏上提去对齐「独立筛选行」。当天筛选按钮并入页头后，那一行已不存在，
+ * 补偿值随之取消 —— 右栏回到与左栏同一基线，两栏顶边重新对齐。
+ */
 
 /* 2) 左栏事件列表（2026-11-19 第二次改版）：**不再 sticky、不再估高**。
       页面在列表视图已禁滚动（`.ki-content--noscroll`），左栏靠 flex 高度链撑满视口，
@@ -2412,8 +2495,12 @@
 .gov-chain {
   --gov-rail: color-mix(in srgb, var(--ki-color-text-subtle) 58%, transparent);
   --gov-rail-strong: color-mix(in srgb, var(--ki-color-purple) 55%, transparent);
+  /* 类型列宽（2026-11-20）：默认 58px 装得下「直接原因」；需求/通用视角的
+     「现状与目标差距」这类长标签放不下，由 `.is-wide` 加宽 */
+  --gov-kind-col: 58px;
   margin: 0; padding: 0; list-style: none;
 }
+.gov-chain.is-wide { --gov-kind-col: 88px; }
 /* 节点：12px 轨道列 + 58px 类型列 + 正文列 */
 .gov-chain__node {
   position: relative;
@@ -2457,19 +2544,29 @@
 /* 建议：主色空心 */
 .gov-chain__node--fix .gov-chain__dot { border-color: var(--ki-color-primary); }
 
-/* 根因：菱形 + 轨道转紫 */
-.gov-chain__node--root { padding-bottom: 20px; }
-.gov-chain__node--root::before { background: var(--gov-rail-strong); }
-.gov-chain__node--root::after { border-top-color: var(--gov-rail-strong); }
-.gov-chain__node--root .gov-chain__dot {
+/* 强调点：菱形 + 轨道转紫。
+   2026-11-20 起**不再绑死 root** —— 由视角决定强调哪个节点（故障=根本原因、性能=瓶颈点、
+   需求/通用=不强调），组件按 profile.emphasize 加 `.is-emph`。全块仍只允许一个强调。 */
+.gov-chain__node.is-emph { padding-bottom: 20px; }
+.gov-chain__node.is-emph::before { background: var(--gov-rail-strong); }
+.gov-chain__node.is-emph::after { border-top-color: var(--gov-rail-strong); }
+.gov-chain__node.is-emph .gov-chain__dot {
   left: -3px; top: 3px; width: 13px; height: 13px;
   border: 0; border-radius: 2px;
   background: var(--ki-color-purple);
   transform: rotate(45deg);
   box-shadow: 0 0 0 3.5px color-mix(in srgb, var(--ki-color-purple) 12%, var(--ki-color-surface));
 }
-.gov-chain__node--root .gov-chain__kind { color: var(--ki-color-purple); }
-.gov-chain__node--root .gov-chain__text { font-weight: 600; }
+.gov-chain__node.is-emph .gov-chain__kind { color: var(--ki-color-purple); }
+.gov-chain__node.is-emph .gov-chain__text { font-weight: 600; }
+
+/* 并列要点形态（change / generic）：因果链才配竖轨与流向箭头。
+   把并列信息画成因果链，读者会读成「A 导致 B」—— 这比少画几个像素的代价大得多。 */
+.gov-chain.is-flat .gov-chain__node { padding-bottom: 12px; }
+.gov-chain.is-flat .gov-chain__node::before,
+.gov-chain.is-flat .gov-chain__node::after { display: none; }
+/* 长标签（现状与目标差距）允许折两行，不撑破栅格 */
+.gov-chain.is-wide .gov-chain__kind { overflow-wrap: anywhere; }
 
 .gov-chain__kind {
   font-size: 11px; font-weight: 600; letter-spacing: .04em; line-height: 1.72;

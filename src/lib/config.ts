@@ -189,6 +189,11 @@ export interface LlmConfig {
   requestTimeoutMs?: number;
   /** 默认 30000，仅约束"建立连接并收到首个 chunk" */
   firstByteTimeoutMs?: number;
+  /**
+   * 默认 60000：**流内静默**超时（2026-11-20）。收到过数据之后，超过这么久没有任何 chunk
+   * 就主动中断该轮 —— 上游「连接不断但也不出字」时，首块与整体超时都拦不住。
+   */
+  idleTimeoutMs?: number;
   /** 可选，新建会话的初始提示词 */
   defaultSystemPrompt?: string;
   /** 默认 false：模型是否支持图片输入（用户手填，不自动探测 —— D11，本期不实现，字段保留） */
@@ -674,6 +679,7 @@ function parseAndExpand(configFile: string): KiConfig {
       temperature: rl.temperature !== undefined ? Number(rl.temperature) : undefined,
       requestTimeoutMs: rl.requestTimeoutMs !== undefined ? Number(rl.requestTimeoutMs) : undefined,
       firstByteTimeoutMs: rl.firstByteTimeoutMs !== undefined ? Number(rl.firstByteTimeoutMs) : undefined,
+      idleTimeoutMs: rl.idleTimeoutMs !== undefined ? Number(rl.idleTimeoutMs) : undefined,
       defaultSystemPrompt: rl.defaultSystemPrompt !== undefined ? String(rl.defaultSystemPrompt) : undefined,
       supportsImages: rl.supportsImages !== undefined ? Boolean(rl.supportsImages) : undefined,
       maxImagesPerMessage: rl.maxImagesPerMessage !== undefined ? Number(rl.maxImagesPerMessage) : undefined,

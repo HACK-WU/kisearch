@@ -26,6 +26,7 @@ import {
   type EventAnalysis,
   type EventView,
 } from '@/api/governanceApi';
+import { inferAnalysisView } from '@/lib/analysisView';
 
 export const DEFAULT_ANALYSIS_CHECK_SCORE = 0.6;
 
@@ -120,7 +121,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
 
   /** 在途守卫：连点「AI 分析」或 effect 与按钮同时触发时，只发一次 start */
   const startingRef = useRef(false);
-  const triggerStart = useCallback(async (forceOverwrite = false): Promise<void> => {
+  const triggerStart = useCallback(async (forceOverwrite = false, resume = false): Promise<void> => {
     if (!canWrite || startingRef.current) return;
     startingRef.current = true;
     setStarting(true);
@@ -129,7 +130,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
     setOverwritePrompt(false);
     setProcOpen(true);
     try {
-      const res = await startEventAnalysis(scope, event.id, { forceOverwrite });
+      const res = await startEventAnalysis(scope, event.id, { forceOverwrite, resume });
       syncFromAnalysis(res.analysis, true);
     } catch (err) {
       const e = err instanceof GovernanceApiError ? { code: err.code, message: err.message } : null;
@@ -289,15 +290,21 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
           ? `分析完成 · 找到 ${candidates.length} 处候选`
           : '分析完成 · 未定位到候选位置';
 
-  /** 底栏主操作（S3）：四态，避免"无候选但有已确认位置"时按钮全无 */
-  const primaryAction: 'stop' | 'confirm' | 'reanalyze' | 'none' = isRunning
+  /**
+   * 能否「继续分析」（2026-11-20）：后端 stat 断点文件得出，不能靠 status 猜 ——
+   * 断点可能过期或被清理，那时按「继续」只会报错。
+   */
+  const resumeAvailable = analysis?.resumeAvailable === true && draft?.status === 'failed';
+
+  /** 底栏主操作（S3）：五态，避免"无候选但有已确认位置"时按钮全无 */
+  const primaryAction: 'stop' | 'confirm' | 'resume' | 'reanalyze' | 'none' = isRunning
     ? 'stop'
     : committed
       ? 'reanalyze'
       : candidates.length > 0
         ? 'confirm'
         : canWrite
-          ? 'reanalyze'
+          ? (resumeAvailable ? 'resume' : 'reanalyze')
           : 'none';
   const readOnlyTitle = canWrite ? undefined : '只读账号无法发起或确认分析';
 
@@ -509,6 +516,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                       confirmed={confirmed}
                       title="最终结论"
                       boxed={false}
+                      view={inferAnalysisView(event.typeId)}
                     />
                   ) : (
                     <>
@@ -628,6 +636,28 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
               onClick={() => void handleConfirm()}
             >
               {submitting ? '写入中…' : '确认分析结果'}
+            </button>
+          </>
+        ) : null}
+        {primaryAction === 'resume' ? (
+          <>
+            <button
+              type="button"
+              className="gov-btn gov-btn--sm"
+              disabled={starting || !canWrite}
+              title={readOnlyTitle ?? '丢弃上次进度，从头重新分析'}
+              onClick={() => void triggerStart(true)}
+            >
+              重新分析
+            </button>
+            <button
+              type="button"
+              className="gov-btn gov-btn--sm gov-btn--primary"
+              disabled={starting || !canWrite}
+              title={readOnlyTitle ?? '带着上次已完成的排查进度继续（不再重复读过的文件）'}
+              onClick={() => void triggerStart(false, true)}
+            >
+              {starting ? '继续中…' : '继续分析'}
             </button>
           </>
         ) : null}

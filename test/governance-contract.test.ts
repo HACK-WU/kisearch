@@ -247,3 +247,79 @@ describe("追问（B2）错误码状态映射", () => {
     assert.equal(new GovernanceError("ANALYSIS_ASK_TIMEOUT", "x").status, 504);
   });
 });
+
+/**
+ * 视角词表前后端一致（2026-11-20 · REQ-20261120-002）。
+ *
+ * 前端有一份渲染副本（web 端不复用 `src/**`，与 DTO 契约同一做法）。两处 `VIEW_LABELS`
+ * 一旦漂移，用户看到的词就与喂给模型的词不同 —— 这正是 #48 那类「两份副本手工同步」的翻版。
+ * 只比对象体（四个视角的 entries），不比类型注解（两边的 kind 类型别名不同名）。
+ */
+describe('⑥ 视角词表前后端一致', () => {
+  const pick = (rel: string): string => {
+    const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    const m = src.match(/export const VIEW_LABELS[^{]*\{([\s\S]*?)\n\};/);
+    assert.ok(m, `${rel} 缺少 VIEW_LABELS`);
+    return m![1].replace(/\s+/g, ' ').trim();
+  };
+
+  it('四个视角的标签逐字一致', () => {
+    const backend = pick('src/lib/events/analysis-view.ts');
+    const frontend = pick('web/src/lib/analysisView.ts');
+    assert.equal(frontend, backend, `视角词表漂移：\n后端: ${backend}\n前端: ${frontend}`);
+  });
+
+  it('内置类型 → 视角的映射逐行一致', () => {
+    const backend = fs.readFileSync(path.join(ROOT, 'src/lib/events/analysis-view.ts'), 'utf8');
+    const frontend = fs.readFileSync(path.join(ROOT, 'web/src/lib/analysisView.ts'), 'utf8');
+    for (const line of ["et_1: 'fault'", "et_2: 'perf'", "et_3: 'change'"]) {
+      assert.ok(backend.includes(line), `后端缺 ${line}`);
+      assert.ok(frontend.includes(line), `前端缺 ${line}`);
+    }
+  });
+
+  /*
+   * 渲染四要素（强调点 / 清标 / 轨道 / 列宽）比词表更容易漂：词表有上面那条比对，
+   * 而这几个字段分散在后端 `PROFILES` 与前端 `RENDER` 里，改一处不同步，卡片会
+   * 「标签对了但高亮错位」，且没有任何编译错误。这里按视角逐个比对取值。
+   */
+  it('渲染四要素（emphasize / flag / rail / wide）逐视角一致', () => {
+    const read = (rel: string): string => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    const backend = read('src/lib/events/analysis-view.ts');
+    const frontend = read('web/src/lib/analysisView.ts');
+
+    /**
+     * 截出某视角的配置块：后端跨多行（到 `\n  },`），前端是单行（到行尾）。
+     * 必须从 PROFILES / RENDER **之后**开始找 —— 文件里先出现的 `fault: {` 是词表块，
+     * 那里没有渲染四要素（首版就是踩了这个坑）。
+     */
+    const blockOf = (src: string, view: string, marker: string): string => {
+      const from = src.indexOf(marker);
+      assert.ok(from >= 0, `缺少标记 ${marker}`);
+      const start = src.slice(from).search(new RegExp(`\\n  ${view}: \\{`));
+      assert.ok(start >= 0, `缺少视角块 ${view}`);
+      const rest = src.slice(from + start + 1);
+      const end = rest.search(/\n {2}\},/);
+      return end >= 0 ? rest.slice(0, end) : rest.split('\n')[0]!;
+    };
+
+    const fields = (block: string): Record<string, string> => {
+      const out: Record<string, string> = {};
+      for (const m of block.matchAll(/\b(emphasize|flag|rail|wide):\s*([^,\n]+)/g)) {
+        // 前端是单行对象，最后一个字段会连上 `}` —— 先切掉再统一去引号
+        out[m[1]!] = m[2]!.trim().replace(/\s*\}.*$/, '').trim().replace(/^'|'$/g, '').replace(/^"|"$/g, '');
+      }
+      return out;
+    };
+
+    for (const view of ['fault', 'perf', 'change', 'generic']) {
+      const b = fields(blockOf(backend, view, 'const PROFILES'));
+      const f = fields(blockOf(frontend, view, 'const RENDER'));
+      for (const key of ['emphasize', 'flag', 'rail', 'wide']) {
+        assert.ok(b[key] !== undefined, `后端 ${view} 缺 ${key}`);
+        assert.ok(f[key] !== undefined, `前端 ${view} 缺 ${key}`);
+        assert.equal(f[key], b[key], `${view}.${key} 前后端漂移：后端=${b[key]} 前端=${f[key]}`);
+      }
+    }
+  });
+});

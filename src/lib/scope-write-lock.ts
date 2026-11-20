@@ -50,6 +50,27 @@ function staleLockUnremovable(key: string, cause: unknown): Error {
 const warnedReleaseFailures = new Set<string>();
 
 /**
+ * 删不掉的锁文件退路（2026-11-20）—— 把锁「挪开」而不是删除。
+ *
+ * 为什么需要：部分环境对 `fs.unlinkSync` 装了删除守卫（IDE 的 safe-delete shim
+ * 会在删除时要求批量确认），单文件删除直接抛 `SAFE_DELETE_BULK_CONFIRM_REQUIRED`。
+ * 于是「释放锁」与「回收残留锁」双双失败，该 scope 之后的每次写入都报
+ * `SCOPE_LOCK_STALE_UNREMOVABLE` —— 线上表现是：点「停止」后一直停在「停止中…」，
+ * 因为收尾那次写盘永远写不进去。
+ *
+ * 重命名不是删除，守卫不拦，而且同样让出了锁路径。目标名固定为 `<key>.stale`：
+ * 同一个 key 最多留一个残骸（rename 会覆盖），不会越攒越多。
+ */
+function moveLockAside(key: string): boolean {
+  try {
+    fs.renameSync(key, `${key}.stale`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 释放锁文件。
  *
  * ★ 两件事必须分清：
@@ -76,6 +97,15 @@ function releaseLockFile(key: string, token: string, operation: string): void {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       releasedButNotRemoved.delete(key);
+      return;
+    }
+    // 删除被守卫拦下：改名让路即可，锁已实质释放，不需要再登记「回收待办」
+    if (moveLockAside(key)) {
+      releasedButNotRemoved.delete(key);
+      warnedReleaseFailures.delete(key);
+      process.stderr.write(
+        `[kisearch] 提示：锁文件无法删除，已改名为 ${key}.stale（operation=${operation}；原因：${(err as Error).message.slice(0, 120)}）\n`,
+      );
       return;
     }
     // 登记「已放弃所有权、但文件还在」—— 这是下一次取锁敢回收它的唯一依据
@@ -157,7 +187,12 @@ export async function withScopeWriteLock<T>(scope: string, operation: string, ru
       if (!stale) throw busy();
       const latest = fs.lstatSync(key);
       if (latest.ino !== stat.ino || latest.dev !== stat.dev) throw busy();
-      fs.unlinkSync(key);
+      try {
+        fs.unlinkSync(key);
+      } catch (unlinkErr) {
+        // 删除守卫拦截：改名让路，再以 'wx' 抢回原路径；改名也失败则交给外层报真实原因
+        if (!moveLockAside(key)) throw unlinkErr;
+      }
       fd = fs.openSync(key, 'wx', 0o600);
       releasedButNotRemoved.delete(key); // 已换成新锁，回收登记作废
     } catch (err) {
@@ -173,12 +208,18 @@ export async function withScopeWriteLock<T>(scope: string, operation: string, ru
     fs.fsyncSync(fd);
   } catch (error) {
     try { fs.unlinkSync(key); } catch (cleanupErr) {
-      // 半截锁（0 字节或未写完）：登记「本实例放弃了它」，下次取锁才敢回收，
-      // 否则它会以「内容不可解析」形态永久挡住该 scope 的写入。
-      releasedButNotRemoved.add(key);
-      process.stderr.write(
-        `[kisearch] 警告：锁写入失败后清理 ${key} 也失败：${(cleanupErr as Error).message}\n`,
-      );
+      // 删除守卫拦截时先改名让路；改名也不行才登记「本实例放弃了它」，
+      // 否则半截锁会以「内容不可解析」形态永久挡住该 scope 的写入。
+      if (moveLockAside(key)) {
+        process.stderr.write(
+          `[kisearch] 提示：锁写入失败后无法删除 ${key}，已改名让路（${(cleanupErr as Error).message.slice(0, 120)}）\n`,
+        );
+      } else {
+        releasedButNotRemoved.add(key);
+        process.stderr.write(
+          `[kisearch] 警告：锁写入失败后清理 ${key} 也失败：${(cleanupErr as Error).message}\n`,
+        );
+      }
     }
     throw error;
   } finally {

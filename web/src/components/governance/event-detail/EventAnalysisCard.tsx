@@ -4,6 +4,7 @@ import { AiAnalyzePanel } from '@/components/governance/AiAnalyzePanel';
 import { CodeLocRow } from './CodeLocRow';
 import { ConclusionChain } from './ConclusionChain';
 import { AskBlock } from './AskBlock';
+import { inferAnalysisView } from '@/lib/analysisView';
 
 /**
  * AI 分析卡（2026-11-17 改版 · 批 2）。
@@ -52,6 +53,8 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
   const { scope, event, analysis, canWrite, canAsk, busy, startSignal, onUpdated, onOpenSettings, onRemoveLocation } = props;
   const draft = analysis?.draft ?? null;
   const confirmed = analysis?.confirmed ?? [];
+  /** 结论按事件类型换视角（2026-11-20）：bug / 性能 / 需求 / 自建各有自己的骨架与词表 */
+  const analysisView = inferAnalysisView(event.typeId);
   /*
    * 结论链：空数组表示"这版没分层"（旧事件 / 模型没给），此时回退纯文本结论。
    * `?? []` 不能省 —— 老接口返回的旧 draft 里没有这个字段。
@@ -88,7 +91,12 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
          * 用户分不清是没跑、还在跑、还是确实没找到。
          */}
         {chain.length > 0 ? (
-          <ConclusionChain summary={draft?.conclusion ?? null} chain={chain} confirmed={confirmed} />
+          <ConclusionChain
+            summary={draft?.conclusion ?? null}
+            chain={chain}
+            confirmed={confirmed}
+            view={analysisView}
+          />
         ) : draft?.conclusion ? (
           <div className="gov-conclusion">
             <div className="gov-conclusion__head">分析结论</div>

@@ -70,6 +70,15 @@ export interface LlmStatus {
 const DEFAULT_REQUEST_TIMEOUT_MS = 300_000;
 const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 30_000;
 /**
+ * 流内「静默」超时（2026-11-20）：**已经收到过数据之后**，超过这么久没有任何 chunk 就主动中断。
+ *
+ * 为什么需要第三层：首块超时只覆盖「一个字节都没来」，整体超时要等满 5 分钟。
+ * 上游在思考中途挂住（连接不断、心跳不出、也没有 reasoning chunk）时，前两层都拦不住 ——
+ * 用户看到的就是「一直显示正在思考」，点停止也只是在等一个永不到来的收尾。
+ * 60s 是经验值：正常的思考流会持续吐 reasoning 片段，真的静默 60s 基本可以判定卡死。
+ */
+const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+/**
  * 工具轮次上限（2026-09-30 用户裁决**取消约束**：一句一检的长节奏不该被"已达检索轮次上限"截断）。
  * Infinity → tool-loop 的 reachedLimit 恒 false，「拿掉 tools 再调一次」分支与
  * `tool-rounds-exhausted` warning 均不再触发；循环仍受模型自然停手 / 用户中止 / 超时保护。
@@ -193,6 +202,8 @@ export interface StreamChatOptions {
   /** 覆盖配置中的超时（测试用） */
   requestTimeoutMs?: number;
   firstByteTimeoutMs?: number;
+  /** 流内静默超时（默认为 60s）：收到过数据后，超过这么久没有任何 chunk 就中断 */
+  idleTimeoutMs?: number;
   /** 调用方注入的配置（缺省由参数直接给出；tool-loop 从会话上下文传入） */
   llm?: {
     baseURL: string; apiKey: string; model: string; temperature?: number; maxTokens?: number;
@@ -263,6 +274,7 @@ export async function* streamChat(
 
   const overallMs = opts?.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const firstByteMs = opts?.firstByteTimeoutMs ?? DEFAULT_FIRST_BYTE_TIMEOUT_MS;
+  const idleMs = opts?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 
   // 中止：外部 signal 与本地超时 controller 联动
   const local = new AbortController();
@@ -274,14 +286,30 @@ export async function* streamChat(
 
   let firstByteTimer: NodeJS.Timeout | undefined;
   let overallTimer: NodeJS.Timeout | undefined;
-  let timedOut: 'first-byte' | 'overall' | null = null;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let timedOut: 'first-byte' | 'overall' | 'idle' | null = null;
   let sawFirstChunk = false;
 
   const clearTimers = (): void => {
     if (firstByteTimer) clearTimeout(firstByteTimer);
     if (overallTimer) clearTimeout(overallTimer);
+    if (idleTimer) clearTimeout(idleTimer);
     firstByteTimer = undefined;
     overallTimer = undefined;
+    idleTimer = undefined;
+  };
+
+  /**
+   * 重置「静默」计时：每收到一块上游数据就重置。
+   * 只有**一个 chunk 都不来**才会触发 —— 正常的思考流会持续吐 reasoning 片段，不受影响。
+   */
+  const bumpIdle = (): void => {
+    if (!(idleMs > 0)) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      timedOut = 'idle';
+      local.abort();
+    }, idleMs);
   };
 
   firstByteTimer = setTimeout(() => {
@@ -325,6 +353,7 @@ export async function* streamChat(
     sawFirstChunk = true;
     if (firstByteTimer) clearTimeout(firstByteTimer);
     firstByteTimer = undefined;
+    bumpIdle(); // 首块到手 → 交给「静默」保护接力
   };
 
   try {
@@ -394,7 +423,10 @@ export async function* streamChat(
 
     while (!sawDone) {
       const { done, value } = await reader.read();
-      if (!done) markFirstChunk();
+      if (!done) {
+        markFirstChunk();
+        bumpIdle(); // 每块数据都重置静默计时：只有「一直没有任何 chunk」才判卡死
+      }
       buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
       let sep = findFrameBoundary(buffer);
       while (sep !== -1 && !sawDone) {
@@ -577,8 +609,14 @@ export class LlmUpstreamError extends Error {
 }
 
 export class LlmTimeoutError extends Error {
-  constructor(public readonly phase: 'first-byte' | 'overall') {
-    super(phase === 'first-byte' ? '上游首块超时' : '上游整体超时');
+  constructor(public readonly phase: 'first-byte' | 'overall' | 'idle') {
+    super(
+      phase === 'first-byte'
+        ? '上游首块超时'
+        : phase === 'idle'
+          ? '上游长时间没有任何输出（已主动中断）'
+          : '上游整体超时',
+    );
     this.name = 'LlmTimeoutError';
   }
 }

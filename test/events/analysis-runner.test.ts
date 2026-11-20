@@ -615,4 +615,61 @@ describe('S-04 异步分析 Pipeline', () => {
     );
     assert.equal(finalDoc.draft?.liveThinking, undefined, '收尾终态不得残留 liveThinking');
   });
+
+  /*
+   * ⑥ 结构化输出自动纠错（2026-11-20）：模型末轮吐了一段说明文字而不是 JSON 时，
+   * 不能直接判 NO_RESULT 失败 —— 应把「这是格式问题」告诉它并要它重发。
+   */
+  it('⑥ 输出不是合法 JSON → 自动要求重发，重发后正常收尾', async () => {
+    const ev = await createEvent(scope, { title: '格式纠错', typeId: 'et_1' });
+    savePromptConfig(cfg, {
+      analysis: {
+        targetDirs: { byScope: { [scope]: repoDir } },
+        skills: [defaultPromptConfig().analysis!.skills[0]!],
+      },
+    });
+
+    let callTurn = 0;
+    const retryPrompts: string[] = [];
+    const fakeStream = async function* (messages: ChatTurn[], _opts?: StreamChatOptions): AsyncGenerator<StreamPart> {
+      callTurn += 1;
+      if (callTurn === 1) {
+        // 第一轮：像真机那样只给一段自然语言，没有 JSON
+        yield { type: 'content', text: '我查了一下，可能和登录逻辑有关，建议先看 src/login.ts。' };
+        yield { type: 'done', finishReason: 'stop' };
+        return;
+      }
+      // 纠错轮：确认收到「格式问题」提示，然后给出合法 JSON
+      retryPrompts.push(messages[messages.length - 1]?.content ?? '');
+      yield {
+        type: 'content',
+        text: JSON.stringify({
+          conclusion: '登录入口缺少空值兜底',
+          chain: [{ kind: 'symptom', text: 'token 为空时直接读取崩溃' }],
+          candidates: [{ file: 'src/login.ts', line: 1, why: '入口处直接读取 token', confidence: 0.9 }],
+          unconfirmed: [],
+        }),
+      };
+      yield { type: 'done', finishReason: 'stop' };
+    };
+
+    await startEventAnalysis(scope, ev.id, {
+      deps: {
+        loadConfigFn: () => cfg,
+        resolveLlmStatusFn: okLlmStatus,
+        streamChatFn: fakeStream as typeof import('../../src/lib/chat/llm-client.js').streamChat,
+      },
+    });
+
+    const doc = await waitDone(scope, ev.id);
+    assert.equal(doc.draft?.status, 'ready', '重发后应正常收尾，而不是 NO_RESULT failed');
+    assert.equal(doc.draft?.candidates.length, 1);
+    assert.ok(
+      (doc.draft?.steps ?? []).some((s) => s.name === 'format-retry'),
+      '过程区要能看到「已要求重发」这一步',
+    );
+    assert.ok(retryPrompts[0]?.includes('不是合法 JSON'), '纠正提示必须明确指出是格式问题');
+    assert.ok(retryPrompts[0]?.includes('不要'), '纠正提示要给出可执行的格式要求');
+    assert.equal(callTurn, 2, '只应重发一次（拿到合法 JSON 就停）');
+  });
 });

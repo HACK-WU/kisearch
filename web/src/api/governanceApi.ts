@@ -499,7 +499,22 @@ export interface GovernanceCounts extends GovernanceViewMeta {
  * 后端只读进程内 `activeRuns`，无磁盘 I/O —— 列表页可以低频轮询用来打「分析中」标记。
  * 注意是**本进程视角**：daemon 重启后本就没有正在跑的任务，清单为空是如实的。
  */
-export function listRunningAnalyses(scope: string): Promise<{ ok: true; scope: string; ids: string[] }> {
+export interface FinishedAnalysisView {
+  eventId: string;
+  status: 'running' | 'ready' | 'partial' | 'failed' | 'cancelled';
+  runId: string;
+  at: number;
+}
+
+/**
+ * 正在跑 + **最近结束**的分析（2026-11-20）。
+ *
+ * `finished` 用于列表行的「分析完成 / 分析失败」徽标：与 `ids` 同源（进程内缓存，
+ * 无磁盘 I/O）。daemon 重启后 `finished` 为空 —— 只是少一个提示，不会显示错状态。
+ */
+export function listRunningAnalyses(
+  scope: string,
+): Promise<{ ok: true; scope: string; ids: string[]; finished?: FinishedAnalysisView[] }> {
   return req(`/api/governance/events/running?${new URLSearchParams({ scope }).toString()}`);
 }
 
@@ -622,11 +637,16 @@ export function getEventDetail(scope: string, eventId: string): Promise<EventDet
 export function startEventAnalysis(
   scope: string,
   eventId: string,
-  opts: { forceOverwrite?: boolean } = {},
+  opts: { forceOverwrite?: boolean; resume?: boolean } = {},
 ): Promise<{ ok: true; scope: string; eventId: string; reused: boolean; analysis: EventAnalysis }> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/analyze`, {
     method: 'POST',
-    body: JSON.stringify({ scope, ...(opts.forceOverwrite ? { forceOverwrite: true } : {}) }),
+    body: JSON.stringify({
+      scope,
+      ...(opts.forceOverwrite ? { forceOverwrite: true } : {}),
+      // 续跑：后端会用断点里的模型上下文接着跑；断点不存在时报 ANALYSIS_RESUME_UNAVAILABLE
+      ...(opts.resume ? { resume: true } : {}),
+    }),
   });
 }
 
@@ -884,6 +904,18 @@ export interface RefSearchStepEvent {
 }
 
 /**
+ * `event: error` 帧的正文（2026-11-20）。
+ *
+ * 流式接口在查找开始前就回了 `200 + text/event-stream`，门禁失败 / 硬超时 / 上游异常
+ * 都拿不到 HTTP 状态码，只能以该帧下发；不带它时面板只会说"连接可能被中断"。
+ */
+interface RefSearchStreamError {
+  code?: string;
+  error?: string;
+  details?: unknown;
+}
+
+/**
  * **流式版** AI 候选：与服务端 `?stream=1` 配套（2026-11-19）。
  *
  * 为什么需要它：深度查找要 25~35 秒，非流式接口在这整段时间里不返回任何东西，
@@ -930,6 +962,8 @@ export async function findRefCandidatesStream(
   const decoder = new TextDecoder();
   let buf = '';
   let result: RefSearchResult | null = null;
+  /** `event: error` 的正文（门禁失败 / 超时 / 上游异常都以它下发，见服务端注释） */
+  let failure: RefSearchStreamError | null = null;
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -953,10 +987,20 @@ export async function findRefCandidatesStream(
         opts.onStep?.(payload as RefSearchStepEvent);
       } else if (evName === 'result') {
         result = payload as RefSearchResult;
+      } else if (evName === 'error') {
+        failure = payload as typeof failure;
       }
     }
   }
 
+  /*
+   * 失败必须以 `event: error` 优先判定：HTTP 已经是 200（头在查找开始前就发出去了），
+   * 不带这层就会把「模型不可用 / 查找超时 / 并发排队超时」统一报成"连接被中断"，
+   * 用户只能点重试而不知道真因（2026-11-20 实测）。
+   */
+  if (failure) {
+    throw new GovernanceApiError(failure.error ?? 'AI 查找失败', 200, failure.code, failure.details);
+  }
   if (!result) throw new Error('流式响应未返回结果（连接可能被中断）');
   return result;
 }

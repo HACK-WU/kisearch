@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import type { ConclusionNode, ConfirmedCodeLocation } from '@/api/governanceApi';
 import { highlightCodeHtml, resolveFileLanguage } from '@/lib/codeHighlight';
 import { countSiblingsInFile, matchConfirmedLocation } from '@/lib/codeRef';
+import { kindLabel, viewRender, type AnalysisView } from '@/lib/analysisView';
 
 /**
  * 分析结论的因果链（2026-11-19）。
@@ -20,13 +21,11 @@ import { countSiblingsInFile, matchConfirmedLocation } from '@/lib/codeRef';
  * 兼容：`chain` 为空时由调用方回退渲染 `conclusion` 纯文本 —— 本组件不处理历史数据。
  */
 
-const KIND_LABELS: Record<ConclusionNode['kind'], string> = {
-  symptom: '现象',
-  cause: '直接原因',
-  root: '根本原因',
-  impact: '影响面',
-  fix: '建议',
-};
+/*
+ * 词表与强调/轨道形态来自 `@/lib/analysisView`（2026-11-20）：
+ * 同一份结论对不同事件类型要换词与换形态，词表不再写在本组件里。
+ */
+
 
 function basename(file: string): string {
   const idx = file.lastIndexOf('/');
@@ -52,10 +51,16 @@ export interface ConclusionChainProps {
   title?: string;
   /** 是否套紫色结论壳（卡片 true；面板已有自己的容器时 false） */
   boxed?: boolean;
+  /**
+   * 分析视角（2026-11-20）：由调用方按 `event.typeId` 推断后传入。
+   * 缺省 `fault` —— 旧调用点不传时行为与改动前完全一致。
+   */
+  view?: AnalysisView;
 }
 
 export function ConclusionChain(props: ConclusionChainProps): JSX.Element {
-  const { summary, chain, confirmed, title = '分析结论', boxed = true } = props;
+  const { summary, chain, confirmed, title = '分析结论', boxed = true, view = 'fault' } = props;
+  const render = viewRender(view);
   const [peek, setPeek] = useState<{
     loc: ConfirmedCodeLocation;
     anchor: HTMLElement;
@@ -159,17 +164,21 @@ export function ConclusionChain(props: ConclusionChainProps): JSX.Element {
 
       {summary ? <p className="gov-chain__sum">{renderText(summary)}</p> : null}
 
-      <ol className="gov-chain">
+      <ol className={`gov-chain${render.rail ? '' : ' is-flat'}${render.wide ? ' is-wide' : ''}`}>
         {chain.map((node, index) => {
           const used = new Set<string>();
           const refLoc = node.ref ? matchConfirmedLocation(node.ref, confirmed) : null;
+          const isEmph = render.emphasize === node.kind;
 
           return (
-            <li key={`${node.kind}-${index}`} className={`gov-chain__node gov-chain__node--${node.kind}`}>
+            <li
+              key={`${node.kind}-${index}`}
+              className={`gov-chain__node gov-chain__node--${node.kind}${isEmph ? ' is-emph' : ''}`}
+            >
               <span className="gov-chain__track">
                 <span className="gov-chain__dot" aria-hidden="true" />
               </span>
-              <span className="gov-chain__kind">{KIND_LABELS[node.kind]}</span>
+              <span className="gov-chain__kind">{kindLabel(view, node.kind)}</span>
               <div className="gov-chain__body">
                 <p className="gov-chain__text">
                   {renderText(node.text, used)}
@@ -186,7 +195,7 @@ export function ConclusionChain(props: ConclusionChainProps): JSX.Element {
                       </span>
                     )
                   ) : null}
-                  {node.kind === 'root' ? <span className="gov-chain__flag">← 根因</span> : null}
+                  {isEmph && render.flag ? <span className="gov-chain__flag">← {render.flag}</span> : null}
                 </p>
                 {node.branches?.length ? (
                   <ul className="gov-chain__branches">
