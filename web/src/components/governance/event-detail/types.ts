@@ -16,7 +16,19 @@ export interface DocRow {
   /** 行唯一键（`${group}\u0000${name}`） */
   key: string;
   name: string;
+  /**
+   * 文档所在的**真实** Group 路径 —— 点开正文、移除都拿它当业务键。
+   *
+   * 禁止往这里塞展示文案（2026-11-20 教训）：参考文档卡曾把「来源库 · 组名 · 失效标记」
+   * 拼进本字段，视图下点开就变成 `Group "kisearch-memory · 错误库" 未匹配到有效路径`
+   * —— 视图的顶栏 scope 是视图名，与 `sourceScope` 必然不等，于是每次都拼串。
+   * 展示该拼什么请用 `meta`。
+   */
   group: string;
+  /** 行内副标题（缺省 = `group`）。跨库来源、失效标记等只影响展示，不参与取数 */
+  meta?: string;
+  /** 文档实际所在库（视图模式下的跨库引用）；缺省 = 事件所属库 */
+  sourceScope?: string;
   vis?: { tone: VisTone; text: string };
   /** 不可操作原因（如文档已进回收站） */
   lockedReason?: string;
@@ -68,7 +80,8 @@ export interface EventDocsCardProps {
   /** 行内二次确认的 key（全局唯一，同一时刻只有一行进入确认态） */
   confirmKey: string | null;
   onConfirmChange: (key: string | null) => void;
-  onOpen: (group: string, name: string) => void;
+  /** `sourceScope` 仅跨库引用（参考文档）会带，缺省 = 事件所属库 */
+  onOpen: (group: string, name: string, sourceScope?: string) => void;
   onRemove: (row: DocRow) => void;
 }
 

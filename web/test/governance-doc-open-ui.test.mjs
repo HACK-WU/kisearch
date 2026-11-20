@@ -25,6 +25,8 @@ const lifecycle = read('src/pages/LifecyclePage.tsx');
 const css = read('src/styles/governance.css');
 /** 2026-11-17 改版：文档行抽到 DocLine，跨页断言改读组件源码 */
 const docLine = read('src/components/governance/event-detail/DocLine.tsx');
+/** 文档卡（meta 展示 / 点击回传 group 的落点） */
+const docsCard = read('src/components/governance/event-detail/EventDocsCard.tsx');
 
 /** 数出「<button> 上挂了某个 className」的出现次数（跨行匹配，容忍属性换行） */
 function clickableCount(src, className) {
@@ -42,10 +44,12 @@ test('事件页：关联文档与参考文档的文档名都是可点按钮，�
   for (const m of docLine.matchAll(/<button[\s\S]{0,160}?className="gov-docline__main"/g)) {
     assert.ok(m[0].startsWith('<button'), '.gov-docline__main 必须挂在 <button> 上（可聚焦 / 可回车）');
   }
+  // 2026-11-20：两张卡都必须落到 setDocTarget，且显式带上「条目所属库」——
+  // 只有 group+name 时，跨库引用与视图模式只能退回事件库/视图名去读。
   assert.equal(
-    (events.match(/onOpen=\{\(group, name\) => setDocTarget\(\{ group, name \}\)\}/g) ?? []).length,
+    (events.match(/onOpen=\{\(group, name(?:, sourceScope)?\) => setDocTarget\(\{ scope: [^}]+, group, name \}\)\}/g) ?? []).length,
     2,
-    '两张卡的 onOpen 都必须落到 setDocTarget（传原始 group/name，不套闭包变量名）',
+    '两张卡的 onOpen 都必须落到 setDocTarget，并带上 scope（传原始 group/name，不套闭包变量名）',
   );
   assert.ok(
     !docLine.includes('<div className="gov-docline__name">'),
@@ -57,7 +61,39 @@ test('事件页：抽屉复用 ModuleDrawer，正文走 doc/get（read 通道）
   assert.match(events, /import \{ ModuleDrawer \} from '@\/components\/ModuleDrawer';/);
   assert.match(events, /import \{ getDocContent \} from '@\/api\/httpApi';/);
   assert.match(events, /<ModuleDrawer[\s\S]{0,320}?fetcher=\{getDocContent\}/, '抽屉必须用 getDocContent 取正文');
-  assert.match(events, /key=\{`\$\{docTarget\.group\}\/\$\{docTarget\.name\}`\}/, 'key 含 group+name，换篇需重挂载');
+  assert.match(
+    events,
+    /key=\{`\$\{docTarget\.scope\}\/\$\{docTarget\.group\}\/\$\{docTarget\.name\}`\}/,
+    'key 含 scope+group+name：换篇、以及跨库同名同组也要重挂载',
+  );
+  assert.match(
+    events,
+    /<ModuleDrawer[\s\S]{0,400}?scope=\{docTarget\.scope\}/,
+    '抽屉必须按条目所属库读正文（传视图名 / 事件库都可能在跨库引用时读错）',
+  );
+});
+
+/**
+ * 回归（2026-11-20 真机 bug）：顶栏选视图 `kisearch-docs`，事件详情点「参考文档」→ 抽屉「加载失败」：
+ * `Group "kisearch-memory · 错误库" 未匹配到有效路径`。切回单库一切正常。
+ *
+ * 成因：参考文档行把「来源库 · 组名 · 失效标记」这段**展示文案**赋给了 `group`，
+ * 而视图的顶栏 scope 是视图名、与 `sourceScope`（真实库）必然不等 ⇒ 每次都拼串，
+ * 于是展示串被当成 Group 传给 `/api/doc/get`。单库下两者相等，故不复现。
+ */
+test('参考文档行：group 必须是真实组名，展示文案只走 meta', () => {
+  const start = events.indexOf('mode="ref"');
+  assert.ok(start > 0, '应存在参考文档卡（mode="ref"）');
+  const refBlock = events.slice(start, events.indexOf('actions={(', start));
+  assert.ok(refBlock.length > 0, '应能截出参考文档卡的 docs 映射与 onOpen');
+
+  assert.match(refBlock, /group: ref\.group,/, '参考文档行的 group 必须是 ref.group（点开定位用原值）');
+  assert.match(refBlock, /meta: \[[\s\S]{0,320}?\]\.join\(""\)/, '「来源库 · 组名 · 失效」只能作为展示文案进 meta');
+  assert.doesNotMatch(refBlock, /group: \[/, 'group 不得再被赋成数组拼出来的展示串（本 bug 的原始形态）');
+  assert.match(refBlock, /sourceScope/, '跨库引用要带上 sourceScope，抽屉才能读对库');
+
+  assert.match(docsCard, /meta=\{row\.meta \?\? row\.group\}/, '卡片展示取 meta，缺省才回退 group');
+  assert.match(docsCard, /onOpen\(row\.group, row\.name, row\.sourceScope\)/, '点击回传真实的 group / sourceScope');
 });
 
 test('分类页：文档名是可点按钮，且同样复用 ModuleDrawer', () => {
@@ -66,7 +102,8 @@ test('分类页：文档名是可点按钮，且同样复用 ModuleDrawer', () =
     /<button[\s\S]{0,160}?className="gov-cell-name gov-cell-name--link"/,
     '分类页文档名必须是按钮（表格里可聚焦）',
   );
-  assert.match(lifecycle, /setDocTarget\(\{ group: doc\.group, name: doc\.name \}\)/);
+  // 分类页文档条目自带所属库（视图聚合二期）：抽屉按它取正文，不能传顶栏 scope
+  assert.match(lifecycle, /setDocTarget\(\{ scope: doc\.scope, group: doc\.group, name: doc\.name \}\)/);
   assert.ok(
     !lifecycle.includes('<div className="gov-cell-name">'),
     '文档名不许退回纯 <div>',

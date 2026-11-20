@@ -30,14 +30,15 @@ export function EventDocsCard(props: EventDocsCardProps) {
                 key={row.key}
                 kind="doc"
                 name={row.name}
-                meta={row.group}
+                /* 展示走 meta（可含「来源库 · …」），点击一律用真实的 group / sourceScope */
+                meta={row.meta ?? row.group}
                 vis={row.vis}
                 canRemove={canWrite && !busy && !row.lockedReason}
                 removeTitle={row.lockedReason ?? (isMember ? '从事件移除（解绑，文档保留）' : '移除该参考文档')}
                 confirmRemove={confirmKey === row.key}
                 onConfirm={() => onConfirmChange(row.key)}
                 onCancelConfirm={() => onConfirmChange(null)}
-                onOpen={() => onOpen(row.group, row.name)}
+                onOpen={() => onOpen(row.group, row.name, row.sourceScope)}
                 onRemove={() => { onConfirmChange(null); onRemove(row); }}
               />
             ))}
