@@ -232,6 +232,9 @@ function syncSingleRelation(
       useCount: 0,
       lastUsedTime: null,
       isImported: false,
+      // 首次进入本库（REQ-20261120-001）：两个时间都从这里起算
+      createdAt: now,
+      updatedAt: now,
     };
 
     // 4. 直接追加（存储层不设上限）：
@@ -253,6 +256,13 @@ function syncSingleRelation(
   if (fs.existsSync(localKbPath)) {
     const existing = readJson<Record<string, string>>(localKbPath);
     if (existing) localKb = existing;
+  }
+  /**
+   * 覆盖既有文档时：**只有正文真的变了**才刷新 `updatedAt`（REQ-20261120-001）。
+   * 否则同一篇反复 `ki_sync_relation`（幂等重放 / 脚本重跑）会被顶成"最近更新"。
+   */
+  if (existingRel && localKb[relationText] !== moduleInfo) {
+    existingRel.updatedAt = now;
   }
   localKb[relationText] = moduleInfo;
   writeJson(localKbPath, localKb);

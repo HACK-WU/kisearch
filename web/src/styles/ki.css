@@ -9325,3 +9325,93 @@ select.ki-chat-cfg__ta--select {
 .ki-ask-fail__t { font-size: var(--ki-font-size-lg); color: var(--ki-color-text); }
 .ki-ask-fail__d { font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
 .ki-ask-fail__acts { margin-top: var(--ki-space-2); }
+
+/* ══════════ 浏览页筛选：条件入口 + 双栏构造器（REQ-20261120-001） ══════════
+   视觉基线：demo/browse-filter-builder/index.html（已确认）。全部取 --ki-* token。
+
+   两段式提交：Enter=确认本条（写面板内「已确认」，面板不关、结果不刷新）；
+   Ctrl/⌘+Enter / 确定=整体应用。故「已确认条」与工具栏 chips 是两份状态，不能合并渲染。 */
+.ki-cond-bar { position: relative; display: flex; align-items: center; gap: var(--ki-space-2); flex-wrap: wrap; }
+.ki-cond-bar__add { flex: none; }
+.ki-cond-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+
+/* 条件 chip（工具栏 / 面板内共用） */
+.cond-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  height: 26px; padding: 0 4px 0 9px;
+  border: 1px solid var(--ki-color-border-strong); border-radius: var(--ki-radius-track);
+  background: var(--ki-color-surface); font-size: var(--ki-font-size-sm);
+}
+.cond-chip__field { color: var(--ki-color-text-subtle); flex: none; }
+.cond-chip__value { color: var(--ki-color-text); font-weight: 600; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cond-chip__x { display: grid; place-items: center; width: 18px; height: 18px; border: 0; background: transparent; border-radius: 50%; color: var(--ki-color-text-subtle); font-size: 12px; }
+.cond-chip__x:hover { background: var(--ki-color-hover-strong); color: var(--ki-color-text); }
+
+/* 双栏面板：锚定在入口下方（阅读态由查看器头部承载，同样锚在那一行） */
+.ki-cond-panel {
+  position: absolute; z-index: 40; top: calc(100% + 6px); left: 0;
+  width: min(680px, calc(100vw - 48px)); max-height: min(460px, 70vh);
+  display: flex; flex-direction: column; overflow: hidden;
+  background: var(--ki-color-surface);
+  border: 1px solid var(--ki-color-border-strong);
+  border-radius: var(--ki-radius-md);
+  box-shadow: var(--ki-shadow-2);
+}
+.ki-cond-panel__search { display: flex; align-items: center; gap: 8px; padding: 9px var(--ki-space-3); border-bottom: 1px solid var(--ki-color-border); flex: none; color: var(--ki-color-text-subtle); }
+.ki-cond-panel__search input { flex: 1; min-width: 0; height: 26px; border: 0; outline: none; background: transparent; color: var(--ki-color-text); font: inherit; }
+.ki-cond-panel__body { display: grid; grid-template-columns: 178px minmax(0, 1fr); min-height: 0; flex: 1; }
+.ki-cond-panel__fields { border-right: 1px solid var(--ki-color-border); overflow: auto; padding: 6px; background: var(--ki-color-bg-secondary); }
+.ki-cond-panel__values { overflow: auto; padding: 8px; min-height: 168px; }
+/* 字段行：与 demo 一致 —— 纯文字行（无边框/无底色），靠选中态与左侧圆点区分。
+   ki.css 的全局 button 规则只重置了 font/cursor/appearance，不带 border:0，
+   所以这里必须显式清掉 UA 边框与灰底，否则会渲染成"一排方块按钮"。 */
+.ki-cond-panel .cf-field {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  padding: 7px 8px; border-radius: var(--ki-radius-sm);
+  border: 0; background: transparent;
+  color: var(--ki-color-text); font-size: var(--ki-font-size-sm);
+}
+.ki-cond-panel .cf-field:hover { background: var(--ki-color-hover); }
+.ki-cond-panel .cf-field[aria-selected="true"] { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); font-weight: 650; }
+.ki-cond-panel .cf-field svg { flex: none; }
+.ki-cond-panel .cf-field em { margin-left: auto; font-style: normal; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-cond-panel .cf-field.is-focused { box-shadow: inset 0 0 0 1px var(--ki-color-primary); }
+.cf-field__dot { width: 5px; height: 5px; border-radius: 50%; background: var(--ki-color-primary); flex: none; }
+.cf-field__dot--off { background: transparent; }
+.ki-cond-panel .cf-opt { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: var(--ki-radius-sm); cursor: pointer; font-size: var(--ki-font-size-sm); }
+.ki-cond-panel .cf-opt:hover { background: var(--ki-color-hover); }
+.ki-cond-panel .cf-opt.is-focused { background: var(--ki-color-primary-soft); box-shadow: inset 0 0 0 1px var(--ki-color-primary); }
+.ki-cond-panel .cf-opt.is-disabled { opacity: .55; cursor: not-allowed; }
+.ki-cond-panel .cf-opt input { accent-color: var(--ki-color-primary); width: 14px; height: 14px; flex: none; }
+.cf-opt__label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cf-opt__note { margin-left: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); flex: none; }
+.cf-none { padding: 18px 10px; text-align: center; font-size: var(--ki-font-size-sm); color: var(--ki-color-text-subtle); }
+
+/* 已确认条件条（Enter 累积，未应用） */
+.ki-cond-panel__confirmed {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 7px var(--ki-space-3); flex: none; max-height: 78px; overflow: auto;
+  border-top: 1px dashed var(--ki-color-border); background: var(--ki-color-bg-secondary);
+}
+.ki-cond-panel__confirmed-label { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); flex: none; }
+.ki-cond-panel__confirmed-empty { font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+
+.ki-cond-panel__foot { display: flex; align-items: center; gap: var(--ki-space-2); padding: 8px var(--ki-space-3); border-top: 1px solid var(--ki-color-border); flex: none; background: var(--ki-color-bg-secondary); }
+.ki-cond-panel__hint { margin-right: auto; font-size: var(--ki-font-size-xs); color: var(--ki-color-text-subtle); }
+.ki-cond-panel__hint.is-ok { color: var(--ki-color-primary); font-weight: 600; }
+.ki-cond-panel__kbd { margin-left: 4px; padding: 0 4px; border-radius: 3px; font-size: 10px; font-weight: 600; background: rgba(255, 255, 255, .22); }
+
+/* 变更徽标：新增=primary 绿 / 更新=info 蓝（与事件页「变更」语义一致，不新造色） */
+.ki-badge--new { background: var(--ki-color-primary-soft); color: var(--ki-color-primary); }
+.ki-badge--upd { background: var(--ki-color-hover-strong); color: var(--ki-color-info); }
+
+/* 窄屏：面板变底部抽屉，避免 375 宽下双栏被压扁 */
+@media (max-width: 720px) {
+  .ki-cond-panel {
+    position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: 100%;
+    max-height: 78vh; border-radius: var(--ki-radius-lg) var(--ki-radius-lg) 0 0;
+  }
+  .ki-cond-panel__body { grid-template-columns: 132px minmax(0, 1fr); }
+  .ki-cond-panel__hint { display: none; }
+  .cond-chip__value { max-width: 150px; }
+}

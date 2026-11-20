@@ -90,6 +90,15 @@ export interface DocItem {
   vectorized?: boolean;
   /** 是否有完整的 FTS-only 索引（旧 relation 缺少完整状态时以非空 ftsIds 兼容判定）。 */
   fullTextIndexed?: boolean;
+  /**
+   * 首次进入本库（REQ-20261120-001，毫秒）。
+   * **老数据缺省 = 未知**：不得当成 0 / now 参与「最近」判定，按「更新」展示即可。
+   */
+  createdAt?: number;
+  /** 正文最近一次变更（毫秒）；仅元数据变更（分类 / 事件 / 置顶）不会刷新它 */
+  updatedAt?: number;
+  /** 仅「事件成员」文档才有（`lifecycle='event'` 且绑定了事件） */
+  eventId?: string;
 }
 
 /**
@@ -113,6 +122,13 @@ export interface DocListResponse {
   groups?: DocGroup[];
   /** 全部文档的自定义 tag 去重列表（供前端 tag 过滤下拉使用） */
   tags?: string[];
+  /** 回显本次生效的过滤条件（后端仅在带筛选时下发，便于排障核对） */
+  filters?: { since?: string; tags?: string[]; event?: string; sort?: string };
+  /**
+   * 仅带 `since` 时下发：**本该命中、但因没有时间字段被时间窗排除**的条数。
+   * 视图下按成员桶各自返回，前端累加后提示「另有 N 篇历史文档无时间记录，已排除」。
+   */
+  undatedExcluded?: number;
   error?: string;
 }
 
@@ -319,9 +335,26 @@ export async function getHealthz(): Promise<HealthzInfo> {
   return (await res.json()) as HealthzInfo;
 }
 
+export interface DocListFilterParams {
+  /** 检索词（名称 / 逻辑路径） */
+  q?: string;
+  group?: string;
+  /** 兼容单标签（FTS 检索只支持单 tag） */
+  tag?: string;
+  /** 自定义标签，多值 **OR**（REQ-20261120-001；用重复参数避免 tag 名含逗号歧义） */
+  tags?: string[];
+  /** 时间窗档位；非法值由服务端 400（前端只用枚举） */
+  since?: '1h' | '6h' | '24h' | '7d';
+  /** `evt_xxx` = 事件成员；`none` = 未关联任何事件 */
+  event?: string;
+  /** 仅在筛选态请求：按「最近变更」倒序 */
+  sort?: 'recent';
+  offset?: number;
+}
+
 export async function getDocList(
   scope: string,
-  opts: { q?: string; group?: string; tag?: string; offset?: number } = {},
+  opts: DocListFilterParams = {},
 ): Promise<DocListResponse> {
   const params = new URLSearchParams({ scope });
   if (opts.q) params.set('q', opts.q);
@@ -329,6 +362,13 @@ export async function getDocList(
   if (opts.group) params.set('group', opts.group);
   // 按自定义 tag 过滤（relation.tags 精确匹配）
   if (opts.tag) params.set('tag', opts.tag);
+  // 多标签：重复参数（`tags=a&tags=b`），与后端 getAll 口径一致
+  for (const tag of opts.tags ?? []) {
+    if (tag) params.append('tags', tag);
+  }
+  if (opts.since) params.set('since', opts.since);
+  if (opts.event) params.set('event', opts.event);
+  if (opts.sort) params.set('sort', opts.sort);
   // 服务端分页偏移（与 limit 组合翻页；缺省 0 = 第一页）
   if (opts.offset !== undefined && opts.offset > 0) params.set('offset', String(opts.offset));
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
@@ -389,15 +429,15 @@ const GROUP_DOCS_MAX_PAGES = 1000;
 export async function fetchGroupDocsAll(
   scope: string,
   group: string,
-  tag?: string,
+  extra: DocListFilterParams = {},
 ): Promise<DocListResponse> {
-  const first = await getDocList(scope, { group, tag });
+  const first = await getDocList(scope, { group, ...extra });
   if (!first.truncated || first.docs.length === 0) return first;
   const total = Math.max(first.total, first.docs.length);
   const docs = [...first.docs];
   let offset = docs.length;
   for (let page = 1; page < GROUP_DOCS_MAX_PAGES && docs.length < total; page++) {
-    const next = await getDocList(scope, { group, tag, offset });
+    const next = await getDocList(scope, { group, ...extra, offset });
     if (next.docs.length === 0) break;
     docs.push(...next.docs);
     offset += next.docs.length;

@@ -26,7 +26,19 @@ import { getDocContent, type DocItem } from '@/api/httpApi';
 import { kiSearch, type SearchHit, type SearchResult } from '@/api/mcpClient';
 import { ModuleDrawer } from '@/components/ModuleDrawer';
 import { ChatToggleButton } from '@/chat/ChatToggleButton';
-import { TagSelect } from '@/components/TagSelect';
+import { ConditionBar } from '@/components/ConditionBuilder';
+import {
+  EMPTY_FILTERS,
+  docChangeKind,
+  docLatestTime,
+  filterKey,
+  isFilterEmpty,
+  relTime,
+  sinceLabel,
+  sumUndated,
+  toDocListParams,
+  type BrowseFilters,
+} from '@/lib/browseFilters';
 import { Icon } from '@/components/icons';
 import {
   documentViewForScope,
@@ -194,8 +206,14 @@ export function BrowsePage(): JSX.Element {
   const [readerOutlineCollapsed, setReaderOutlineCollapsed] = useState(true);
   /** 全屏工作区的知识目录：默认展开（用户 2026-10-02 要求）；收起后只留一个展开按钮 */
   const [readerGroupCollapsed, setReaderGroupCollapsed] = useState(false);
-  // tag 过滤：选中则仅显示带该 tag 的文档；空表示不过滤
-  const [selectedTag, setSelectedTag] = useState('');
+  /**
+   * 筛选条件（时间 / 标签 / 事件，REQ-20261120-001）：由合并入口 `ConditionBar` 产出，
+   * 同时参与**目录树**与**结果列表**两条取数链路（树与结果都按它过滤，避免两套口径）。
+   */
+  const [filters, setFilters] = useState<BrowseFilters>(EMPTY_FILTERS);
+  /** 兼容既有消费方（FTS 检索只支持单 tag）：标签过滤取第一个 */
+  const selectedTag = filters.tags[0] ?? '';
+  const filtersActive = !isFilterEmpty(filters);
   // 树内文档叶子：按 Group 缓存已加载文档（全量列表优先，被 500 条截断的 Group 懒加载补齐）
   const [docsByGroup, setDocsByGroup] = useState<Record<string, DocItem[]>>({});
   const loadedGroupsRef = useRef<Set<string>>(new Set());
@@ -308,7 +326,7 @@ export function BrowsePage(): JSX.Element {
       setMobileReaderOpen(true);
       setQ('');
       setSearchQ('');
-      setSelectedTag('');
+      setFilters(EMPTY_FILTERS);
       // 刷新恢复现场：全屏阅读态也随 URL 一起回来（reader=1）
       setReaderFullscreen(browseFullscreenFromSearch(directTarget));
       // 深链接 / 刷新恢复也算「该 scope 已自动展示过」：否则用户随后关闭文档时会被
@@ -338,7 +356,7 @@ export function BrowsePage(): JSX.Element {
       }
       setQ('');
       setSearchQ('');
-      setSelectedTag('');
+      setFilters(EMPTY_FILTERS);
     }
     appliedDirectTarget.current = directTargetKey;
   }, [directTarget, directTargetKey, scope, setScope, data?.scope, data?.groups]);
@@ -347,7 +365,7 @@ export function BrowsePage(): JSX.Element {
   // 而非 /api/tags 的向量库 tag）；react-query 同 key 缓存，不会产生额外请求
 
   // 选中 group 的完整文档（后端按 group 精确返回，不受 500 条全量分页截断影响）
-  const groupQuery = useGroupDocs(scope, activeGroup || null, selectedTag || undefined);
+  const groupQuery = useGroupDocs(scope, activeGroup || null, filters);
   const groupDocs = groupQuery.data?.docs ?? [];
 
   // 切换 scope 后清理旧 scope 的页面状态。阅读器必须先卸载：它按传入 scope 拉取正文，
@@ -357,7 +375,7 @@ export function BrowsePage(): JSX.Element {
     previousScopeRef.current = scope;
     setQ('');
     setSearchQ('');
-    setSelectedTag('');
+    setFilters(EMPTY_FILTERS);
     // 上一个 scope 的「页内打开」不应带到新 scope（q 被清空后结果态本就不存在，这里一并归零）
     dispatchBrowseView({ type: 'show-results' });
     // 左树状态按 scope 分桶：切换后重新读取该 scope 的目录状态，避免把上一个 scope 的布局写过去
@@ -478,9 +496,10 @@ export function BrowsePage(): JSX.Element {
   // 判空由 hasSearchTerm 负责（只由分隔符/空白组成 = 无检索词，N1）：否则输入 `/` 会发一次请求并
   // 命中全库（实测 161 条）——那既不是用户要的，也把"空输入"伪装成了"有结果"。
   const searchQuery = useQuery<DocListResponse>({
-    queryKey: ['docList', scope, 'search', searchQ, selectedTag],
-    queryFn: () => getDocList(scope, { q: searchQ, tag: selectedTag || undefined }),
-    enabled: hasSearchTerm(searchQ),
+    queryKey: ['docList', scope, 'search', searchQ, filterKey(filters)],
+    queryFn: () => getDocList(scope, toDocListParams(filters, { q: searchQ })),
+    // 无检索词但有筛选条件时同样要取数（此时结果区展示「最近变更」列表）
+    enabled: hasSearchTerm(searchQ) || filtersActive,
     staleTime: 10_000,
     retry: 1,
     placeholderData: (previousData) => previousData,
@@ -488,7 +507,10 @@ export function BrowsePage(): JSX.Element {
   const searchDocs = useMemo(() => normalizeDocData(searchQuery.data)?.docs ?? [], [searchQuery.data]);
   /** 名称命中 / 路径命中分区（后端 matchedBy 决定；旧 daemon 无该字段时全部归名称，不丢结果） */
   const searchSections = useMemo(() => splitSearchDocs(searchDocs), [searchDocs]);
-  const isSearching = hasSearchTerm(q);
+  /** 被「未知时间」排除的老文档条数（带 since 时后端下发；视图累加各桶） */
+  const undatedExcluded = useMemo(() => sumUndated(searchQuery.data), [searchQuery.data]);
+  /** 结果态触发条件 = 有检索词 **或** 有生效筛选（后者展示「最近变更」列表） */
+  const isSearching = hasSearchTerm(q) || filtersActive;
   /**
    * 主区形态（REQ-20261018-001）：结果列表可见 = 有检索词 **且** 未被「在页内打开」隐藏。
    *
@@ -541,7 +563,7 @@ export function BrowsePage(): JSX.Element {
 
   const clearFilters = useCallback((): void => {
     setQ('');
-    setSelectedTag('');
+    setFilters(EMPTY_FILTERS);
   }, []);
 
   // 合并当前已知文档：全量列表 + 当前 Group 完整列表 + 当前搜索结果。
@@ -1045,7 +1067,20 @@ export function BrowsePage(): JSX.Element {
           className="ki-browse-fulltext__item"
           onClick={() => openDocument(target, 'drawer')}
         >
-          <span className="ki-browse-fulltext__title">{highlightMatch(doc.name, searchQ)}</span>
+          <span className="ki-browse-fulltext__title">
+            {highlightMatch(doc.name, searchQ)}
+            {/* 筛选态才显示「新增 / 更新」与相对时间：纯检索结果里这两个信息是噪音 */}
+            {filtersActive && (
+              <>
+                <span className={`ki-badge ${docChangeKind(doc) === 'new' ? 'ki-badge--new' : 'ki-badge--upd'}`}>
+                  {docChangeKind(doc) === 'new' ? '新增' : '更新'}
+                </span>
+                {docLatestTime(doc) !== undefined && (
+                  <span className="ki-card__sub">{relTime(docLatestTime(doc))}</span>
+                )}
+              </>
+            )}
+          </span>
           {/* 路径常显（原先只显示 Group）：按路径检索时，用户要能一眼看出命中的是路径哪一段 */}
           <span className="ki-browse-fulltext__path">{renderResultPath(doc)}</span>
         </button>
@@ -1088,11 +1123,20 @@ export function BrowsePage(): JSX.Element {
         <div className="ki-results__head">
           <span className="ki-panel-heading">
             <span className="ki-panel-kicker">RESULTS</span>
-            <span className="ki-results__title">检索结果</span>
+            <span className="ki-results__title">{filtersActive && !hasSearchTerm(q) ? '最近变更' : '检索结果'}</span>
           </span>
           <span className="ki-results__meta">
-            「{searchQ || q.trim()}」 · {searching ? '搜索中…' : searchResultSummary(searchCounts)}
+            {filtersActive && !hasSearchTerm(q)
+              ? `筛选命中 ${searchCounts.name + searchCounts.path} 篇`
+              : `「${searchQ || q.trim()}」`}
+            {' · '}
+            {searching ? '搜索中…' : searchResultSummary(searchCounts)}
           </span>
+          {undatedExcluded > 0 && (
+            <span className="ki-card__sub">
+              另有 {undatedExcluded} 篇历史文档无时间记录，已排除
+            </span>
+          )}
         </div>
         {failed ? (
           <div className="ki-empty" style={{ border: 'none', padding: 40 }}>
@@ -1104,11 +1148,24 @@ export function BrowsePage(): JSX.Element {
         ) : total === 0 && !searching ? (
           <div className="ki-empty" style={{ border: 'none', padding: 40 }}>
             <div>
-              <h3>未找到相关内容</h3>
-              <p>
-                建议：调整关键词 / 切换 tag 过滤；路径检索支持「组名/文件名」写法（如 <code>wiki/API接口文档</code>）；
-                正文检索只覆盖已建立 FTS 索引的文档。
-              </p>
+              {filtersActive && !hasSearchTerm(q) ? (
+                <>
+                  <h3>{filters.since ? `${sinceLabel(filters.since)}内没有新增或修改的文档` : '没有符合筛选条件的文档'}</h3>
+                  <p>
+                    「时间」只覆盖有时间记录的文档：本次升级之前写入的文档没有时间戳，不参与时间筛选
+                    {undatedExcluded > 0 ? `（当前共 ${undatedExcluded} 篇被排除）` : ''}。
+                  </p>
+                  <p>可放宽时间范围（如「最近 7 天」），或移除时间条件后重试。</p>
+                </>
+              ) : (
+                <>
+                  <h3>未找到相关内容</h3>
+                  <p>
+                    建议：调整关键词 / 切换 tag 过滤；路径检索支持「组名/文件名」写法（如 <code>wiki/API接口文档</code>）；
+                    正文检索只覆盖已建立 FTS 索引的文档。
+                  </p>
+                </>
+              )}
             </div>
           </div>
         ) : (
@@ -1426,7 +1483,12 @@ export function BrowsePage(): JSX.Element {
            检索结果点开的抽屉（asDrawer）保持原样：那时主区是结果列表，搜索框仍属结果区工具条。
            头部高度因此由两行 126.5px 降为一行（.plans/2026-10-16-browse-reader-single-row-header）。 */
         inlineBar={asDrawer ? undefined : (
-          <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
+          <ConditionBar
+            scope={scope}
+            memberScopes={viewMembers}
+            filters={filters}
+            onChange={setFilters}
+          />
         )}
         inlineSearch={asDrawer ? undefined : {
           value: q,
@@ -1618,7 +1680,12 @@ export function BrowsePage(): JSX.Element {
                   与阅读态完全相反，一切换就整体错位；「文档内容」标签同时去掉（阅读态也没有它）。
                   结果态与阅读态的**故意差异**只剩右侧：此处按语境给「清空 + 居中|铺满」，
                   阅读态给「全库|本文 + 文档动作」—— 那些动作依赖当前文档，结果态没有它。 */}
-              <TagSelect scope={scope} value={selectedTag} onChange={setSelectedTag} />
+              <ConditionBar
+                scope={scope}
+                memberScopes={viewMembers}
+                filters={filters}
+                onChange={setFilters}
+              />
               <div className="ki-reader-tools">
                 <div className="ki-reader-filters">
                   <label className="ki-reader-search">
@@ -1647,8 +1714,8 @@ export function BrowsePage(): JSX.Element {
                     className="ki-btn ki-btn--secondary ki-btn--small"
                     type="button"
                     onClick={clearFilters}
-                    disabled={!q && !selectedTag}
-                    title="清空检索词与标签筛选"
+                    disabled={!q && !filtersActive}
+                    title="清空检索词与全部筛选条件"
                   >
                     清空
                   </button>

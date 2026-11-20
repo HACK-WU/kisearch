@@ -17,6 +17,7 @@ import {
 import { resolveMcpPort } from './daemonPort';
 import { isLoopbackHost } from './resourcesPage';
 import { hasSearchTerm } from './browseSearchGroups';
+import { EMPTY_FILTERS, filterKey, toDocListParams, type BrowseFilters } from './browseFilters';
 import { resolveVectorAvailability, type VectorAvailability } from './vectorAvailability';
 
 export type { ScopeListResponse, DocListResponse, HealthResponse };
@@ -195,11 +196,21 @@ export function useVectorDimensionStatus(scope: string) {
   });
 }
 
-/** 指定 group 的完整文档列表（S0-2：服务端分页翻页取全，单 Group >500 篇不漏），可选 tag 过滤 */
-export function useGroupDocs(scope: string, group: string | null, tag?: string) {
+/**
+ * 指定 group 的完整文档列表（S0-2：服务端分页翻页取全，单 Group >500 篇不漏），可选筛选条件。
+ *
+ * ★ 筛选条件必须**完整参与 queryKey**（`filterKey`），否则切换条件不会重新取数；
+ * ★ 目录树不需要「按时间倒序」（组内顺序无意义），故这里把 `sort` 去掉再请求。
+ */
+export function useGroupDocs(
+  scope: string,
+  group: string | null,
+  filters: BrowseFilters = EMPTY_FILTERS,
+) {
+  const params = { ...toDocListParams(filters), sort: undefined };
   return useQuery<DocListResponse>({
-    queryKey: ['docList', scope, 'group', group ?? '', tag ?? ''],
-    queryFn: () => fetchGroupDocsAll(scope, group ?? '', tag),
+    queryKey: ['docList', scope, 'group', group ?? '', filterKey(filters)],
+    queryFn: () => fetchGroupDocsAll(scope, group ?? '', params),
     enabled: !!group,
     staleTime: 30_000,
     retry: 1,

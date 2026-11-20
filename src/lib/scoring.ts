@@ -27,6 +27,22 @@ export interface Relation {
   useCount: number;
   lastUsedTime: number | null;
   isImported: boolean;
+  /**
+   * 首次进入本库的毫秒时间戳（REQ-20261120-001）。
+   *
+   * 老数据缺省 = **未知**：读取侧不得兜底成 0 / now，`since` 过滤时一律不命中
+   * （宁可少显示，也不能把 208 篇历史文档假装成"刚刚新增"）。
+   */
+  createdAt?: number;
+  /**
+   * 正文内容最近一次变更的毫秒时间戳。
+   *
+   * ★ **元数据变更不刷新**（分类 / 期限 / 可见性 / 事件绑定 / 置顶 / 回收站恢复）：
+   *   否则用户点一次治理操作就把文档顶成"最近更新"，噪音压掉真实变更。
+   * ★ 覆盖导入但内容未变时**也不刷新**（判据见 `import.ts` 的 `isContentUnchanged`），
+   *   否则一次全目录重导会把全库刷成"刚刚更新"，筛选功能直接自废。
+   */
+  updatedAt?: number;
   /** S-04+ 新增：关联到 memory store 的 ID，用于增量 diff/delete */
   memoryId?: string;
   /** S-04+ 新增：原始文件相对路径（meta.sourceDir 的相对 posix 路径），用于 diff 关联 memoryId */

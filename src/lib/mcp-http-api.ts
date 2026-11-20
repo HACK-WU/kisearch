@@ -139,7 +139,19 @@ import { DEFAULT_QUERY_EMBED_TIMEOUT_MS } from './query-timeout.js';
 import { isFtsOnlyIndexedRelation } from './scoring.js';
 import { getRelationsCacheIdentity, readAllGroupCaches, onScopeRelationsInvalidated } from './group-cache.js';
 // 路径检索：检索词归一 + 逻辑路径（group 与 sourcePath 重叠合并）见 doc-path.ts
-import { logicalDocPath, matchDocQuery, normalizeSearchQuery, type SearchableDoc } from './doc-path.js';
+import { logicalDocPath, matchDocQuery } from './doc-path.js';
+// 筛选（REQ-20261120-001）：解析 + 匹配纯函数（只读 URL ⇒ 视图逐成员生效）
+import {
+  BadFilterError,
+  hasDocTime,
+  matchEvent,
+  matchSince,
+  matchTags,
+  parseDocFilters,
+  sortByRecent,
+  type DocFilters,
+  type FilterableDoc,
+} from './doc-filters.js';
 import { DocumentEditError, readDocumentForEdit, saveDocumentEdit } from './document-editor.js';
 // 文档移动（REQ-20261112-002）：预检 + 编排 + 回滚，复用 sync / delete 两条已测链路
 import { moveDocument } from './doc-move.js';
@@ -529,6 +541,12 @@ interface DocListCache {
     vectorized: boolean; fullTextIndexed: boolean;
     /** 落点来源（REQ-20261021-001）：仅兜底写入时下发；缺省 = 用户显式指定 Group */
     groupSource?: 'scope-fallback';
+    /** 首次进入本库（ms）；老数据缺省 = 未知（REQ-20261120-001） */
+    createdAt?: number;
+    /** 正文最近变更（ms）；元数据变更不刷新（REQ-20261120-001） */
+    updatedAt?: number;
+    /** 仅 lifecycle='event' 的成员文档才有 */
+    eventId?: string;
   }[];
   mtimeMs: number;
   size: number;
@@ -590,6 +608,10 @@ function buildDocList(scope: string): DocListCache['docs'] {
         ...(rel.tags && rel.tags.length > 0 ? { tags: rel.tags } : {}),
         // 落点来源留痕（REQ-20261021-001）：只在兜底时下发，避免给绝大多数条目加字段
         ...(rel.groupSource ? { groupSource: rel.groupSource } : {}),
+        // 时间与事件（REQ-20261120-001）：缺省不写键，与上面几个可选字段同口径
+        ...(typeof rel.createdAt === 'number' ? { createdAt: rel.createdAt } : {}),
+        ...(typeof rel.updatedAt === 'number' ? { updatedAt: rel.updatedAt } : {}),
+        ...(rel.eventId ? { eventId: rel.eventId } : {}),
       });
     }
   }
@@ -2294,14 +2316,13 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
  * 抽成纯函数是为了让视图模式能**逐成员复用同一份逻辑**：
  * 视图下按成员分桶返回，而不是让前端发 N 次请求（5 库 = 5 次 IO + 5 次 500 条截断 + 5 套独立失败处理）。
  */
-function buildDocListPayload(url: URL, scope: string): Record<string, unknown> {
-  // 路径检索（2026-10-20）：检索词归一化后与「逻辑路径」（Group 路径 + 导入源 sourcePath，
-  // 按最长重叠段合并，见 doc-path.ts）比较。归一处后为空 = 无有效检索词（纯空格 / 纯 `/`），
-  // 按「不过滤」处理 —— 不能当成"搜不到任何文档"。
-  const q = normalizeSearchQuery(url.searchParams.get('q') ?? '');
-  const groupRaw = url.searchParams.get('group');
-  // 按自定义 tag 过滤（relation.tags 精确匹配；缺省不过滤）
-  const tagRaw = (url.searchParams.get('tag') ?? '').toLowerCase();
+function buildDocListPayload(url: URL, scope: string, filters: DocFilters): Record<string, unknown> {
+  /**
+   * 检索词 / group / tags / since / event / sort 统一由 `parseDocFilters` 解析（**只读 URL**）。
+   * 这样视图分支用同一份 filters 逐成员执行即自动生效 —— 新增过滤维度不必改视图代码。
+   */
+  const { q, group: groupRaw, since, event, sort } = filters;
+  const tagFilter = filters.tags;
   const limitRaw = url.searchParams.get('limit');
   const limit = limitRaw ? Math.min(Math.max(parseInt(limitRaw, 10) || 0, 1), DOC_LIST_LIMIT) : DOC_LIST_LIMIT;
   // S0-2（REQ-20260930-002）：服务端分页 offset（与 limit 组合翻页；非法/负值按 0）
@@ -2323,13 +2344,39 @@ function buildDocListPayload(url: URL, scope: string): Record<string, unknown> {
   // 全部文档的自定义 tag 去重列表（供前端 tag 过滤下拉使用）
   const tags = Array.from(tagSet).sort();
 
-  // tag 过滤辅助：tagRaw 为空则不过滤；否则匹配 relation.tags 中的某个 tag
-  const matchTag = (d: { tags?: string[] }): boolean =>
-    !tagRaw || (d.tags ?? []).some((t) => t.toLowerCase() === tagRaw);
+  /**
+   * 统一过滤链（REQ-20261120-001）：检索词 / 标签（OR）/ 时间窗口 / 事件成员，全部 AND。
+   * ★ 时间缺失的老文档**一律不命中** `since`（不臆造时间），另计入 `undatedExcluded` 供 UI 提示。
+   */
+  const matchAll = (d: FilterableDoc): boolean =>
+    (!q || matchDocQuery(d, q) !== null)
+    && matchTags(d, tagFilter)
+    && matchSince(d, since)
+    && matchEvent(d, event);
+  /**
+   * 「本该命中、但因没有时间字段被时间窗排除」的条数（仅带 since 时统计）。
+   * 视图下按成员桶各自返回，前端累加显示"另有 N 篇历史文档无时间记录"。
+   */
+  const undatedExcluded = since
+    ? all.filter((d) => (!q || matchDocQuery(d, q) !== null)
+      && matchTags(d, tagFilter)
+      && matchEvent(d, event)
+      && !hasDocTime(d)).length
+    : undefined;
+  /** 回显本次生效的过滤条件（排障 / 前端对账）；无任何条件时不加该键，保持响应向后兼容 */
+  const filterEcho = {
+    ...(since ? { since: since.key } : {}),
+    ...(tagFilter.length > 0 ? { tags: tagFilter } : {}),
+    ...(event ? { event } : {}),
+    ...(sort !== 'default' ? { sort } : {}),
+  };
+  const extra = {
+    ...(Object.keys(filterEcho).length > 0 ? { filters: filterEcho } : {}),
+    ...(undatedExcluded !== undefined ? { undatedExcluded } : {}),
+  };
   // 检索过滤：文档名 **或** 逻辑路径（含 Group 路径）命中即保留。
   // 旧实现只比 name + sourcePath，而 sourcePath 是"导入源目录相对路径"、与界面展示的
   // group/文件名不同源 ⇒ 照着页头路径搜恒为 0；无 sourcePath 的文档（MCP/CLI 写入）更无从命中。
-  const matchQuery = (d: SearchableDoc): boolean => !q || matchDocQuery(d, q) !== null;
   /**
    * 检索态给命中文档补两个展示字段（**非检索态不补**，不给既有消费方凭空加字段）：
    *   - `matchedBy`：命中来源 `name` / `path` —— 前端据此分「名称命中」「路径命中」两个分区；
@@ -2345,17 +2392,19 @@ function buildDocListPayload(url: URL, scope: string): Record<string, unknown> {
   // 指定 group 时按 [offset, offset+limit) 分页返回该 group 文档（S0-2 修复：
   // 旧行为 slice 后以截断长度冒充 total 且恒 truncated:false，单 Group >500 篇静默丢失）
   if (groupRaw) {
-    const groupMatched = all
-      .filter((d) => d.group === groupRaw && matchQuery(d) && matchTag(d));
-    const docs = groupMatched.slice(offset, offset + limit);
+    const groupMatched = all.filter((d) => d.group === groupRaw && matchAll(d));
+    // 排序必须在 slice 之前：分页前后顺序不一致会导致跨页重复/漏条
+    const ordered = sort === 'recent' ? sortByRecent(groupMatched) : groupMatched;
+    const docs = ordered.slice(offset, offset + limit);
     return {
       scope,
       docs: withSearchMeta(docs),
       offset,
-      total: groupMatched.length,
-      truncated: offset + docs.length < groupMatched.length,
+      total: ordered.length,
+      truncated: offset + docs.length < ordered.length,
       groups,
       tags,
+      ...extra,
     };
   }
 
@@ -2363,17 +2412,19 @@ function buildDocListPayload(url: URL, scope: string): Record<string, unknown> {
   //   - 有搜索词(q)：返回跨组模糊匹配的文档（全局搜索场景，limit 放宽到 2000）
   //   - 无搜索词(q)：返回前 limit 条全部 docs（兼容既有 API 契约；BrowsePage 前端已改用 useGroupDocs 按组精确拉取）
   const SEARCH_LIMIT = 2000;
-  const filtered = all.filter(matchQuery).filter(matchTag);
-  const searchLimit = q ? Math.min(SEARCH_LIMIT, filtered.length) : Math.min(limit, filtered.length);
-  const docs = filtered.slice(offset, offset + searchLimit);
+  const filtered = all.filter(matchAll);
+  const ordered = sort === 'recent' ? sortByRecent(filtered) : filtered;
+  const searchLimit = q ? Math.min(SEARCH_LIMIT, ordered.length) : Math.min(limit, ordered.length);
+  const docs = ordered.slice(offset, offset + searchLimit);
   return {
     scope,
     docs: withSearchMeta(docs),
     offset,
-    total: filtered.length,
-    truncated: offset + docs.length < filtered.length,
+    total: ordered.length,
+    truncated: offset + docs.length < ordered.length,
     groups,
     tags,
+    ...extra,
   };
 }
 
@@ -2392,6 +2443,21 @@ function buildDocListPayload(url: URL, scope: string): Record<string, unknown> {
 async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> {
   const scopeRaw = url.searchParams.get('scope') ?? '';
   const config = loadConfig();
+
+  /**
+   * 过滤参数在这里解析一次（**视图分支之前**）：非法 `since` / `sort` 只 400 一次，
+   * 不会变成"每个成员桶各报一次错"。解析失败即结束，不降级为"不过滤"。
+   */
+  let filters: DocFilters;
+  try {
+    filters = parseDocFilters(url);
+  } catch (err) {
+    if (err instanceof BadFilterError) {
+      sendJson(res, 400, { ok: false, error: err.code, hint: err.message });
+      return;
+    }
+    throw err;
+  }
 
   let targets;
   try {
@@ -2422,7 +2488,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
     const tagSet = new Set<string>();
     for (const member of targets.scopes) {
       try {
-        const payload = buildDocListPayload(url, member);
+        const payload = buildDocListPayload(url, member, filters);
         buckets.push(payload);
         for (const t of (payload.tags as string[]) ?? []) tagSet.add(t);
       } catch (err) {
@@ -2442,7 +2508,7 @@ async function handleDocList(res: http.ServerResponse, url: URL): Promise<void> 
   }
 
   const scope = resolveScope(config, scopeRaw);
-  sendJson(res, 200, { ok: true, ...buildDocListPayload(url, scope) });
+  sendJson(res, 200, { ok: true, ...buildDocListPayload(url, scope, filters) });
 }
 
 // ─── POST /api/import/upload ──────────────────────────

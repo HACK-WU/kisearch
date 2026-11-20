@@ -240,6 +240,11 @@ function publishLocalKbAndCache(draft: RelationEditDraft, plan: IndexPlan): void
     const priorContent = kb[draft.relation];
     kb[draft.relation] = draft.content;
     writeJson(kbPath, kb);
+    /**
+     * 编辑发布 = 正文内容变更（REQ-20261120-001）：刷 `updatedAt`；
+     * `createdAt` 保持原值（老文档缺省就保持缺省，不补锚点）。
+     */
+    relation.updatedAt = Date.now();
     if (plan.mode === 'dense') {
       relation.memoryIds = plan.denseContentIds;
       relation.memoryId = plan.denseContentIds[0];

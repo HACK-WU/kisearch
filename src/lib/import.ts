@@ -1112,6 +1112,14 @@ async function handleDirectImportUnlocked(
    *   —— 只有真正落库的那条才配出现在清单里。
    */
   const modifiedMap = new Map<string, ImportCreatedItem>();
+  /**
+   * 打标计划（REQ-20261120-001）：`group\u0000relation` → 本次是新建还是内容变更。
+   *
+   * 为什么在扫描阶段定、到 phase4 才用：判定「内容是否变化」要拿到切分后的 entries，
+   * 而关系记录要到 phase4 才落盘。这里只记判定结果，**不影响任何跳过/重写决策**
+   * （既有 `incremental` 跳写行为原样保留）。
+   */
+  const stampPlan = new Map<string, { isNew: boolean; contentChanged: boolean }>();
   /** D7：组级原文写缓冲（groupPath → relation → 原文）；扫描循环内只进缓冲，
    *  扫描结束后每组一次 loadLocalKb+合并+writeJson 落盘（O(文档数)→O(组数)）。
    *  键在循环前由 ensureGroupBuffer 预建，避免热路径重复判空。 */
@@ -1311,6 +1319,7 @@ async function handleDirectImportUnlocked(
     // 新增口径 = 知识库此前没有这个 relation：create（新文件）+ suffix（冲突改名后仍新建）
     if (resolution.action === 'create' || resolution.action === 'suffix') {
       createdMap.set(`${groupPath}\u0000${relation}`, { group: groupPath, relation });
+      stampPlan.set(`${groupPath}\u0000${relation}`, { isNew: true, contentChanged: true });
     }
     const previousRelationSnapshot = previousRelation ? cloneRelation(previousRelation) : undefined;
     const previousFtsKey = `${groupPath}\u0000${relation}`;
@@ -1395,9 +1404,17 @@ async function handleDirectImportUnlocked(
       for (const copiedRel of assetResult.copied) assetCopied.add(`${groupPath}::${copiedRel}`);
       assetWarnings.push(...assetResult.warnings);
     }
-    // R3（REQ-20261010-001）：增量导入——内容未变则跳过切分 / embedding / 写入 / 原文重写
-    // （附件已按上面照常复制）。计完成而非跳过：该文件的数据本就完整在位。
-    if (conflictMode === 'incremental' && vector
+    /**
+     * 内容未变判定（REQ-20261120-001 扩展）。
+     *
+     * 原先只在 `incremental` 模式下判一次、且结论用于**跳过重写**；现在覆盖分支**无条件**再判，
+     * 结论只用于「要不要刷新 `updatedAt`」——**不参与任何跳过决策**（下面的 continue 条件原样保留），
+     * 否则会改变 FTS-only 等场景的既有导入语义。
+     *
+     * ★ 调用点必须留在切分之后：`isContentUnchanged` 依赖 `entries`（分片结果），
+     *   提前调用会因 `entries` 缺失而恒判"内容已变更"。
+     */
+    const contentUnchanged = resolution.action === 'overwrite'
       && isContentUnchanged({
         fileText,
         previousLocalText: typeof previousLocalText === 'string' ? previousLocalText : undefined,
@@ -1405,7 +1422,10 @@ async function handleDirectImportUnlocked(
         entries,
         tags: customTags,
         scope,
-      })) {
+      });
+    // R3（REQ-20261010-001）：增量导入——内容未变则跳过切分 / embedding / 写入 / 原文重写
+    // （附件已按上面照常复制）。计完成而非跳过：该文件的数据本就完整在位。
+    if (conflictMode === 'incremental' && vector && contentUnchanged) {
       unchangedFileCount += 1;
       // 回写冲突明细的实际结果：判定为 overwrite 但被「内容未变」拦下，不得让报告说"已覆盖"
       // （不用 findLast：tsconfig 的 lib 不含 es2023）
@@ -1424,6 +1444,8 @@ async function handleDirectImportUnlocked(
     // ★ 只在这里登记标识，不比对内容、不存正文（口径见 MAX_MODIFIED_DETAIL 注释）。
     if (resolution.action === 'overwrite') {
       modifiedMap.set(`${groupPath}\u0000${relation}`, { group: groupPath, relation });
+      // 覆盖但内容未变 → 不刷新 updatedAt（否则一次全目录重导会刷亮全库）
+      stampPlan.set(`${groupPath}\u0000${relation}`, { isNew: false, contentChanged: !contentUnchanged });
     }
     ensureGroupBuffer(groupPath).set(relation, fileText);
     fileRecords.push({
@@ -2157,7 +2179,7 @@ async function handleDirectImportUnlocked(
   logPhaseDone(3, TOTAL, `Group 树构建完成，涉及 ${ctx.groups.size} 个 Group`);
 
   logPhaseStart(4, TOTAL, `写入元数据（${ctx.entries.length} 条 relations）...`);
-  phase4WriteRelations(ctx, relationsCache, args.isDatasourceDocument !== false);
+  phase4WriteRelations(ctx, relationsCache, args.isDatasourceDocument !== false, stampPlan);
   for (const rec of activeFileRecords) {
     const rel = relationsCache.groups[rec.groupPath]?.hot_relations.find((item) => item.text === rec.relation);
     /**
@@ -2583,12 +2605,15 @@ function upsertRelation(
   memoryIds: string[] | null | undefined,
   sourcePath: string | null | undefined,
   tags?: string[],
-  identity?: { isDatasourceDocument?: boolean }
+  identity?: { isDatasourceDocument?: boolean },
+  /** 打标计划：缺省 = 不知道是否变更 → 两个时间字段一概不动（rebuild 等入口走这条） */
+  stamp?: { isNew: boolean; contentChanged: boolean }
 ): void {
   const groupData = ensureCacheGroup(cache, groupPath);
   let rel = groupData.hot_relations.find((r) => r.text === relationText);
   /** 缺省 = 数据源文档（CLI / 数据源同步 / Web 上传，行为与改前完全一致） */
   const datasource = identity?.isDatasourceDocument !== false;
+  const now = Date.now();
 
   if (!rel) {
     rel = {
@@ -2599,6 +2624,8 @@ function upsertRelation(
       lastUsedTime: null,
       // 上传通道的文档是普通文档（不是数据源同步来的），因此可带分类
       isImported: datasource,
+      createdAt: now,
+      updatedAt: now,
     };
     groupData.hot_relations.push(rel);
   } else if (datasource) {
@@ -2630,6 +2657,17 @@ function upsertRelation(
    * 显式清空由 `handleDirectImport` 按 `args.tags !== undefined` 单独处理。
    */
   if (tags && tags.length > 0) rel.tags = tags;
+  /**
+   * 打标（REQ-20261120-001）：覆盖分支只有「内容确实变了」才刷新 `updatedAt`；
+   * 内容未变 / 无打标计划（rebuild 等）一概不动。
+   *
+   * ★ 刻意**不在 `createdAt` 缺失时补 now**：补了会让 created 与 updated 相等，
+   *   而前端"新增 / 更新"的判据是 `updatedAt - createdAt < 60s` ⇒ 老文档首次变更会被
+   *   显示成"新增"（与事实相反）。缺省就保持缺省（未知）。
+   */
+  if (stamp && !stamp.isNew && stamp.contentChanged) {
+    rel.updatedAt = now;
+  }
 }
 
 // ─── local KB 操作 ───────────────────────────────────────
@@ -2785,7 +2823,12 @@ function phase3EnsureGroups(
 function phase4WriteRelations(
   ctx: ImportContext,
   cache: RelationsCache,
-  isDatasourceDocument: boolean
+  isDatasourceDocument: boolean,
+  /**
+   * 打标计划（REQ-20261120-001）：`group\u0000relation` → 本次是新建还是内容变更。
+   * 缺项（如 rebuild 等不走扫描循环的入口）→ 沿用库里已有的时间字段，不做任何改写。
+   */
+  stamps?: Map<string, { isNew: boolean; contentChanged: boolean }>
 ): void {
   // 文件级 relation 聚合：同 group 下相同 relation 名（文件级，basename 去扩展名）→ 一条记录
   const fileRelMap = new Map<string, { groupPath: string; relation: string; sourcePath: string }>();
@@ -2805,6 +2848,6 @@ function phase4WriteRelations(
     // 不传 sourcePath detail：避免 TTY \r 刷新长路径残留叠加成乱码（与全量导入进度一致）
     logProgress(i, total);
     // 方案 D：文件级 relation 挂 memoryIds（向量化完成后由回填逻辑写入），此处先建空记录占位
-    upsertRelation(cache, groupPath, relation, [], sourcePath, undefined, { isDatasourceDocument });
+    upsertRelation(cache, groupPath, relation, [], sourcePath, undefined, { isDatasourceDocument }, stamps?.get(`${groupPath}\u0000${relation}`));
   }
 }

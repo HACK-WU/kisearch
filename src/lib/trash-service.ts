@@ -192,6 +192,9 @@ export function restoreFromTrash(args: RestoreArgs): RestoreOutcome {
     ...(snapshot?.tags?.length ? { tags: snapshot.tags } : {}),
     ...(snapshot?.sourcePath ? { sourcePath: snapshot.sourcePath } : {}),
     ...(snapshot?.groupSource ? { groupSource: snapshot.groupSource } : {}),
+    // 恢复不是内容变更（REQ-20261120-001）：原样带回时间字段，缺省则继续缺省（未知）
+    ...(snapshot?.createdAt !== undefined ? { createdAt: snapshot.createdAt } : {}),
+    ...(snapshot?.updatedAt !== undefined ? { updatedAt: snapshot.updatedAt } : {}),
     restoreCount,
   };
 
