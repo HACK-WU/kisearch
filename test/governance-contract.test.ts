@@ -79,9 +79,9 @@ describe('② 错误码登记', () => {
     assert.equal(new Set(nums).size, nums.length, '存在重复号');
   });
 
-  it('全部落在 1000-1699（1000-1499 = 业务分段，1500-1599 = 通用/传输层，1600-1699 = 事件源码分析）', () => {
+  it('全部落在 1000-1799（1000-1499 = 业务分段，1500-1599 = 通用/传输层，1600-1699 = 事件源码分析，1700-1799 = 治理视图聚合）', () => {
     for (const [code, n] of entries) {
-      assert.ok(n >= 1000 && n <= 1699, `${code}=${n} 超出登记号段`);
+      assert.ok(n >= 1000 && n <= 1799, `${code}=${n} 超出登记号段`);
     }
   });
 
@@ -97,6 +97,9 @@ describe('② 错误码登记', () => {
     assert.equal(GOVERNANCE_CODE_NUMBERS.VISIBILITY_PARTIAL, 1202);
     assert.equal(GOVERNANCE_CODE_NUMBERS.RESTORE_NAME_CONFLICT, 1303);
     assert.equal(GOVERNANCE_CODE_NUMBERS.REF_ALREADY_ADDED, 1402);
+    // REQ-20261120-001：治理视图聚合独占 17xx，且**不得**塞进 15xx（上一条测试强制）
+    assert.equal(GOVERNANCE_CODE_NUMBERS.SCOPE_MULTI_UNSUPPORTED, 1701);
+    assert.equal(GOVERNANCE_CODE_NUMBERS.VIEW_NO_USABLE_MEMBER, 1702);
   });
 });
 

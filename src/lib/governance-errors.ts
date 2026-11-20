@@ -162,6 +162,18 @@ export const GOVERNANCE_CODE_NUMBERS = {
   ANALYSIS_LOCATION_NOT_FOUND: 1611,
   EVENT_DESCRIPTION_TOO_LONG: 1612,
   ANALYSIS_INTERRUPTED: 1613,
+
+  // ── 治理读路径视图聚合（REQ-20261120-001，1700-1799）──
+  // ⚠ 不得塞进 1500-1599：契约测试断言「15xx 只放传输层错误」，
+  //   往该段加业务码会让 `governance-contract` 直接红。
+  /** 治理端点只接受单个 scope：`a,b` 多段没有对应 UI 语义，展开规则也不确定 */
+  SCOPE_MULTI_UNSUPPORTED: 1701,
+  /** 视图展开后没有任何可用成员（全部被 strict 白名单跳过） */
+  VIEW_NO_USABLE_MEMBER: 1702,
+  /** 视图没有成员（与 scope-view 的 VIEW_EMPTY 同名，便于前端按 code 分支） */
+  VIEW_EMPTY: 1703,
+  /** views.json 损坏：读不出视图定义，不能当成「不是视图」继续读 */
+  VIEWS_CORRUPT: 1704,
 } as const;
 
 export type GovernanceErrorCode = keyof typeof GOVERNANCE_CODE_NUMBERS;
@@ -224,6 +236,8 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   EVENT_MEMBER_LIMIT_EXCEEDED: 409,
   SEARCH_UNAVAILABLE: 503,
   TRASH_WRITE_FAILED: 500,
+  /** 视图定义损坏：服务端数据问题，不能按 400「契约错误」处理 */
+  VIEWS_CORRUPT: 500,
 };
 
 /**

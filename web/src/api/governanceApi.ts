@@ -401,10 +401,38 @@ export interface TrashSettingsView {
   expireAction: 'purge' | 'notify';
 }
 
+/**
+ * 视图（多库聚合）响应的公共元信息（REQ-20261120-001）。
+ *
+ * `view` 存在即代表「当前 scope 是视图」——页面据此切只读形态；
+ * 单库响应**不出现**该字段，所以旧 daemon / 单库走的还是原来那条分支。
+ */
+export interface GovernanceViewMeta {
+  view?: string;
+  /** 本次实际参与合并的成员库（已去重、≤12） */
+  members?: string[];
+  /** 每库读取结果摘要：某个库失败只污染自己的桶，其余照常 */
+  buckets?: Array<{ scope: string; total?: number; error?: string }>;
+  /** 未参与本次读取的成员（strict 未注册 / 超出单次合并上限） */
+  skipped?: Array<{ scope: string; reason: string }>;
+  /** 成员数超上限被截断 */
+  truncated?: boolean;
+}
+
+export interface GovernanceTrashResponse extends GovernanceViewMeta {
+  ok: true;
+  scope: string;
+  total: number;
+  items: TrashItemView[];
+  /** 单库才有；视图下各库设置可能不同，故不下发单一值 */
+  settings?: TrashSettingsView;
+  settingsByScope?: Array<{ scope: string; settings: TrashSettingsView }>;
+}
+
 export function listTrash(
   scope: string,
   opts: { reason?: TrashReason; limit?: number; offset?: number } = {},
-): Promise<{ ok: true; scope: string; total: number; items: TrashItemView[]; settings: TrashSettingsView }> {
+): Promise<GovernanceTrashResponse> {
   const params = new URLSearchParams({ scope });
   if (opts.reason) params.set('reason', opts.reason);
   if (opts.limit) params.set('limit', String(opts.limit));
@@ -442,7 +470,7 @@ export function putTrashSettings(scope: string, settings: TrashSettingsView): Pr
 
 // ─── 计数 / 诊断 ──────────────────────────────────────
 
-export interface GovernanceCounts {
+export interface GovernanceCounts extends GovernanceViewMeta {
   ok: true;
   scope: string;
   docs: number;
@@ -487,6 +515,13 @@ export function getGovernanceDiagnostics(scope: string): Promise<GovernanceDiagn
 // ─── 文档列表（带分类，供分类页）──────────────────────
 
 export interface GovernanceDocItem {
+  /**
+   * 条目所属物理库（REQ-20261120-001）。
+   *
+   * 单库模式同样返回，前端键统一为 `scope\0group\0name` —— 一套渲染代码同时服务
+   * 单库与视图，不必到处判断「是不是视图」。
+   */
+  scope: string;
   group: string;
   name: string;
   lifecycle: LifecycleKind;
@@ -504,10 +539,27 @@ export interface GovernanceDocItem {
   event: { id: string; shortId: number | null; title: string; stageName: string | null; closed?: boolean } | null;
 }
 
+/** 各档全量计数（与 `total` 同一集合，已应用 group / 关键字过滤） */
+export interface GovernanceLifecycleCounts {
+  all: number;
+  wiki: number;
+  temp: number;
+  event: number;
+}
+
+export interface GovernanceDocsResponse extends GovernanceViewMeta {
+  ok: true;
+  scope: string;
+  total: number;
+  items: GovernanceDocItem[];
+  /** 旧 daemon 缺失 → 前端回退按已加载列表统计 */
+  lifecycleCounts?: GovernanceLifecycleCounts;
+}
+
 export function listGovernanceDocs(
   scope: string,
   opts: { group?: string; q?: string; limit?: number; offset?: number } = {},
-): Promise<{ ok: true; scope: string; total: number; items: GovernanceDocItem[] }> {
+): Promise<GovernanceDocsResponse> {
   const params = new URLSearchParams({ scope });
   if (opts.group) params.set('group', opts.group);
   if (opts.q) params.set('q', opts.q);

@@ -165,6 +165,8 @@ export function EventsPage(): JSX.Element {
   const [selectedTypeId, setSelectedTypeId] = useState<string | null>(null);
   /** 页头计数（与侧栏同源 `/governance/counts`）：列表被 status 过滤后自带数量会失真 */
   const [counts, setCounts] = useState<{ open: number; closed: number } | null>(null);
+  /** 当前 scope 是视图（事件列表本期不支持聚合，空列表要说明原因，而不是显示「暂无事件」） */
+  const [isViewScope, setIsViewScope] = useState(false);
   const [addStageOpen, setAddStageOpen] = useState(false);
   const [newEventOpen, setNewEventOpen] = useState(false);
   const [newTypeOpen, setNewTypeOpen] = useState(false);
@@ -362,6 +364,11 @@ export function EventsPage(): JSX.Element {
       setEvents(list.events);
       setTypes(typeList.types);
       if (govCounts) setCounts({ open: govCounts.eventsOpen, closed: govCounts.eventsClosed });
+      /*
+       * 视图下事件列表**本期不支持聚合**，但 `/counts` 已返回合并合计 ——
+       * 不说明就会出现「顶部 45 条、列表空」，比原来的「都是 0」更像数据丢了。
+       */
+      setIsViewScope(Boolean(govCounts?.view));
       setActiveId((prev) => prev ?? matchDeepLink(list.events) ?? list.events[0]?.id ?? null);
     } catch (err) {
       if (seq !== listSeq.current) return;
@@ -1002,7 +1009,13 @@ export function EventsPage(): JSX.Element {
                 </>
               ) : null}
               {sortedEvents.map((event) => renderEventRow(event, false))}
-              {events.length === 0 ? <div className="gov-cell-muted" style={{ padding: 16 }}>暂无事件</div> : null}
+              {events.length === 0 ? (
+                <div className="gov-cell-muted" style={{ padding: 16 }}>
+                  {isViewScope
+                    ? '当前是知识视图：事件列表暂未支持视图聚合，请切到具体知识库查看（上方计数为各成员库合计）'
+                    : '暂无事件'}
+                </div>
+              ) : null}
             </div>
           </div>
 

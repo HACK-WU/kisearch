@@ -238,6 +238,11 @@ export function AppShell(): JSX.Element {
   const [govCounts, setGovCounts] = useState<{ docs: number; eventsOpen: number; trash: number } | null>(null);
   useEffect(() => {
     let alive = true;
+    /*
+     * 切 scope 先清空：否则会短暂显示**上一个库**的数字（比显示 0 更误导 ——
+     * 用户会以为「这个视图就等于那个库」）。清空期间 badge 不渲染。
+     */
+    setGovCounts(null);
     // scope 必须跟着顶栏选择器走：写死 'default' 会让侧栏显示别的库的数字
     fetch(`/api/governance/counts?scope=${encodeURIComponent(scope)}`)
       .then((r) => (r.ok ? r.json() : null))

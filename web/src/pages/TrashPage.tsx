@@ -17,6 +17,7 @@ import {
   GovernanceApiError,
   type TrashItemView, type TrashReason, type TrashSettingsView,
 } from '@/api/governanceApi';
+import { govDocKey, govGroupLabel, isGovernanceView, VIEW_WRITE_HINT } from '@/lib/governanceView';
 
 type Filter = 'all' | TrashReason;
 
@@ -38,7 +39,19 @@ export function TrashPage(): JSX.Element {
   const scope = useScopeValue();
   const [filter, setFilter] = useState<Filter>('all');
   const [items, setItems] = useState<TrashItemView[]>([]);
+  /**
+   * 回收站设置。视图下**不更新**（各库可能不同，取哪个都是撒谎）：
+   * 页头走 `isView` 分支不展示保留天数，设置入口也禁用 —— 该默认值只用于兜底渲染。
+   */
   const [settings, setSettings] = useState<TrashSettingsView>({ keepDays: 7, expireAction: 'purge' });
+  /** 服务端总条数：合并后可能 > items.length（被 limit 截断） */
+  const [total, setTotal] = useState(0);
+  /** 视图元信息（null = 单库） */
+  const [viewInfo, setViewInfo] = useState<{
+    members: string[];
+    skipped: Array<{ scope: string; reason: string }>;
+    truncated: boolean;
+  } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -56,13 +69,29 @@ export function TrashPage(): JSX.Element {
   // 鉴权加载中（permissions 暂空）只禁用、不弹"只读"横幅，避免进页闪一下
   const showReadOnlyHint = !canWrite && authStatus !== 'loading';
 
-  const keyOf = (item: TrashItemView): string => `${item.group}\u0000${item.dirName}`;
+  const isView = viewInfo !== null;
+  /** 条目标识必须带库：`dirName` 在两个库里可能重复 */
+  const keyOf = (item: TrashItemView): string => govDocKey({ scope: item.scope, group: item.group, name: item.dirName });
 
   const load = useCallback(async () => {
     try {
-      const [list, cfg] = await Promise.all([listTrash(scope, { limit: 200 }), getTrashSettings(scope)]);
+      const list = await listTrash(scope, { limit: 200 });
+      const view = isGovernanceView(list);
+      /*
+       * 视图下不拉设置：各库不同、入口也已禁用；拉了只会把「第一个库的设置」
+       * 误显示成全视图的保留天数。
+       */
+      const cfg = view ? null : await getTrashSettings(scope).catch(() => null);
       setItems(list.items);
-      setSettings(cfg.settings);
+      setTotal(list.total);
+      if (cfg?.settings) setSettings(cfg.settings);
+      setViewInfo(view
+        ? {
+          members: list.members ?? [],
+          skipped: list.skipped ?? [],
+          truncated: list.truncated === true,
+        }
+        : null);
       setSelected(new Set());
     } catch (err) {
       setMessage({ tone: 'err', text: (err as Error).message });
@@ -106,13 +135,24 @@ export function TrashPage(): JSX.Element {
     <div className="gov-page">
       <header className="gov-head">
         <p className="gov-head__path">
-          <span className="gov-badge gov-badge--kb">{scope}</span>
+          <span className="gov-badge gov-badge--kb">{isView ? `视图 ${scope}` : scope}</span>
           <span className="gov-cell-muted">
-            保留 {settings.keepDays} 天，{settings.expireAction === 'purge' ? '到期自动清除' : '到期仅提醒'}
+            {isView
+              ? `${viewInfo.members.length} 个库 · 共 ${total} 条`
+              : settings
+                ? `保留 ${settings.keepDays} 天，${settings.expireAction === 'purge' ? '到期自动清除' : '到期仅提醒'}`
+                : ''}
           </span>
         </p>
         <div className="gov-head__actions">
-          <button className="gov-btn gov-btn--sm" onClick={() => setSettingsOpen(true)}>回收站设置</button>
+          <button
+            className="gov-btn gov-btn--sm"
+            disabled={isView}
+            title={isView ? VIEW_WRITE_HINT : undefined}
+            onClick={() => setSettingsOpen(true)}
+          >
+            回收站设置
+          </button>
         </div>
       </header>
 
@@ -130,15 +170,18 @@ export function TrashPage(): JSX.Element {
         <span className="gov-toolbar__spacer" />
         <button
           className="gov-btn gov-btn--sm"
-          disabled={busy || restorable.length === 0 || !canWrite}
-          title={!canWrite ? readOnlyHint : brokenSelected > 0 ? `${brokenSelected} 篇正文缺失，恢复只会得到空文档，已排除` : '恢复到原位置'}
+          disabled={busy || restorable.length === 0 || !canWrite || isView}
+          title={isView
+            ? VIEW_WRITE_HINT
+            : !canWrite ? readOnlyHint : brokenSelected > 0 ? `${brokenSelected} 篇正文缺失，恢复只会得到空文档，已排除` : '恢复到原位置'}
           onClick={() => void (async () => {
             const targets = [...restorable];
             const skipped = brokenSelected;
             await run(async () => {
               let ok = 0;
               for (const item of targets) {
-                const r = await restoreTrash(scope, { group: item.group, dirName: item.dirName }).catch(() => null);
+                // 按条目所属库恢复：视图名不是库，传它会直接 409
+                const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName }).catch(() => null);
                 if (r) ok += 1;
               }
               const skipText = skipped > 0 ? `；跳过 ${skipped} 篇（正文缺失，请彻底删除）` : '';
@@ -150,8 +193,8 @@ export function TrashPage(): JSX.Element {
         </button>
         <button
           className="gov-btn gov-btn--sm gov-btn--danger-ghost"
-          disabled={busy || selectedItems.length === 0 || !canWrite}
-          title={readOnlyHint}
+          disabled={busy || selectedItems.length === 0 || !canWrite || isView}
+          title={isView ? VIEW_WRITE_HINT : readOnlyHint}
           onClick={() => {
             // 不可逆操作：第一次点击只进入确认态，再点才执行
             if (!purgeConfirm) { setPurgeConfirm(true); return; }
@@ -161,7 +204,8 @@ export function TrashPage(): JSX.Element {
               await run(async () => {
                 let ok = 0;
                 for (const item of targets) {
-                  const done = await purgeTrash(scope, { group: item.group, dirName: item.dirName }).then(() => true).catch(() => false);
+                  // 同恢复：按条目所属库提交
+                  const done = await purgeTrash(item.scope, { group: item.group, dirName: item.dirName }).then(() => true).catch(() => false);
                   if (done) ok += 1;
                 }
                 return `已彻底删除 ${ok} / ${targets.length} 篇（不可恢复）`;
@@ -173,6 +217,15 @@ export function TrashPage(): JSX.Element {
         </button>
       </div>
 
+      {isView ? (
+        <p className="gov-hint">
+          只读聚合视图：数据来自 {viewInfo.members.join('、') || '（无可用成员）'}；恢复 / 彻底删除会落到条目所属库，
+          回收站设置请切到具体知识库修改。
+          {viewInfo.truncated ? ` 仅合并前 ${viewInfo.members.length} 个成员库。` : ''}
+          {items.length < total ? ` 当前仅加载各库前 ${items.length} 条（共 ${total} 条），更早的条目请切到具体库查看。` : ''}
+          {viewInfo.skipped.length > 0 ? ` 未参与：${viewInfo.skipped.map((s) => s.scope).join('、')}。` : ''}
+        </p>
+      ) : null}
       {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
       {showReadOnlyHint ? (
         <p className="gov-hint">当前账号为只读：可以查看回收站内容，恢复 / 彻底删除 / 保存设置需要写权限。</p>
@@ -229,25 +282,32 @@ export function TrashPage(): JSX.Element {
                     <div className="gov-cell-name">{item.name}</div>
                     {broken ? <span className="gov-badge gov-badge--temp">正文缺失</span> : null}
                   </td>
-                  <td><span className="gov-cell-muted">{item.group}</span></td>
+                  <td>
+                    <span
+                      className="gov-cell-muted"
+                      title={isView ? govGroupLabel(item.scope, item.group) : item.group}
+                    >
+                      {isView ? govGroupLabel(item.scope, item.group) : item.group}
+                    </span>
+                  </td>
                   <td><span className={REASON_CLASS[item.reason] ?? 'gov-badge gov-badge--kb'}>{REASON_TEXT[item.reason] ?? item.reason}</span></td>
                   <td><span className={`gov-days ${left <= 2 ? 'gov-days--hot' : left <= 5 ? 'gov-days--warm' : 'gov-days--calm'}`}>剩 {left} 天</span></td>
                   <td>
                     <span style={{ display: 'inline-flex', gap: 6 }}>
                       <button
                         className="gov-btn gov-btn--sm"
-                        disabled={busy || broken || !canWrite}
-                        title={!canWrite ? readOnlyHint : broken ? '快照里没有正文，恢复会得到空文档；请彻底删除' : '恢复到原位置'}
+                        disabled={busy || broken || !canWrite || isView}
+                        title={isView ? VIEW_WRITE_HINT : !canWrite ? readOnlyHint : broken ? '快照里没有正文，恢复会得到空文档；请彻底删除' : '恢复到原位置'}
                         onClick={() => void run(async () => {
-                          const r = await restoreTrash(scope, { group: item.group, dirName: item.dirName });
+                          const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName });
                         return `已恢复「${item.name}」${r.expiresAtChanged ? '（已按原期限续期）' : ''}`;
                       })}>恢复</button>
                       <button
                         className="gov-btn gov-btn--ghost gov-btn--sm"
-                        disabled={busy || broken || !canWrite}
-                        title={!canWrite ? readOnlyHint : broken ? '快照里没有正文' : '恢复并改为长期保留'}
+                        disabled={busy || broken || !canWrite || isView}
+                        title={isView ? VIEW_WRITE_HINT : !canWrite ? readOnlyHint : broken ? '快照里没有正文' : '恢复并改为长期保留'}
                         onClick={() => void run(async () => {
-                          const r = await restoreTrash(scope, { group: item.group, dirName: item.dirName, targetLifecycle: 'wiki' });
+                          const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName, targetLifecycle: 'wiki' });
                         return `「${item.name}」已恢复并沉淀为 wiki（${r.lifecycle}）`;
                       })}>沉淀为 wiki</button>
                     </span>

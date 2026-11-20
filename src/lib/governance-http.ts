@@ -35,6 +35,13 @@ import { changeLifecycle } from './relation-lifecycle.js';
 import { resolveLifecycle } from './lifecycle.js';
 import { resolveVisibilityOfRelation } from './visibility-index.js';
 import { readAllGroupCaches } from './group-cache.js';
+import { resolveGovernanceTargets } from './governance-scope.js';
+import {
+  assertNotScopeView,
+  isScopeViewWriteError,
+  isScopeReadonlyError,
+  scopeReadonlyBody,
+} from './scope-policy.js';
 import { listTypes, createType, updateType, deleteType } from './events/type-service.js';
 import {
   listEvents, createEventWithBinding, updateEvent, transitionEvent, deleteEvent, reopenEvent, setEventPinned,
@@ -188,7 +195,106 @@ function fail(res: ServerResponse, err: unknown): void {
     });
     return;
   }
+  /*
+   * 视图不是知识库：写操作必须给 409 + 可执行提示，而不是 500。
+   *
+   * 之前这里只认 GovernanceError，写锁抛出的 `ScopeViewWriteError` 被打成 500，
+   * 前端只能显示「服务器错误」，用户看不出要切到具体库。
+   */
+  if (isScopeViewWriteError(err)) {
+    sendJson(res, 409, {
+      ok: false,
+      code: 'VIEW_NOT_WRITABLE',
+      error: err.message,
+      view: err.view,
+      members: err.members,
+      action: err.action,
+    });
+    return;
+  }
+  if (isScopeReadonlyError(err)) {
+    sendJson(res, 409, scopeReadonlyBody(err));
+    return;
+  }
   sendJson(res, 500, { ok: false, error: (err as Error).message });
+}
+
+/**
+ * 单库的「文档 + 分类」列表（分类页数据源）。
+ *
+ * 视图模式下逐成员调用本函数再合并 —— 事件与阶段名是**库内**关系
+ * （`rel.eventId` 只可能指向同库事件），所以每库各建一次索引即可，
+ * 不存在「跨库合并事件」的问题。
+ *
+ * `lifecycleCounts` 与 `total` 统计的是**同一集合**（已应用 group / 关键字过滤）：
+ * 分类页的 tab 计数必须随搜索变化，否则「搜出 3 篇、tab 仍写 128」。
+ */
+function buildDocsPayload(
+  scope: string,
+  groupFilter: string | undefined,
+  keyword: string,
+  now: number,
+): {
+  total: number;
+  items: Record<string, unknown>[];
+  lifecycleCounts: { all: number; wiki: number; temp: number; event: number };
+} {
+  // 事件与阶段名：列表要显示「#3 登录页白屏 · 排查中」，逐个查会变成 N+1
+  const eventIndex = new Map(
+    readAllEvents(scope).map((e) => [e.id, e] as const),
+  );
+  const typeStageNames = new Map<string, string>();
+  for (const type of listTypes(scope)) {
+    for (const stage of type.stages) typeStageNames.set(`${type.id}\u0000${stage.key}`, stage.name);
+  }
+
+  const items: Record<string, unknown>[] = [];
+  const lifecycleCounts: { all: number; wiki: number; temp: number; event: number } = {
+    all: 0, wiki: 0, temp: 0, event: 0,
+  };
+  for (const [group, doc] of readAllGroupCaches(scope)) {
+    if (groupFilter && group !== groupFilter) continue;
+    for (const rel of doc.hot_relations) {
+      if (keyword && !rel.text.toLowerCase().includes(keyword)) continue;
+      const lifecycle = resolveLifecycle(rel);
+      const visibility = resolveVisibilityOfRelation(scope, rel).mode;
+      lifecycleCounts.all += 1;
+      lifecycleCounts[lifecycle.kind as 'wiki' | 'temp' | 'event'] += 1;
+      items.push({
+        /**
+         * 条目所属物理库。**单库也带**：前端键统一为 `scope\0group\0name`，
+         * 双形态同一套代码，不必为「是不是视图」写两条渲染分支。
+         */
+        scope,
+        group,
+        name: rel.text,
+        lifecycle: lifecycle.kind,
+        ...(lifecycle.expiresAt !== undefined ? { expiresAt: lifecycle.expiresAt } : {}),
+        ...(rel.ttlDays !== undefined ? { ttlDays: rel.ttlDays } : {}),
+        ...(rel.eventId ? { eventId: rel.eventId } : {}),
+        ...(lifecycle.inconsistent ? { lifecycleWarning: lifecycle.reason } : {}),
+        visibility,
+        imported: rel.isImported === true,
+        lastUsedTime: rel.lastUsedTime ?? null,
+        event: (() => {
+          if (!rel.eventId) return null;
+          const event = eventIndex.get(rel.eventId);
+          if (!event) return { id: rel.eventId, shortId: null, title: '(事件已删除)', stageName: null };
+          return {
+            id: event.id,
+            shortId: event.shortId,
+            title: event.title,
+            stageName: typeStageNames.get(`${event.typeId}\u0000${event.stageKey}`) ?? null,
+            closed: event.closedAt !== null,
+          };
+        })(),
+        remainDays: lifecycle.expiresAt !== undefined
+          ? Math.max(0, Math.ceil((lifecycle.expiresAt - now) / 86_400_000))
+          : null,
+      });
+    }
+  }
+  return { total: items.length, items, lifecycleCounts };
 }
 
 /** 入参兼容：`ttl_days` 与 `ttlDays` 都收（前端用 camel，脚本/MCP 风格用 snake） */
@@ -475,6 +581,16 @@ export async function handleGovernanceRoutes(
     return scope;
   };
 
+  /**
+   * **只读**端点的 scope 解析：视图展开 + 全有或全无鉴权。
+   *
+   * 写端点必须继续用 {@link scopeFromQuery} / {@link scopeFromBody} 拿原始库名 ——
+   * 视图名交给写锁里的 `assertNotScopeView` 去拒（`VIEW_NOT_WRITABLE`）。
+   * 若在写侧也展开，视图下的「改分类」会静默落到第一个成员库。
+   */
+  const readTargets = (raw: string | undefined) =>
+    resolveGovernanceTargets(loadConfig(), raw, { authScopes: ctx.authScopes });
+
   const body = (): Promise<Record<string, unknown>> => readJsonBody(req);
   /**
    * body 里的 scope 优先，其次 URL 的 `?scope=`，最后才 default。
@@ -574,6 +690,12 @@ export async function handleGovernanceRoutes(
            * → 非 default 库新建的分类会静默写进 default 的 governance.json。
            */
           const scope = scopeFromBody(b);
+          /*
+           * 视图门禁：`writeGovernance` 走 `writeJson → walWrite`，后者会 `mkdirSync`，
+           * 不拦就会在 `dataDir/<视图名>/` 建出幽灵库（视图本不落盘）。
+           * 该端点不经 `withScopeWriteLock`，所以必须自己调。
+           */
+          assertNotScopeView(scope, 'governance-preset');
           const config = readGovernance(scope);
           // 档位只允许 wiki / temp：event 预设无法表达"绑哪个事件"，落盘即契约外数据
           const kindCheck = validatePresetKind(str(b.kind) ?? 'temp');
@@ -597,6 +719,8 @@ export async function handleGovernanceRoutes(
         }
         if (method === 'DELETE') {
           const scope = scopeFromQuery();
+          // 同 POST：该端点不经写锁，视图名会直接落到 writeGovernance
+          assertNotScopeView(scope, 'governance-preset');
           const config = readGovernance(scope);
           const id = str(segs[2]);
           const next: GovernanceConfig = {
@@ -1268,59 +1392,68 @@ export async function handleGovernanceRoutes(
      * 这里直接读分片 + 现算档位，一次返回列表所需的全部字段。
      */
     if (segs[0] === 'docs' && method === 'GET' && !segs[1]) {
-      const scope = scopeFromQuery();
+      const targets = readTargets(str(q.get('scope')));
       const groupFilter = str(q.get('group'));
       const keyword = (str(q.get('q')) ?? '').toLowerCase();
       const limit = Math.min(Math.max(num(q.get('limit')) ?? 50, 1), 200);
       const offset = Math.max(num(q.get('offset')) ?? 0, 0);
       const now = Date.now();
 
-      // 事件与阶段名：列表要显示「#3 登录页白屏 · 排查中」，逐个查会变成 N+1
-      const eventIndex = new Map(
-        readAllEvents(scope).map((e) => [e.id, e] as const),
-      );
-      const typeStageNames = new Map<string, string>();
-      for (const type of listTypes(scope)) {
-        for (const stage of type.stages) typeStageNames.set(`${type.id}\u0000${stage.key}`, stage.name);
+      /**
+       * 视图分支：逐成员读 → 合并 → 条目带 `scope`。
+       *
+       * 单成员失败只污染自己的桶（其余库照常返回）：一个库目录缺失
+       * 不该让整页变成「加载失败」。
+       */
+      if (targets.view) {
+        const buckets: Array<{ scope: string; total?: number; error?: string }> = [];
+        const items: Record<string, unknown>[] = [];
+        const lifecycleCounts = { all: 0, wiki: 0, temp: 0, event: 0 };
+        let total = 0;
+        for (const member of targets.members) {
+          try {
+            const payload = buildDocsPayload(member, groupFilter, keyword, now);
+            buckets.push({ scope: member, total: payload.total });
+            /*
+             * 每库各取 `limit` 条后直接拼接，**不再按总条数二次截断**。
+             *
+             * 真机踩到的坑：第一库 211 篇 > limit 200 时，按总条数切片会让
+             * 后面的成员库**一条都看不到** —— 而用户切视图恰恰是为了看各库。
+             * 代价是响应最多 `members × limit` 条（12 × 200，已由 S-01 的成员上限兜住）。
+             */
+            items.push(...payload.items.slice(0, limit));
+            total += payload.total;
+            lifecycleCounts.all += payload.lifecycleCounts.all;
+            lifecycleCounts.wiki += payload.lifecycleCounts.wiki;
+            lifecycleCounts.temp += payload.lifecycleCounts.temp;
+            lifecycleCounts.event += payload.lifecycleCounts.event;
+          } catch (err) {
+            buckets.push({ scope: member, error: (err as Error).message });
+          }
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          scope: targets.requested,
+          view: targets.view,
+          members: targets.members,
+          total,
+          // 每库已各取 limit 条（见上面的注释）；视图下不支持跨库 offset 偏移
+          items,
+          lifecycleCounts,
+          buckets,
+          ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+          ...(targets.truncated ? { truncated: true } : {}),
+        });
       }
 
-      const all: Array<Record<string, unknown>> = [];
-      for (const [group, doc] of readAllGroupCaches(scope)) {
-        if (groupFilter && group !== groupFilter) continue;
-        for (const rel of doc.hot_relations) {
-          if (keyword && !rel.text.toLowerCase().includes(keyword)) continue;
-          const lifecycle = resolveLifecycle(rel);
-          const visibility = resolveVisibilityOfRelation(scope, rel).mode;
-          all.push({
-            group,
-            name: rel.text,
-            lifecycle: lifecycle.kind,
-            ...(lifecycle.expiresAt !== undefined ? { expiresAt: lifecycle.expiresAt } : {}),
-            ...(rel.ttlDays !== undefined ? { ttlDays: rel.ttlDays } : {}),
-            ...(rel.eventId ? { eventId: rel.eventId } : {}),
-            ...(lifecycle.inconsistent ? { lifecycleWarning: lifecycle.reason } : {}),
-            visibility,
-            imported: rel.isImported === true,
-            lastUsedTime: rel.lastUsedTime ?? null,
-            event: (() => {
-              if (!rel.eventId) return null;
-              const event = eventIndex.get(rel.eventId);
-              if (!event) return { id: rel.eventId, shortId: null, title: '(事件已删除)', stageName: null };
-              return {
-                id: event.id,
-                shortId: event.shortId,
-                title: event.title,
-                stageName: typeStageNames.get(`${event.typeId}\u0000${event.stageKey}`) ?? null,
-                closed: event.closedAt !== null,
-              };
-            })(),
-            remainDays: lifecycle.expiresAt !== undefined
-              ? Math.max(0, Math.ceil((lifecycle.expiresAt - now) / 86_400_000))
-              : null,
-          });
-        }
-      }
-      return sendJson(res, 200, { ok: true, scope, total: all.length, items: all.slice(offset, offset + limit) });
+      const payload = buildDocsPayload(targets.members[0], groupFilter, keyword, now);
+      return sendJson(res, 200, {
+        ok: true,
+        scope: targets.requested,
+        total: payload.total,
+        items: payload.items.slice(offset, offset + limit),
+        lifecycleCounts: payload.lifecycleCounts,
+      });
     }
 
     // ─── 文档搜索（手动添加参考文档）────────────────────
@@ -1340,15 +1473,58 @@ export async function handleGovernanceRoutes(
     // ─── 回收站 ─────────────────────────────────────────
     if (segs[0] === 'trash') {
       if (method === 'GET' && !segs[1]) {
-        const scope = scopeFromQuery();
-        const result = listTrash(scope, {
-          ...(str(q.get('reason')) ? { reason: str(q.get('reason')) as never } : {}),
-          limit: num(q.get('limit')) ?? 50,
-          offset: num(q.get('offset')) ?? 0,
-        });
+        const targets = readTargets(str(q.get('scope')));
+        const reason = str(q.get('reason'));
+        const limit = num(q.get('limit')) ?? 50;
+        const offset = num(q.get('offset')) ?? 0;
+        const query = {
+          ...(reason ? { reason: reason as never } : {}),
+          limit,
+          offset,
+        };
+
+        /**
+         * 视图分支：逐成员列回收站 → 合并。
+         *
+         * **不返回单一 `settings`**：各库保留天数可能不同，取哪个都是撒谎；
+         * 视图下前端的设置入口本来就禁用（写请求 409）。
+         */
+        if (targets.view) {
+          const buckets: Array<{ scope: string; total?: number; error?: string }> = [];
+          const settingsByScope: Array<{ scope: string; settings: unknown }> = [];
+          const items: Array<Record<string, unknown>> = [];
+          let total = 0;
+          for (const member of targets.members) {
+            try {
+              const result = listTrash(member, { ...query, offset: 0 });
+              buckets.push({ scope: member, total: result.total });
+              settingsByScope.push({ scope: member, settings: readTrashSettings(member) });
+              items.push(...result.items.map(({ dir, ...rest }) => rest as unknown as Record<string, unknown>));
+              total += result.total;
+            } catch (err) {
+              buckets.push({ scope: member, error: (err as Error).message });
+            }
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            scope: targets.requested,
+            view: targets.view,
+            members: targets.members,
+            total,
+            // 每库已各取 limit 条（与 /docs 同口径）；视图下不支持跨库 offset 偏移
+            items,
+            settingsByScope,
+            buckets,
+            ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+            ...(targets.truncated ? { truncated: true } : {}),
+          });
+        }
+
+        const scope = targets.members[0];
+        const result = listTrash(scope, query);
         return sendJson(res, 200, {
           ok: true,
-          scope,
+          scope: targets.requested,
           total: result.total,
           items: result.items.map(({ dir, ...rest }) => rest),
           settings: readTrashSettings(scope),
@@ -1358,6 +1534,11 @@ export async function handleGovernanceRoutes(
       if (segs[1] === 'restore' && method === 'POST') {
         const b = await body();
         const scope = scopeFromBody(b);
+        /*
+         * 纵深防御：视图下回收站列表恒为空，正常入口点不到「恢复」；
+         * 但直接调 API 仍可能带视图名。视图不是库，一律拒。
+         */
+        assertNotScopeView(scope, 'trash-restore');
         const outcome = restoreFromTrash({
           scope,
           group: String(b.group ?? ''),
@@ -1372,6 +1553,7 @@ export async function handleGovernanceRoutes(
       if (segs[1] === 'purge' && method === 'POST') {
         const b = await body();
         const scope = scopeFromBody(b);
+        assertNotScopeView(scope, 'trash-purge');
         const removed = removeTrashItem(scope, String(b.group ?? ''), String(b.dirName ?? b.dir_name ?? ''));
         return removed
           ? sendJson(res, 200, { ok: true, scope, purged: true })
@@ -1396,6 +1578,8 @@ export async function handleGovernanceRoutes(
           return sendJson(res, 200, { ok: true, scope, settings: readTrashSettings(scope), options: TRASH_KEEP_DAYS });
         }
         if (method === 'PUT') {
+          // 与 presets 同因：回收站设置也走 writeGovernance（walWrite 会建目录），不经写锁
+          assertNotScopeView(scope, 'trash-settings');
           const validated = validateTrashSettings({
             ...(num(b.keepDays) !== undefined ? { keepDays: num(b.keepDays) as never } : {}),
             ...(str(b.expireAction) ? { expireAction: str(b.expireAction) as never } : {}),
@@ -1438,13 +1622,55 @@ export async function handleGovernanceRoutes(
     }
 
     if (segs[0] === 'counts' && method === 'GET') {
-      const scope = scopeFromQuery();
+      const targets = readTargets(str(q.get('scope')));
+      const sum = { docs: 0, eventsOpen: 0, eventsClosed: 0, trash: 0, pendingIndex: 0 };
+
+      // 视图分支：逐成员累加。侧栏 badge 与分类页头部同源，两处口径不能各算一套。
+      if (targets.view) {
+        const buckets: Array<Record<string, unknown>> = [];
+        for (const member of targets.members) {
+          try {
+            let docs = 0;
+            for (const [, doc] of readAllGroupCaches(member)) docs += doc.hot_relations.length;
+            const events = readAllEvents(member);
+            const row = {
+              scope: member,
+              docs,
+              eventsOpen: events.filter((e) => e.closedAt === null).length,
+              eventsClosed: events.filter((e) => e.closedAt !== null).length,
+              trash: listTrash(member).total,
+              pendingIndex: pendingCount(member),
+            };
+            buckets.push(row);
+            sum.docs += row.docs;
+            sum.eventsOpen += row.eventsOpen;
+            sum.eventsClosed += row.eventsClosed;
+            sum.trash += row.trash;
+            sum.pendingIndex += row.pendingIndex;
+          } catch (err) {
+            // 单成员失败只降级自己：侧栏宁可少一个库的数字，也不要整块变 0
+            buckets.push({ scope: member, error: (err as Error).message });
+          }
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          scope: targets.requested,
+          view: targets.view,
+          members: targets.members,
+          ...sum,
+          buckets,
+          ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+          ...(targets.truncated ? { truncated: true } : {}),
+        });
+      }
+
+      const scope = targets.members[0];
       let docs = 0;
       for (const [, doc] of readAllGroupCaches(scope)) docs += doc.hot_relations.length;
       const events = readAllEvents(scope);
       return sendJson(res, 200, {
         ok: true,
-        scope,
+        scope: targets.requested,
         docs,
         eventsOpen: events.filter((e) => e.closedAt === null).length,
         eventsClosed: events.filter((e) => e.closedAt !== null).length,

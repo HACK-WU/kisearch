@@ -18,8 +18,9 @@ import { getDocContent } from '@/api/httpApi';
 import {
   applyLifecycle, applyLifecycleBatch, listEventTypes, listGovernanceDocs,
   GovernanceApiError,
-  type EventTypeView, type GovernanceDocItem, type LifecycleKind,
+  type EventTypeView, type GovernanceDocItem, type GovernanceLifecycleCounts, type LifecycleKind,
 } from '@/api/governanceApi';
+import { govDocKey, govGroupLabel, isGovernanceView, VIEW_WRITE_HINT } from '@/lib/governanceView';
 
 type Filter = 'all' | LifecycleKind;
 
@@ -81,6 +82,17 @@ export function LifecyclePage(): JSX.Element {
   /** 服务端返回的**过滤后全量篇数**：`docs` 一次只取前 200 篇，两者不等即被截断 */
   const [total, setTotal] = useState(0);
   const [types, setTypes] = useState<EventTypeView[]>([]);
+  /**
+   * 视图元信息（null = 单库）：成员库 / 被跳过的成员 / 是否被截断。
+   * 它是页面「只读形态」的总开关 —— 提示条、库归属、写禁用全部依赖它。
+   */
+  const [viewInfo, setViewInfo] = useState<{
+    members: string[];
+    skipped: Array<{ scope: string; reason: string }>;
+    truncated: boolean;
+  } | null>(null);
+  /** 服务端全量分档计数（旧 daemon 缺失时回退按已加载列表统计） */
+  const [lifecycleCounts, setLifecycleCounts] = useState<GovernanceLifecycleCounts | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<number>(PAGE_SIZE_DEFAULT);
@@ -93,7 +105,7 @@ export function LifecyclePage(): JSX.Element {
    * 复用全站阅读器 `ModuleDrawer`（与浏览页 / 任务页 / 数据源页 / 事件页同一形态）：
    * 分类页最常问的是「这篇为什么是临时/事件」，跳转过去看原文比反复跨页便宜。
    */
-  const [docTarget, setDocTarget] = useState<{ group: string; name: string } | null>(null);
+  const [docTarget, setDocTarget] = useState<{ scope: string; group: string; name: string } | null>(null);
 
   /**
    * 切 scope 时收起正文抽屉：`ModuleDrawer` 载入正文后不再重取（`if (content !== null) return`），
@@ -113,16 +125,34 @@ export function LifecyclePage(): JSX.Element {
   // 鉴权还在加载时 permissions 为空 → 按钮先禁用（保守），但**不弹"只读"横幅**，避免每次进页闪一下
   const showReadOnlyHint = !canWrite && authStatus !== 'loading';
 
-  const keyOf = (doc: { group: string; name: string }): string => `${doc.group}\u0000${doc.name}`;
+  /** 视图形态总开关：提示条、库归属、写入口禁用全部由它决定 */
+  const isView = viewInfo !== null;
+
+  const keyOf = (doc: { scope?: string; group: string; name: string }): string => govDocKey(doc);
 
   const load = useCallback(async () => {
     try {
-      const [list, typeList] = await Promise.all([
-        listGovernanceDocs(scope, { ...(group ? { group } : {}), ...(keyword ? { q: keyword } : {}), limit: 200 }),
-        listEventTypes(scope).catch(() => ({ ok: true as const, scope, types: [] })),
-      ]);
+      const list = await listGovernanceDocs(scope, {
+        ...(group ? { group } : {}), ...(keyword ? { q: keyword } : {}), limit: 200,
+      });
+      const view = isGovernanceView(list);
+      /*
+       * 视图下不拉事件类型：它只服务「改分类时绑定事件」的弹窗，而视图下编辑入口已禁用；
+       * 且 `listTypes` 对不存在的库返回**内置类型**，容易被误认为真实配置。
+       */
+      const typeList = view
+        ? { ok: true as const, scope, types: [] as EventTypeView[] }
+        : await listEventTypes(scope).catch(() => ({ ok: true as const, scope, types: [] as EventTypeView[] }));
       setDocs(list.items);
       setTotal(list.total);
+      setLifecycleCounts(list.lifecycleCounts ?? null);
+      setViewInfo(view
+        ? {
+          members: list.members ?? [],
+          skipped: list.skipped ?? [],
+          truncated: list.truncated === true,
+        }
+        : null);
       setTypes(typeList.types);
       setSelected(new Set());
     } catch (err) {
@@ -132,11 +162,18 @@ export function LifecyclePage(): JSX.Element {
 
   useEffect(() => { void load(); }, [load]);
 
+  /**
+   * 分档计数：**优先用服务端全量统计**。
+   *
+   * `docs` 一次只取前 200 篇，用 `docs.length` 会让「共 350 篇」的库 tab 只显示 200；
+   * 视图下误差会按库数放大。旧 daemon（无 `lifecycleCounts`）回退到列表统计。
+   */
   const counts = useMemo(() => {
+    if (lifecycleCounts) return lifecycleCounts;
     const base = { all: docs.length, wiki: 0, temp: 0, event: 0 };
     for (const doc of docs) base[doc.lifecycle] += 1;
     return base;
-  }, [docs]);
+  }, [docs, lifecycleCounts]);
 
   const visible = useMemo(() => {
     const list = filter === 'all' ? docs : docs.filter((d) => d.lifecycle === filter);
@@ -238,14 +275,16 @@ export function LifecyclePage(): JSX.Element {
     <div className="gov-page">
       <header className="gov-head">
         <p className="gov-head__path">
-          <span className="gov-badge gov-badge--kb">{scope}</span>
-          <span className="gov-cell-muted">{group || '全部 Group'}</span>
+          <span className="gov-badge gov-badge--kb">{isView ? `视图 ${scope}` : scope}</span>
+          <span className="gov-cell-muted">
+            {group || '全部 Group'}{isView ? ` · ${viewInfo.members.length} 个库` : ''}
+          </span>
         </p>
         <div className="gov-head__actions">
           <button
             className="gov-btn gov-btn--sm"
-            disabled={!canWrite}
-            title={readOnlyHint}
+            disabled={!canWrite || isView}
+            title={isView ? VIEW_WRITE_HINT : readOnlyHint}
             onClick={() => setPresetOpen(true)}
           >
             ＋ 新建分类
@@ -300,6 +339,17 @@ export function LifecyclePage(): JSX.Element {
         <button className="gov-btn gov-btn--sm" onClick={() => void load()}>刷新</button>
       </div>
 
+      {/*
+       * 视图提示条（S-04 ①）：必须说明「数据来自哪些库」与「为什么改不了」。
+       * 只写「只读」而不给成员库时，用户会以为数据是凭空聚合的、也不知道该切哪个库。
+       */}
+      {isView ? (
+        <p className="gov-hint">
+          只读聚合视图：数据来自 {viewInfo.members.join('、') || '（无可用成员）'}；改分类请切到具体知识库。
+          {viewInfo.truncated ? ` 仅合并前 ${viewInfo.members.length} 个成员库。` : ''}
+          {viewInfo.skipped.length > 0 ? ` 未参与：${viewInfo.skipped.map((s) => s.scope).join('、')}。` : ''}
+        </p>
+      ) : null}
       {message ? <p className={message.tone === 'err' ? 'gov-error' : 'gov-hint'}>{message.text}</p> : null}
       {/*
        * 截断提示**不能只放分页栏**：分页栏在 0 条时会收起，而「筛出 0 条」恰恰是最需要
@@ -308,8 +358,9 @@ export function LifecyclePage(): JSX.Element {
        */}
       {truncated ? (
         <p className="gov-hint">
-          列表仅加载前 <strong>{docs.length}</strong> 篇（全部 {total} 篇）——
-          未加载的部分不参与下面的筛选与搜索，请先用搜索词或 Group 缩小范围再判断分类。
+          {isView ? '视图合并后仅加载前 ' : '列表仅加载前 '}
+          <strong>{docs.length}</strong> 篇（共 {total} 篇）——
+          未加载的部分不参与下面的筛选与搜索，请先用搜索词缩小范围再判断分类。
         </p>
       ) : null}
       {showReadOnlyHint ? (
@@ -323,9 +374,9 @@ export function LifecyclePage(): JSX.Element {
           {selectedDocs.length > pageSelectedCount ? (
             <span className="gov-cell-muted">其中当前页 {pageSelectedCount} 篇</span>
           ) : null}
-          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('wiki')}>改为 wiki</button>
-          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('temp', 7)}>改为临时 7 天</button>
-          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite} title={readOnlyHint} onClick={() => submitBatch('temp', 30)}>改为临时 30 天</button>
+          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite || isView} title={isView ? VIEW_WRITE_HINT : readOnlyHint} onClick={() => submitBatch('wiki')}>改为 wiki</button>
+          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite || isView} title={isView ? VIEW_WRITE_HINT : readOnlyHint} onClick={() => submitBatch('temp', 7)}>改为临时 7 天</button>
+          <button className="gov-btn gov-btn--sm" disabled={busy || !canWrite || isView} title={isView ? VIEW_WRITE_HINT : readOnlyHint} onClick={() => submitBatch('temp', 30)}>改为临时 30 天</button>
           <span className="gov-selbar__spacer" />
           {/* 取消选择不改数据，只读账号照常可用 */}
           <button className="gov-btn gov-btn--sm gov-btn--ghost" disabled={busy} onClick={() => setSelected(new Set())}>
@@ -382,12 +433,21 @@ export function LifecyclePage(): JSX.Element {
                     type="button"
                     className="gov-cell-name gov-cell-name--link"
                     title={`查看「${doc.name}」正文`}
-                    onClick={() => setDocTarget({ group: doc.group, name: doc.name })}
+                    onClick={() => setDocTarget({ scope: doc.scope, group: doc.group, name: doc.name })}
                   >
                     {doc.name}
                   </button>
                 </td>
-                <td><span className="gov-cell-muted">{doc.group}</span></td>
+                {/* 视图下必须显示来源库：两个库都有「运维」组时，只写组名等于让人改错库 */}
+                <td>
+                  <span
+                    className="gov-cell-muted"
+                    /* 列宽有限，长组路径会被截断 —— hover 给出完整「库 / 组」 */
+                    title={isView ? govGroupLabel(doc.scope, doc.group) : doc.group}
+                  >
+                    {isView ? govGroupLabel(doc.scope, doc.group) : doc.group}
+                  </span>
+                </td>
                 <td><span className={BADGE_CLASS[doc.lifecycle]}>{KIND_TEXT[doc.lifecycle]}</span></td>
                 <td>
                   {doc.lifecycle === 'temp' ? (
@@ -438,13 +498,15 @@ export function LifecyclePage(): JSX.Element {
                 <td>
                   <button
                     className="gov-btn gov-btn--ghost gov-btn--sm"
-                    disabled={doc.imported || !canWrite}
-                    title={!canWrite
-                      ? readOnlyHint
-                      : doc.imported
-                        /* 保留分类后「固定 wiki」不再成立：数据源文档也可能是 temp / event */
-                        ? '数据源文档的分类由同步保留，不能在这里修改'
-                        : '编辑分类'}
+                    disabled={doc.imported || !canWrite || isView}
+                    title={isView
+                      ? VIEW_WRITE_HINT
+                      : !canWrite
+                        ? readOnlyHint
+                        : doc.imported
+                          /* 保留分类后「固定 wiki」不再成立：数据源文档也可能是 temp / event */
+                          ? '数据源文档的分类由同步保留，不能在这里修改'
+                          : '编辑分类'}
                     onClick={() => setEditing({
                       group: doc.group,
                       name: doc.name,
@@ -520,9 +582,9 @@ export function LifecyclePage(): JSX.Element {
         {/* 计数口径随截断切换：否则页面写「共 200 篇」而侧栏 badge 写 350，用户只会觉得数字在飘。
             指引文案不在这里重复 —— 上方截断提示条已经说过怎么缩小范围。 */}
         {truncated ? (
-          <>当前 scope 已加载 <strong>{counts.all}</strong> 篇（全部 {total} 篇）</>
+          <>{isView ? `当前视图（${viewInfo.members.length} 个库）` : '当前 scope'}已加载 <strong>{counts.all}</strong> 篇（共 {total} 篇）</>
         ) : (
-          <>当前 scope 共 <strong>{counts.all}</strong> 篇</>
+          <>{isView ? `当前视图（${viewInfo.members.length} 个库）` : '当前 scope'}共 <strong>{counts.all}</strong> 篇</>
         )}
         （临时 {counts.temp} / 事件 {counts.event} / wiki {counts.wiki}）。
       </div>
@@ -600,8 +662,9 @@ export function LifecyclePage(): JSX.Element {
       {/* 文档名 → 右侧阅读抽屉；key 含 group+name，切到另一篇整块重挂载，正文/大纲不串台 */}
       {docTarget ? (
         <ModuleDrawer
-          key={`${docTarget.group}/${docTarget.name}`}
-          scope={scope}
+          key={`${docTarget.scope}/${docTarget.group}/${docTarget.name}`}
+          /* 必须用条目所属库：传顶栏 scope（视图名）会读不到正文，跨库重名还会直接报错 */
+          scope={docTarget.scope}
           module={docTarget.name}
           group={docTarget.group}
           fetcher={getDocContent}
