@@ -20,7 +20,10 @@ import {
   GovernanceApiError,
   type EventTypeView, type GovernanceDocItem, type GovernanceLifecycleCounts, type LifecycleKind,
 } from '@/api/governanceApi';
-import { govDocKey, govGroupLabel, isGovernanceView, VIEW_WRITE_HINT } from '@/lib/governanceView';
+import {
+  govDocKey, govFailedMembers, govFailedNotice, govFailedTitle, govGroupLabel, isGovernanceView, VIEW_WRITE_HINT,
+  type GovFailedMember,
+} from '@/lib/governanceView';
 
 type Filter = 'all' | LifecycleKind;
 
@@ -90,6 +93,8 @@ export function LifecyclePage(): JSX.Element {
     members: string[];
     skipped: Array<{ scope: string; reason: string }>;
     truncated: boolean;
+    /** 读取失败的成员库（后端 buckets[].error）：不显示就等于「数据凭空少了」 */
+    failed: GovFailedMember[];
   } | null>(null);
   /** 服务端全量分档计数（旧 daemon 缺失时回退按已加载列表统计） */
   const [lifecycleCounts, setLifecycleCounts] = useState<GovernanceLifecycleCounts | null>(null);
@@ -151,6 +156,7 @@ export function LifecyclePage(): JSX.Element {
           members: list.members ?? [],
           skipped: list.skipped ?? [],
           truncated: list.truncated === true,
+          failed: govFailedMembers(list),
         }
         : null);
       setTypes(typeList.types);
@@ -344,8 +350,10 @@ export function LifecyclePage(): JSX.Element {
        * 只写「只读」而不给成员库时，用户会以为数据是凭空聚合的、也不知道该切哪个库。
        */}
       {isView ? (
-        <p className="gov-hint">
+        <p className="gov-hint" title={govFailedTitle(viewInfo.failed)}>
           只读聚合视图：数据来自 {viewInfo.members.join('、') || '（无可用成员）'}；改分类请切到具体知识库。
+          {/* 读取失败比「未参与 / 被截断」严重（数据缺失 vs 数据未加载），排在最前（#57） */}
+          {viewInfo.failed.length > 0 ? ` ${govFailedNotice(viewInfo.failed)}` : ''}
           {viewInfo.truncated ? ` 仅合并前 ${viewInfo.members.length} 个成员库。` : ''}
           {viewInfo.skipped.length > 0 ? ` 未参与：${viewInfo.skipped.map((s) => s.scope).join('、')}。` : ''}
         </p>

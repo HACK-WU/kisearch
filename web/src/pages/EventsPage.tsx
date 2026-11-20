@@ -16,7 +16,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
-import { VIEW_WRITE_HINT } from '@/lib/governanceView';
+import {
+  govFailedMembers, govFailedNotice, govFailedTitle, govLoadedNotice, VIEW_WRITE_HINT,
+  type GovFailedMember,
+} from '@/lib/governanceView';
 import { useAuth } from '@/lib/authContext';
 import { aiSettingsHref } from '@/lib/aiSettingsUrl';
 import { FindRefPanel } from '@/components/governance/FindRefPanel';
@@ -181,6 +184,23 @@ export function EventsPage(): JSX.Element {
   const [counts, setCounts] = useState<{ open: number; closed: number } | null>(null);
   /** 当前 scope 是视图（事件列表本期不支持聚合，空列表要说明原因，而不是显示「暂无事件」） */
   const [isViewScope, setIsViewScope] = useState(false);
+  /**
+   * 视图响应的「部分成功」元信息（null = 单库 / 还没取到）。
+   *
+   * 三件事都直接影响「用户以为自己看到的是全部」：
+   *   · failed   —— 某个成员库读失败（后端 buckets[].error，事件 #57）
+   *   · hasMore  —— 后端按全量 total 算出的「还有更多」（事件 #56：此前前端从不读）
+   *   · skipped / truncated —— 成员超上限被截掉
+   */
+  const [viewMeta, setViewMeta] = useState<{
+    failed: GovFailedMember[];
+    skipped: Array<{ scope: string; reason: string }>;
+    truncated: boolean;
+    hasMore: boolean;
+    total: number;
+    /** 实际参与合并的成员库（`truncated` 时提示「只合并了前 N 个」） */
+    members: string[];
+  } | null>(null);
   const [addStageOpen, setAddStageOpen] = useState(false);
   const [newEventOpen, setNewEventOpen] = useState(false);
   const [newTypeOpen, setNewTypeOpen] = useState(false);
@@ -392,6 +412,17 @@ export function EventsPage(): JSX.Element {
       // 视图判定优先看列表响应（本页自己的请求），counts 仅作兜底
       const viewNow = Boolean(list.view ?? govCounts?.view);
       setIsViewScope(viewNow);
+      setViewMeta(viewNow
+        ? {
+          failed: govFailedMembers(list),
+          skipped: list.skipped ?? [],
+          truncated: list.truncated === true,
+          // `hasMore` 后端按全量 total 算（视图下也是），前端此前完全忽略（#56）
+          hasMore: list.hasMore === true,
+          total: list.total,
+          members: list.members ?? [],
+        }
+        : null);
       // 视图下深链只认 evt_ id（shortId 跨库撞号）
       setActiveId((prev) => prev ?? matchDeepLink(list.events, viewNow) ?? list.events[0]?.id ?? null);
     } catch (err) {
@@ -852,9 +883,14 @@ export function EventsPage(): JSX.Element {
         </p>
       ) : null}
       {isViewScope ? (
-        <p className="gov-hint">
+        <p className="gov-hint" title={govFailedTitle(viewMeta?.failed ?? [])}>
           聚合视图：事件按成员库合并展示（编号 #N 为各库独立计数，详情按事件 id 定位）。
           流转 / 编辑 / 删除 / AI 分析会落到事件所属库；新建事件与类型维护请先切到具体知识库。
+          {/* 三条「你看到的可能不是全部」必须说出来，按严重度排序：#57 读失败 → #56 截断 → 成员超上限 */}
+          {viewMeta && viewMeta.failed.length > 0 ? ` ${govFailedNotice(viewMeta.failed)}` : ''}
+          {viewMeta?.hasMore ? ` ${govLoadedNotice(events.length, viewMeta.total, viewMeta.hasMore)}` : ''}
+          {viewMeta?.truncated ? ` 仅合并前 ${viewMeta.members.length} 个成员库。` : ''}
+          {viewMeta && viewMeta.skipped.length > 0 ? ` 未参与：${viewMeta.skipped.map((s) => s.scope).join('、')}。` : ''}
         </p>
       ) : null}
 

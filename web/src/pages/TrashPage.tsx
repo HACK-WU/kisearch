@@ -17,7 +17,10 @@ import {
   GovernanceApiError,
   type TrashItemView, type TrashReason, type TrashSettingsView,
 } from '@/api/governanceApi';
-import { govDocKey, govGroupLabel, isGovernanceView, VIEW_WRITE_HINT } from '@/lib/governanceView';
+import {
+  govDocKey, govFailedMembers, govFailedNotice, govFailedTitle, govGroupLabel, isGovernanceView, VIEW_WRITE_HINT,
+  type GovFailedMember,
+} from '@/lib/governanceView';
 
 type Filter = 'all' | TrashReason;
 
@@ -51,6 +54,8 @@ export function TrashPage(): JSX.Element {
     members: string[];
     skipped: Array<{ scope: string; reason: string }>;
     truncated: boolean;
+    /** 读取失败的成员库（后端 buckets[].error）：不显示就等于「条目凭空少了」 */
+    failed: GovFailedMember[];
   } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
@@ -90,6 +95,7 @@ export function TrashPage(): JSX.Element {
           members: list.members ?? [],
           skipped: list.skipped ?? [],
           truncated: list.truncated === true,
+          failed: govFailedMembers(list),
         }
         : null);
       setSelected(new Set());
@@ -218,9 +224,11 @@ export function TrashPage(): JSX.Element {
       </div>
 
       {isView ? (
-        <p className="gov-hint">
+        <p className="gov-hint" title={govFailedTitle(viewInfo.failed)}>
           只读聚合视图：数据来自 {viewInfo.members.join('、') || '（无可用成员）'}；恢复 / 彻底删除会落到条目所属库，
           回收站设置请切到具体知识库修改。
+          {/* 读取失败比「未参与 / 被截断」严重（数据缺失 vs 数据未加载），排在最前（#57） */}
+          {viewInfo.failed.length > 0 ? ` ${govFailedNotice(viewInfo.failed)}` : ''}
           {viewInfo.truncated ? ` 仅合并前 ${viewInfo.members.length} 个成员库。` : ''}
           {items.length < total ? ` 当前仅加载各库前 ${items.length} 条（共 ${total} 条），更早的条目请切到具体库查看。` : ''}
           {viewInfo.skipped.length > 0 ? ` 未参与：${viewInfo.skipped.map((s) => s.scope).join('、')}。` : ''}
