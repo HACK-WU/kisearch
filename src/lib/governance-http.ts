@@ -737,8 +737,35 @@ export async function handleGovernanceRoutes(
     // ─── 事件类型 ───────────────────────────────────────
     if (segs[0] === 'event-types') {
       if (method === 'GET' && !segs[1]) {
-        const scope = scopeFromQuery();
-        return sendJson(res, 200, { ok: true, scope, types: listTypes(scope) });
+        const targets = readTargets(str(q.get('scope')));
+        if (targets.view) {
+          const buckets: Array<{ scope: string; total?: number; error?: string }> = [];
+          const types: Array<Record<string, unknown>> = [];
+          for (const member of targets.members) {
+            try {
+              const list = listTypes(member);
+              buckets.push({ scope: member, total: list.length });
+              /*
+               * `et_1/et_2/et_3` 每个库都有（内置类型 id 固定）—— 裸 id 合并必撞车，
+               * 故补 `typeKey = scope:typeId`；前端下拉与筛选都用它。
+               */
+              for (const t of list) types.push({ ...t, scope: member, typeKey: `${member}:${t.id}` });
+            } catch (err) {
+              buckets.push({ scope: member, error: (err as Error).message });
+            }
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            scope: targets.requested,
+            view: targets.view,
+            members: targets.members,
+            types,
+            buckets,
+            ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+            ...(targets.truncated ? { truncated: true } : {}),
+          });
+        }
+        return sendJson(res, 200, { ok: true, scope: targets.requested, types: listTypes(targets.members[0]) });
       }
       if (method === 'POST' && !segs[1]) {
         const b = await body();
@@ -773,33 +800,117 @@ export async function handleGovernanceRoutes(
     // ─── 事件 ───────────────────────────────────────────
     if (segs[0] === 'events') {
       if (method === 'GET' && !segs[1]) {
-        const scope = scopeFromQuery();
-        const result = listEvents(scope, {
-          status: (str(q.get('status')) ?? 'open') as 'open' | 'closed' | 'all',
-          ...(str(q.get('type')) ? { typeId: str(q.get('type'))! } : {}),
-          ...(str(q.get('q')) ? { q: str(q.get('q'))! } : {}),
-          limit: num(q.get('limit')) ?? 20,
-          offset: num(q.get('offset')) ?? 0,
-          docsPreviewLimit: num(q.get('docsPreviewLimit')) ?? 3,
+        const targets = readTargets(str(q.get('scope')));
+        const status = (str(q.get('status')) ?? 'open') as 'open' | 'closed' | 'all';
+        const limit = num(q.get('limit')) ?? 20;
+        const offset = num(q.get('offset')) ?? 0;
+        const docsPreviewLimit = num(q.get('docsPreviewLimit')) ?? 3;
+        const keyword = str(q.get('q'));
+        /*
+         * 置顶免疫开关（2026-11-19）：只在显式传 `includePinned=1` 时生效。
+         * 默认关 —— MCP / 脚本走同一函数，它们要的是精确集合，不能被列表偏好污染。
+         */
+        const includePinned = q.get('includePinned') === '1' || q.get('includePinned') === 'true';
+        /**
+         * 类型筛选：视图下是 `<scope>:<typeId>` —— `et_1/et_2/et_3` 每个库都有，
+         * 裸 id 会同时命中最外层的多库。不带冒号时按裸 id 对每库生效（兼容旧调用）。
+         */
+        const typeRaw = str(q.get('type'));
+        const typeSep = typeRaw ? typeRaw.indexOf(':') : -1;
+        const typeScope = typeRaw && typeSep > 0 ? typeRaw.slice(0, typeSep) : null;
+        const typeId = typeRaw ? (typeSep > 0 ? typeRaw.slice(typeSep + 1) : typeRaw) : null;
+
+        const toView = (
+          item: ReturnType<typeof listEvents>['items'][number],
+          scopeOf: string,
+        ): Record<string, unknown> => ({
+          ...item.event,
+          // 事件所属库：详情 / refs / analysis 都靠它定位（视图名不是库）
+          scope: scopeOf,
+          typeName: item.type?.name ?? null,
+          stage: item.stage,
+          memberTotal: item.memberTotal,
+          docsPreview: item.members.map((m) => ({ group: m.group, name: m.name })),
+          visibilitySummary: item.visibilitySummary,
+        });
+
+        if (targets.view) {
+          const buckets: Array<{ scope: string; total?: number; error?: string }> = [];
+          const merged: Array<{ scope: string; item: ReturnType<typeof listEvents>['items'][number] }> = [];
+          let total = 0;
           /*
-           * 置顶免疫开关（2026-11-19）：只在显式传 `includePinned=1` 时生效。
-           * 默认关 —— MCP / 脚本走同一函数，它们要的是精确集合，不能被列表偏好污染。
+           * 类型筛选带库前缀时**只查那一个库**：否则其余库会带着「无类型筛选」的结果
+           * 混进来，表现为「选了 A 库的类型，列表里却有 B 库的事件」。
            */
-          includePinned: q.get('includePinned') === '1' || q.get('includePinned') === 'true',
+          const effectiveMembers = typeScope
+            ? targets.members.filter((m) => m === typeScope)
+            : targets.members;
+          for (const member of effectiveMembers) {
+            try {
+              const r = listEvents(member, {
+                status,
+                ...(typeId ? { typeId } : {}),
+                ...(keyword ? { q: keyword } : {}),
+                limit,
+                offset: 0,
+                docsPreviewLimit,
+                includePinned,
+              });
+              buckets.push({ scope: member, total: r.total });
+              total += r.total;
+              for (const item of r.items) merged.push({ scope: member, item });
+            } catch (err) {
+              // 单成员失败只污染自己的桶：一个库坏掉不该让整个事件页变空
+              buckets.push({ scope: member, error: (err as Error).message });
+            }
+          }
+          /*
+           * 跨库重排：置顶区（pinnedAt 降序）在前、普通区按 updatedAt 降序 ——
+           * 与单库 `listEvents` 同一套语义，否则合并后的顺序会与页面的
+           * 「置顶分组 + 最近更新」两套排序打架。
+           */
+          merged.sort((a, b) => {
+            const pa = a.item.event.pinnedAt ?? null;
+            const pb = b.item.event.pinnedAt ?? null;
+            if (pa !== null && pb !== null) return pb - pa;
+            if (pa !== null) return -1;
+            if (pb !== null) return 1;
+            return b.item.event.updatedAt - a.item.event.updatedAt;
+          });
+          const page = merged.slice(offset, offset + limit);
+          return sendJson(res, 200, {
+            ok: true,
+            scope: targets.requested,
+            view: targets.view,
+            members: targets.members,
+            total,
+            /*
+             * 用**全量合计**判断，不用 merged.length：merged 只含各库前 `limit` 条，
+             * 某库 total > limit 时会误报「没有更多」（47 条只加载 20 条却 hasMore=false）。
+             */
+            hasMore: offset + page.length < total,
+            events: page.map(({ scope: member, item }) => toView(item, member)),
+            buckets,
+            ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+            ...(targets.truncated ? { truncated: true } : {}),
+          });
+        }
+
+        const result = listEvents(targets.members[0], {
+          status,
+          ...(typeId ? { typeId } : {}),
+          ...(keyword ? { q: keyword } : {}),
+          limit,
+          offset,
+          docsPreviewLimit,
+          includePinned,
         });
         return sendJson(res, 200, {
           ok: true,
-          scope,
+          scope: targets.requested,
           total: result.total,
           hasMore: result.hasMore,
-          events: result.items.map((item) => ({
-            ...item.event,
-            typeName: item.type?.name ?? null,
-            stage: item.stage,
-            memberTotal: item.memberTotal,
-            docsPreview: item.members.map((m) => ({ group: m.group, name: m.name })),
-            visibilitySummary: item.visibilitySummary,
-          })),
+          events: result.items.map((item) => toView(item, targets.members[0])),
         });
       }
 
@@ -833,16 +944,60 @@ export async function handleGovernanceRoutes(
        * 只读进程内 activeRuns，无磁盘 I/O，可以秒级轮询。
        */
       if (method === 'GET' && segs[1] === 'running' && !segs[2]) {
-        const scope = scopeFromQuery();
-        return sendJson(res, 200, { ok: true, scope, ids: listActiveAnalysisIds(scope) });
+        const targets = readTargets(str(q.get('scope')));
+        // 分析中的 id 是 `evt_…`（近似全局唯一），直接合并即可
+        const ids = targets.members.flatMap((member) => listActiveAnalysisIds(member));
+        return sendJson(res, 200, {
+          ok: true,
+          scope: targets.requested,
+          ...(targets.view ? { view: targets.view } : {}),
+          ids,
+        });
       }
 
       const id = segs[1];
       if (id && method === 'GET' && !segs[2]) {
-        const scope = scopeFromQuery();
-        // 404 判定保持不变（错误码/状态码不动），找到后再走共用读取
-        const found = findEventIn(readAllEvents(scope), id);
-        if (!found) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+        const targets = readTargets(str(q.get('scope')));
+        let scope = targets.members[0];
+        let found: { id: string } | null = null;
+        if (targets.view) {
+          /*
+           * 视图下只接受 `evt_…`：`#N` 是各库独立的 shortId 计数（store.ts:81-84），
+           * 跨库必然歧义 —— 猜库会把用户带到另一个库的另一个事件，属静默串数据。
+           */
+          if (!/^evt_/.test(id)) {
+            // 路径段是 URL 编码的（`#1` → `%231`）：给人看的文案要解码，否则「%231」像乱码
+            const shown = (() => { try { return decodeURIComponent(id); } catch { return id; } })();
+            throw new GovernanceError(
+              'EVENT_SCOPE_REQUIRED',
+              `视图下打开事件详情请使用事件 id（evt_…）：「${shown}」是各库独立编号，跨库有歧义`,
+              { view: targets.view, ref: shown },
+            );
+          }
+          const hits: Array<{ scope: string; id: string }> = [];
+          for (const member of targets.members) {
+            const e = findEventIn(readAllEvents(member), id);
+            if (e) hits.push({ scope: member, id: e.id });
+          }
+          if (hits.length === 0) {
+            return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          }
+          if (hits.length > 1) {
+            // 同一 id 命中多个库 = 数据异常：明确拒绝，不静默取第一个
+            throw new GovernanceError(
+              'EVENT_SCOPE_REQUIRED',
+              `事件 ${id} 在多个成员库中命中（${hits.map((h) => h.scope).join('、')}），请切到具体知识库查看`,
+              { view: targets.view, scopes: hits.map((h) => h.scope) },
+            );
+          }
+          scope = hits[0].scope;
+          found = { id: hits[0].id };
+        } else {
+          // 404 判定保持不变（错误码/状态码不动），找到后再走共用读取
+          const single = findEventIn(readAllEvents(scope), id);
+          if (!single) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          found = { id: single.id };
+        }
         /**
          * 读取逻辑与 MCP `ki_event_get` 共用 `loadEventDetail`（单一真源）。
          * 展示仍按本接口的**旧 DTO**：`event` 保持原形、`analysis.draft` 保留 candidates/steps、
@@ -865,7 +1020,12 @@ export async function handleGovernanceRoutes(
         }
         return sendJson(res, 200, {
           ok: true,
+          /*
+           * 视图下 `scope` 回填**事件所属库**而不是视图名：前端后续的 refs / analysis /
+           * ask 请求都直接复用它，天然落到正确的库，不需要再判断"当前是不是视图"。
+           */
           scope,
+          ...(targets.view ? { view: targets.view, viewMembers: targets.members } : {}),
           event: detail.event,
           members: detail.members.map((m) => ({ group: m.group, name: m.name })),
           logs: detail.logs,

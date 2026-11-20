@@ -147,9 +147,20 @@ export interface EventTypeView {
   fallbackDays: number | null;
   revision: number;
   stages: EventStageView[];
+  /** 视图模式下：类型所属库（`et_1` 每库都有，裸 id 必撞车） */
+  scope?: string;
+  /** 视图模式下：`${scope}:${id}`，前端下拉/筛选都用它 */
+  typeKey?: string;
 }
 
-export function listEventTypes(scope: string): Promise<{ ok: true; scope: string; types: EventTypeView[] }> {
+export function listEventTypes(scope: string): Promise<{
+  ok: true;
+  scope: string;
+  types: EventTypeView[];
+  view?: string;
+  members?: string[];
+  buckets?: Array<{ scope: string; total?: number; error?: string }>;
+}> {
   return req(`/api/governance/event-types?${new URLSearchParams({ scope }).toString()}`);
 }
 
@@ -187,6 +198,8 @@ export interface EventView {
   description?: string;
   typeId: string;
   typeName?: string | null;
+  /** 视图模式下：事件所属库（详情 / refs / analysis 都靠它定位） */
+  scope?: string;
   stageKey: string;
   stageIndex: number;
   closedAt: number | null;
@@ -202,7 +215,7 @@ export interface EventView {
   docsPreview?: Array<{ group: string; name: string }>;
 }
 
-export interface EventListResponse {
+export interface EventListResponse extends GovernanceViewMeta {
   ok: true;
   scope: string;
   total: number;
@@ -582,7 +595,11 @@ export function applyLifecycleBatch(
 
 export interface EventDetail {
   ok: true;
+  /** 事件**所属库**（视图下也不是视图名）：后续 refs / analysis / ask 直接复用它 */
   scope: string;
+  /** 视图模式下：请求时的视图名（仅用于展示） */
+  view?: string;
+  viewMembers?: string[];
   event: EventView & { typeName?: string };
   members: Array<{ group: string; name: string }>;
   logs: Array<{ fromKey: string | null; toKey: string; at: number; by: string; note?: string }>;

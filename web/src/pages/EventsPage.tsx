@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
+import { VIEW_WRITE_HINT } from '@/lib/governanceView';
 import { useAuth } from '@/lib/authContext';
 import { aiSettingsHref } from '@/lib/aiSettingsUrl';
 import { FindRefPanel } from '@/components/governance/FindRefPanel';
@@ -125,13 +126,21 @@ export function EventsPage(): JSX.Element {
    */
   const deepLinkWarned = useRef(false);
   /** 列表里按 id 或 `#shortId` 找事件：深链与选中态回写共用同一口径 */
-  const findEventKey = useCallback((list: readonly EventView[], key: string | null): string | null => {
+  const findEventKey = useCallback((
+    list: readonly EventView[],
+    key: string | null,
+    allowShortId = true,
+  ): string | null => {
     if (!key) return null;
     const raw = key.replace(/^#/, '');
-    return list.find((e) => e.id === key || String(e.shortId) === raw)?.id ?? null;
+    /*
+     * 视图下**只按 `evt_` id 匹配**：shortId 是各库独立计数（两个库都有 #1），
+     * 按编号兜底会把用户带进另一个库的同号事件 —— 静默串数据比找不到更糟。
+     */
+    return list.find((e) => e.id === key || (allowShortId && String(e.shortId) === raw))?.id ?? null;
   }, []);
   const matchDeepLink = useCallback(
-    (list: readonly EventView[]): string | null => findEventKey(list, entryDeepLink),
+    (list: readonly EventView[], isView = false): string | null => findEventKey(list, entryDeepLink, !isView),
     [entryDeepLink, findEventKey],
   );
   /**
@@ -159,6 +168,11 @@ export function EventsPage(): JSX.Element {
     }, { replace: true });
   }, [setSearchParams]);
   const [detail, setDetail] = useState<EventDetail | null>(null);
+  /**
+   * **事件相关请求**要用「事件所属库」：视图下顶栏 scope 是视图名，拿它读 refs / analysis
+   * 会 404 或落到错误的库。详情响应 `scope` 已回填真实库（后端 S-05），故优先用它。
+   */
+  const eventScope = detail?.scope ?? scope;
   const [refs, setRefs] = useState<RefItem[]>([]);
   const [message, setMessage] = useState<{ tone: 'ok' | 'err'; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -301,8 +315,14 @@ export function EventsPage(): JSX.Element {
    * 「AI 查找」不在此列 —— 检索是读，只有弹窗里的「加入」需要写（由弹窗自己门禁）。
    */
   const readOnlyHint = canWrite ? undefined : '需要写权限';
+  /**
+   * 视图是**只读聚合**（不是"账号只读"）：写入口与只读账号共用同一条禁用路径，
+   * 但提示文案要区分 —— 「切到具体知识库」和「需要写权限」是两回事。
+   */
+  const writeBlocked = !canWrite || isViewScope;
   // 鉴权加载中（permissions 暂空）只禁用、不弹"只读"横幅，避免进页闪一下
-  const showReadOnlyHint = !canWrite && authStatus !== 'loading';
+  // 只读横幅只针对「账号只读」；视图态另有自己的提示条，两者不能混
+  const showReadOnlyHint = !canWrite && !isViewScope && authStatus !== 'loading';
 
   /**
    * 列表视图要真正「到底」：给主内容区挂 `--noscroll`（浏览页 / 资源页同款范式），
@@ -364,12 +384,11 @@ export function EventsPage(): JSX.Element {
       setEvents(list.events);
       setTypes(typeList.types);
       if (govCounts) setCounts({ open: govCounts.eventsOpen, closed: govCounts.eventsClosed });
-      /*
-       * 视图下事件列表**本期不支持聚合**，但 `/counts` 已返回合并合计 ——
-       * 不说明就会出现「顶部 45 条、列表空」，比原来的「都是 0」更像数据丢了。
-       */
-      setIsViewScope(Boolean(govCounts?.view));
-      setActiveId((prev) => prev ?? matchDeepLink(list.events) ?? list.events[0]?.id ?? null);
+      // 视图判定优先看列表响应（本页自己的请求），counts 仅作兜底
+      const viewNow = Boolean(list.view ?? govCounts?.view);
+      setIsViewScope(viewNow);
+      // 视图下深链只认 evt_ id（shortId 跨库撞号）
+      setActiveId((prev) => prev ?? matchDeepLink(list.events, viewNow) ?? list.events[0]?.id ?? null);
     } catch (err) {
       if (seq !== listSeq.current) return;
       setMessage({ tone: 'err', text: (err as Error).message });
@@ -416,7 +435,7 @@ export function EventsPage(): JSX.Element {
   useEffect(() => {
     if (!entryDeepLink || deepLinkWarned.current || events.length === 0) return;
     deepLinkWarned.current = true;
-    if (matchDeepLink(events)) return;
+    if (matchDeepLink(events, isViewScope)) return;
     /*
      * 不能只写「可能已被删除」：地址栏里的 `?event=` 是**库内** id（2026-11-19 起点选也会写回），
      * 换库 / 转发给用别的库的人都会走到这里，而事件其实一直在，只是不在当前库。
@@ -424,9 +443,11 @@ export function EventsPage(): JSX.Element {
      */
     setMessage({
       tone: 'err',
-      text: `未找到事件 ${entryDeepLink}：它可能已被删除，或不在当前知识库「${scope}」中`,
+      text: isViewScope
+        ? `未找到事件 ${entryDeepLink}：视图下只支持按事件 id 定位（#N 在各库会重复），请改用事件 id 或切到具体知识库`
+        : `未找到事件 ${entryDeepLink}：它可能已被删除，或不在当前知识库「${scope}」中`,
     });
-  }, [entryDeepLink, events, matchDeepLink, scope]);
+  }, [entryDeepLink, events, matchDeepLink, scope, isViewScope]);
 
   /**
    * 操作提示自动收（2026-11-18）：成功 2.6s 自隐 —— 它已是 fixed 浮层、不占布局，
@@ -440,7 +461,12 @@ export function EventsPage(): JSX.Element {
 
   const loadDetail = useCallback(async (id: string) => {
     try {
-      const [d, r] = await Promise.all([getEventDetail(scope, id), listRefs(scope, id)]);
+      /*
+       * 必须**先**取详情拿「事件所属库」，再用它读 refs —— 视图下两者不是同一个 scope，
+       * 并行发出去会让 refs 请求带着视图名打在空目录上（旧实现是 Promise.all）。
+       */
+      const d = await getEventDetail(scope, id);
+      const r = await listRefs(d.scope, id);
       setDetail(d);
       setRefs(r.refs);
     } catch (err) {
@@ -480,7 +506,7 @@ export function EventsPage(): JSX.Element {
     const id = active?.id;
     if (!id) return; // 切换中：保留上一份，等新 id 到了再覆盖
     let alive = true;
-    void getFindSummary(scope, id)
+    void getFindSummary(eventScope, id)
       .then((r) => {
         if (!alive) return;
         const last = r.lastFind;
@@ -490,7 +516,7 @@ export function EventsPage(): JSX.Element {
       })
       .catch(() => { /* 读失败保留现有值，不清空 */ });
     return () => { alive = false; };
-  }, [active?.id, scope]);
+  }, [active?.id, eventScope]);
   const activeAnalysis = detail?.event.id === active?.id ? (detail?.analysis ?? null) : null;
   const type = useMemo(
     () => types.find((t) => t.id === (active?.typeId ?? '')) ?? null,
@@ -624,7 +650,7 @@ export function EventsPage(): JSX.Element {
     const stageTotal = t?.stages.length ?? 0;
     return (
       <div
-        key={event.id}
+        key={`${event.scope ?? ''}:${event.id}`}
         data-event-id={event.id}
         className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}${runningIds.has(event.id) ? ' gov-ev--running' : ''}`}
         onClick={() => selectEvent(event.id)}
@@ -659,9 +685,23 @@ export function EventsPage(): JSX.Element {
                 * 编号（2026-11-19）：从标题行挪进 meta 行，标题因此吃满整行宽度；
                 * 正文只显示裸数字（`#` 留在 title / aria-label），样式与详情页编号 chip 同源。
                 */}
-              <span className="gov-ev__id" title={`事件 #${event.shortId}`} aria-label={`事件 #${event.shortId}`}>
+              <span
+                className="gov-ev__id"
+                title={event.scope ? `事件 #${event.shortId} · ${event.scope}` : `事件 #${event.shortId}`}
+                aria-label={`事件 #${event.shortId}`}
+              >
                 {event.shortId}
               </span>
+              {/*
+               * 视图下 shortId 是**各库独立计数**（两个库都有 #1）：必须紧跟库名，
+               * 否则用户看到的编号在库之间不可比较，也无法判断该切哪个库。
+               */}
+              {event.scope && isViewScope ? (
+                <>
+                  <span className="gov-ev__sep" aria-hidden="true">·</span>
+                  <span className="gov-cell-muted" title={`事件所属库：${event.scope}`}>{event.scope}</span>
+                </>
+              ) : null}
               <span className="gov-ev__sep" aria-hidden="true">·</span>
               <span>{listTimeText(event)}</span>
               {t ? (
@@ -732,8 +772,8 @@ export function EventsPage(): JSX.Element {
           </div>
           <button
             className="gov-btn gov-btn--sm"
-            disabled={!canWrite}
-            title={readOnlyHint}
+            disabled={writeBlocked}
+            title={isViewScope ? VIEW_WRITE_HINT : readOnlyHint}
             onClick={() => setNewEventOpen(true)}
           >
             ＋ 新建事件
@@ -748,7 +788,17 @@ export function EventsPage(): JSX.Element {
           <DropdownFilter
             label="类型"
             value={typeFilter}
-            options={[{ value: '', label: '全部类型' }, ...types.map((t) => ({ value: t.id, label: t.name }))]}
+            options={[
+              { value: '', label: '全部类型' },
+              ...types.map((t) => ({
+                /*
+                 * 视图下裸 id（`et_1`）在每个库都存在 → 必须用 `库:et_N` 精确定位；
+                 * label 带库名，否则两库里同名的自定义类型无法区分。
+                 */
+                value: t.typeKey ?? t.id,
+                label: t.scope ? `${t.scope} · ${t.name}` : t.name,
+              })),
+            ]}
             onChange={setTypeFilter}
           />
           <DropdownFilter
@@ -795,6 +845,12 @@ export function EventsPage(): JSX.Element {
           「AI 查找」可照常用，只有「加入参考文档」需要写权限。
         </p>
       ) : null}
+      {isViewScope ? (
+        <p className="gov-hint">
+          只读聚合视图：事件按成员库合并展示（编号 #N 为各库独立计数，详情按事件 id 定位）。
+          新建 / 流转 / 编辑 / 删除 / AI 分析请切到具体知识库操作。
+        </p>
+      ) : null}
 
       {tab === 'types' ? (
         <>
@@ -813,16 +869,16 @@ export function EventsPage(): JSX.Element {
             </span>
             <button
               className="gov-btn gov-btn--sm"
-              disabled={busy || !canWrite}
-              title={readOnlyHint}
+              disabled={busy || writeBlocked}
+              title={isViewScope ? VIEW_WRITE_HINT : readOnlyHint}
               onClick={() => setNewTypeOpen(true)}
             >
               ＋ 新建类型
             </button>
             <button
               className="gov-btn gov-btn--sm gov-btn--danger-ghost"
-              disabled={busy || !selectedType || selectedType.builtin || !canWrite}
-              title={!canWrite ? readOnlyHint : selectedType?.builtin ? '内置类型不可删除' : '删除该类型（仍有事件在用时会被拒绝）'}
+              disabled={busy || !selectedType || selectedType.builtin || writeBlocked}
+              title={writeBlocked ? (isViewScope ? VIEW_WRITE_HINT : readOnlyHint) : selectedType?.builtin ? '内置类型不可删除' : '删除该类型（仍有事件在用时会被拒绝）'}
               onClick={() => void removeType()}
             >
               删除类型
@@ -863,8 +919,8 @@ export function EventsPage(): JSX.Element {
                                   key={value}
                                   type="button"
                                   aria-pressed={stage.visibility === value}
-                                  disabled={busy || !canWrite}
-                                  title={readOnlyHint}
+                                  disabled={busy || writeBlocked}
+                                  title={isViewScope ? VIEW_WRITE_HINT : readOnlyHint}
                                   onClick={() => void patchType((stages) => {
                                     const next = [...stages];
                                     next[i] = { ...next[i], visibility: value };
@@ -886,8 +942,8 @@ export function EventsPage(): JSX.Element {
                           <td>
                             <button
                               className="gov-btn gov-btn--ghost gov-btn--sm"
-                              disabled={busy || i === selectedType.stages.length - 1 || !canWrite}
-                              title={!canWrite ? readOnlyHint : i === selectedType.stages.length - 1 ? '末位是终态，不能停用' : '停用后不能再流转到该阶段'}
+                              disabled={busy || i === selectedType.stages.length - 1 || writeBlocked}
+                              title={writeBlocked ? (isViewScope ? VIEW_WRITE_HINT : readOnlyHint) : i === selectedType.stages.length - 1 ? '末位是终态，不能停用' : '停用后不能再流转到该阶段'}
                               onClick={() => void patchType((stages) => {
                                 const next = [...stages];
                                 next[i] = { ...next[i], disabled: !next[i].disabled };
@@ -905,8 +961,8 @@ export function EventsPage(): JSX.Element {
                 <div className="gov-card__foot">
                   <button
                     className="gov-btn gov-btn--sm"
-                    disabled={busy || !canWrite}
-                    title={readOnlyHint}
+                    disabled={busy || writeBlocked}
+                    title={isViewScope ? VIEW_WRITE_HINT : readOnlyHint}
                     onClick={() => setAddStageOpen(true)}
                   >
                     ＋ 追加阶段
@@ -1011,9 +1067,7 @@ export function EventsPage(): JSX.Element {
               {sortedEvents.map((event) => renderEventRow(event, false))}
               {events.length === 0 ? (
                 <div className="gov-cell-muted" style={{ padding: 16 }}>
-                  {isViewScope
-                    ? '当前是知识视图：事件列表暂未支持视图聚合，请切到具体知识库查看（上方计数为各成员库合计）'
-                    : '暂无事件'}
+                  {isViewScope ? '当前视图下没有符合条件的事件' : '暂无事件'}
                 </div>
               ) : null}
             </div>
@@ -1033,7 +1087,7 @@ export function EventsPage(): JSX.Element {
                   refCount={refs.length}
                   closed={closed}
                   pinned={isPinnedEvent(active)}
-                  canWrite={canWrite}
+                  canWrite={canWrite && !isViewScope}
                   busy={busy}
                   delConfirm={delConfirm}
                   descEdit={descEdit}
@@ -1108,11 +1162,13 @@ export function EventsPage(): JSX.Element {
                 {/* AI 分析（默认不渲染：无草稿且无已确认位置时整卡不出现） */}
                 <EventAnalysisCard
                   key={active.id}
-                  scope={scope}
+                  /* 分析读写都要落在事件所属库：视图名下读不到草稿 */
+                  scope={eventScope}
                   event={active}
                   analysis={activeAnalysis}
-                  canWrite={canWrite}
-                  canAsk={canAsk}
+                  canWrite={canWrite && !isViewScope}
+                  /* 追问会落询问记录（写）：视图下与写入口同样禁用，避免往视图名目录写 */
+                  canAsk={canAsk && !isViewScope}
                   busy={busy}
                   readOnlyHint={readOnlyHint}
                   startSignal={startSignal}
@@ -1136,7 +1192,7 @@ export function EventsPage(): JSX.Element {
                     group: m.group,
                     vis: { tone: (VIS_CLASS[stageVis] ?? "hidden") as VisTone, text: VIS_TEXT[stageVis] },
                   }))}
-                  canWrite={canWrite}
+                  canWrite={canWrite && !isViewScope}
                   busy={busy}
                   hint="可见性随事件阶段变化"
                   notice={memberVisWarn ? (
@@ -1154,8 +1210,8 @@ export function EventsPage(): JSX.Element {
                   actions={(
                     <button
                       className="gov-btn gov-btn--ghost gov-btn--sm"
-                      disabled={busy || !canWrite || closed}
-                      title={readOnlyHint ?? (closed ? "事件已收口，不能再挂文档；如需继续请先「重新打开」" : "选择要挂到本事件的文档")}
+                      disabled={busy || writeBlocked || isViewScope || closed}
+                      title={isViewScope ? VIEW_WRITE_HINT : (readOnlyHint ?? (closed ? "事件已收口，不能再挂文档；如需继续请先「重新打开」" : "选择要挂到本事件的文档"))}
                       onClick={() => setAddMemberOpen(true)}
                     >
                       ＋ 添加
@@ -1177,21 +1233,22 @@ export function EventsPage(): JSX.Element {
                     ].join(""),
                     vis: { tone: (VIS_CLASS[ref.visibility] ?? "hidden") as VisTone, text: VIS_TEXT[ref.visibility] },
                   }))}
-                  canWrite={canWrite}
+                  canWrite={canWrite && !isViewScope}
                   busy={busy}
                   hint="外部引用，不随事件阶段变化"
                   panel={findRefOpen ? (
                     <FindRefPanel
-                      scope={scope}
+                      /* 候选在该事件所属库里搜：视图名不是库 */
+                      scope={eventScope}
                       eventId={active.id}
-                      canWrite={canWrite}
+                      canWrite={canWrite && !isViewScope}
                       context={{
                         title: active.title,
                         shortId: active.shortId,
                         ...(type?.name ? { typeName: type.name } : {}),
                         stageName: type?.stages.find((s) => s.key === active.stageKey)?.name ?? '—',
                         assocCount: memberCount,
-                        scope,
+                        scope: eventScope,
                       }}
                       open={findRefOpen}
                       onOpenChange={(open) => { if (!open) setFindRefOpen(false); }}
@@ -1202,7 +1259,7 @@ export function EventsPage(): JSX.Element {
                         if (summary) {
                           setFindSummary(uncertainties ? { summary, uncertainties } : { summary });
                           // 落盘：刷新 / 换机后仍能看到这次的结论（含判断不了的点）
-                          void saveFindSummary(scope, active.id, summary, uncertainties).catch(() => {
+                          void saveFindSummary(eventScope, active.id, summary, uncertainties).catch(() => {
                             /* 落盘失败不影响加入结果，静默即可 */
                           });
                         }
@@ -1250,8 +1307,8 @@ export function EventsPage(): JSX.Element {
                       <button className="gov-btn gov-btn--sm" disabled={busy} onClick={() => setFindRefOpen(true)}>AI 查找</button>
                       <button
                         className="gov-btn gov-btn--ghost gov-btn--sm"
-                        disabled={busy || !canWrite}
-                        title={readOnlyHint}
+                        disabled={busy || writeBlocked || isViewScope}
+                        title={isViewScope ? VIEW_WRITE_HINT : readOnlyHint}
                         onClick={() => setAddRefOpen(true)}
                       >
                         ＋ 添加
@@ -1259,8 +1316,8 @@ export function EventsPage(): JSX.Element {
                       {/* 上传文件（REQ-20261118-001）：与「＋ 添加」同层级，写权限才可用 */}
                       <button
                         className="gov-btn gov-btn--ghost gov-btn--sm"
-                        disabled={busy || !canWrite}
-                        title={readOnlyHint}
+                        disabled={busy || writeBlocked || isViewScope}
+                        title={isViewScope ? VIEW_WRITE_HINT : readOnlyHint}
                         onClick={() => setUploadRefOpen(true)}
                       >
                         上传文件

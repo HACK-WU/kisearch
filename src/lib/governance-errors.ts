@@ -174,6 +174,8 @@ export const GOVERNANCE_CODE_NUMBERS = {
   VIEW_EMPTY: 1703,
   /** views.json 损坏：读不出视图定义，不能当成「不是视图」继续读 */
   VIEWS_CORRUPT: 1704,
+  /** 视图下事件定位需要 `evt_…`：`#N` 是各库独立计数，跨库有歧义 */
+  EVENT_SCOPE_REQUIRED: 1705,
 } as const;
 
 export type GovernanceErrorCode = keyof typeof GOVERNANCE_CODE_NUMBERS;
