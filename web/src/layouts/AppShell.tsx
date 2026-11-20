@@ -18,6 +18,7 @@ import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/docume
 import { ImportPage } from '@/pages/ImportPage';
 import { WritePage } from '@/pages/WritePage';
 import { useScopeValue } from '@/lib/scopeContext';
+import { govFailedMembers } from '@/lib/governanceView';
 import { MERGED_WRITE_LABEL, navItemActive, writeTabFromPath } from '@/lib/writeTabs';
 import { getTasks, refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { dimensionStatusDetail, DEGRADED_TITLE, UNKNOWN_TITLE } from '@/lib/vectorDimensionCopy';
@@ -236,6 +237,11 @@ export function AppShell(): JSX.Element {
   const scope = useScopeValue();
   // 知识治理三项的计数（REQ-20261113-004 · S-07）：与页面同源，避免侧栏与表格口径漂移
   const [govCounts, setGovCounts] = useState<{ docs: number; eventsOpen: number; trash: number } | null>(null);
+  /**
+   * 计数请求里**读取失败**的成员库（视图下才有）：三个数字都只统计成功库，
+   * 失败库会让数字静默偏小 —— 加 `*` + tooltip，别让用户拿它当准确值（#57 复审补漏）。
+   */
+  const [govCountsFailed, setGovCountsFailed] = useState<string[]>([]);
   useEffect(() => {
     let alive = true;
     /*
@@ -243,12 +249,14 @@ export function AppShell(): JSX.Element {
      * 用户会以为「这个视图就等于那个库」）。清空期间 badge 不渲染。
      */
     setGovCounts(null);
+    setGovCountsFailed([]);
     // scope 必须跟着顶栏选择器走：写死 'default' 会让侧栏显示别的库的数字
     fetch(`/api/governance/counts?scope=${encodeURIComponent(scope)}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((payload) => {
         if (!alive || !payload || payload.ok !== true) return;
         setGovCounts({ docs: payload.docs, eventsOpen: payload.eventsOpen, trash: payload.trash });
+        setGovCountsFailed(govFailedMembers(payload).map((f) => f.scope));
       })
       .catch(() => { /* 计数失败不影响导航 */ });
     return () => { alive = false; };
@@ -709,11 +717,17 @@ export function AppShell(): JSX.Element {
               key={item.to}
               to={item.to}
               className={({ isActive }) => `ki-nav-item${isActive ? ' ki-nav-item--active' : ''}`}
+              title={govCountsFailed.length > 0
+                ? `有成员库读取失败：${govCountsFailed.join('、')} —— 数字只统计成功库，可能偏小，请切到具体知识库核对`
+                : undefined}
             >
               <span className="ki-nav-item__icon"><Icon name={item.icon} /></span>
               <span className="ki-nav-item__name">{item.label}</span>
               {typeof item.count === 'number' ? (
-                <span className="ki-nav-item__count">{item.count}</span>
+                <span className="ki-nav-item__count">
+                  {item.count}
+                  {govCountsFailed.length > 0 ? <span aria-label="计数可能偏小">*</span> : null}
+                </span>
               ) : null}
             </NavLink>
           ))}

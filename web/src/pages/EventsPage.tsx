@@ -17,7 +17,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
 import {
-  govFailedMembers, govFailedNotice, govFailedTitle, govLoadedNotice, VIEW_WRITE_HINT,
+  govFailedMembers, govFailedNotice, govFailedTitle, govLoadedNotice, govMergeFailed, VIEW_WRITE_HINT,
   type GovFailedMember,
 } from '@/lib/governanceView';
 import { useAuth } from '@/lib/authContext';
@@ -440,7 +440,11 @@ export function EventsPage(): JSX.Element {
        * buckets / skipped / members 是视图专有字段，单库拿到的自然是空值。
        */
       setViewMeta({
-        failed: govFailedMembers(list),
+        /*
+         * 失败库取**两路并集**：列表端点与 counts 端点各自逐成员 try/catch，
+         * 只显示列表那路会出现「页头数字少了、提示却说没失败」（#57 复审补漏）。
+         */
+        failed: govMergeFailed(govFailedMembers(list), govFailedMembers(govCounts)),
         skipped: list.skipped ?? [],
         truncated: list.truncated === true,
         hasMore: list.hasMore === true,

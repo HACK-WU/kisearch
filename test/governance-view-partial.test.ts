@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import {
-  govFailedMembers, govFailedNotice, govFailedTitle, govLoadedNotice,
+  govFailedMembers, govFailedNotice, govFailedTitle, govLoadedNotice, govMergeFailed,
 } from '../web/src/lib/governanceView.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
@@ -45,6 +45,18 @@ describe('视图部分成功：失败库与截断', () => {
     assert.deepEqual(govFailedMembers(undefined), []);
     assert.deepEqual(govFailedMembers({}), []);
     assert.deepEqual(govFailedMembers({ buckets: [] }), []);
+  });
+
+  it('govMergeFailed：两路失败库并集 + 按 scope 去重（先到的原因优先）', () => {
+    const list = [{ scope: 'a', error: 'from-list' }];
+    const counts = [{ scope: 'a', error: 'from-counts' }, { scope: 'b', error: 'boom' }];
+    assert.deepEqual(govMergeFailed(list, counts), [
+      { scope: 'a', error: 'from-list' },
+      { scope: 'b', error: 'boom' },
+    ]);
+    assert.deepEqual(govMergeFailed([], counts), counts);
+    assert.deepEqual(govMergeFailed(list, []), list);
+    assert.deepEqual(govMergeFailed([], []), []);
   });
 
   it('govFailedNotice：含库名与原因；多库用「；」分隔', () => {
@@ -116,6 +128,15 @@ describe('三个页面必须消费这两条通道（源码守卫）', () => {
       /setViewMeta\(\{/.test(pages.events),
       'setViewMeta 必须在视图 / 单库两种模式下都赋值',
     );
+  });
+
+  it('counts 通道（侧栏 badge + 事件页页头）也必须消费失败库', () => {
+    const appShell = read('web/src/layouts/AppShell.tsx');
+    assert.match(appShell, /govFailedMembers\(payload\)/, '侧栏 counts 未解析 buckets[].error');
+    assert.match(appShell, /govCountsFailed/, '侧栏未记录失败库');
+    assert.match(appShell, /title=\{govCountsFailed\.length > 0/, '侧栏缺「数字可能偏小」的说明');
+    // 两路并集：只读列表那路会出现「页头数字少了、提示却说没失败」
+    assert.match(pages.events, /govMergeFailed\(govFailedMembers\(list\), govFailedMembers\(govCounts\)\)/);
   });
 
   it('events：解释性文案已按用户拍板删除（只留状态提示）', () => {

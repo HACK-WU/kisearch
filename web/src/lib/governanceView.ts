@@ -71,6 +71,32 @@ export function govFailedMembers(
 }
 
 /**
+ * 合并两路失败库（列表请求 + counts 请求）。
+ *
+ * 为什么要合并：事件页的「列表」与「页头计数」来自两个端点
+ * （`/governance/events` 与 `/governance/counts`），各自逐成员 try/catch —— 失败集合
+ * 理论上相同但不保证（瞬时抖动、缓存命中差异）。只显示其中一路，就会出现
+ * 「提示说没有失败，但数字确实少了」。
+ *
+ * 按 scope 去重；先传入那一路（页面主数据源）的错误文案优先。
+ */
+export function govMergeFailed(
+  first: GovFailedMember[],
+  second: GovFailedMember[],
+): GovFailedMember[] {
+  if (second.length === 0) return first;
+  if (first.length === 0) return second;
+  const seen = new Set(first.map((f) => f.scope));
+  const out = [...first];
+  for (const f of second) {
+    if (seen.has(f.scope)) continue;
+    seen.add(f.scope);
+    out.push(f);
+  }
+  return out;
+}
+
+/**
  * 失败库的统一文案（空数组 → 空串，调用方可无条件拼接）。
  *
  * 正文只列库名，**不内联错误原文**：原始 message 里常带服务器绝对路径
