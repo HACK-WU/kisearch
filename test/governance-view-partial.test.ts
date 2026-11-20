@@ -104,4 +104,25 @@ describe('三个页面必须消费这两条通道（源码守卫）', () => {
     assert.match(pages.events, /govLoadedNotice\(/, 'events 页未渲染「还有更多」提示');
     assert.match(pages.events, /skipped/, 'events 页未展示未参与的成员库');
   });
+
+  it('events：单库截断也要提示（#58：那条提示不能只挂在 isViewScope 下）', () => {
+    assert.match(
+      pages.events,
+      /!isViewScope && viewMeta\?\.hasMore/,
+      '单库（非视图）截断没有提示出口',
+    );
+    // 单库分支同样下发 hasMore / total，只在视图下赋值会让单库拿到旧值
+    assert.ok(
+      /setViewMeta\(\{/.test(pages.events),
+      'setViewMeta 必须在视图 / 单库两种模式下都赋值',
+    );
+  });
+
+  it('events：解释性文案已按用户拍板删除（只留状态提示）', () => {
+    assert.ok(
+      !/聚合视图：事件按成员库合并展示/.test(pages.events),
+      '「聚合视图…」说明句已删除，不得回潮（2026-11-20 用户拍板）',
+    );
+    assert.match(pages.events, /viewNotices !== ''/, '无状态时整条提示不渲染');
+  });
 });

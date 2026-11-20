@@ -141,6 +141,65 @@ describe('⑤⑥ 不可解析与过程数据', () => {
     assert.equal(res.parsed, false, '面板据此区分「模型没给结果」与「没有相关文档」');
     assert.equal(res.candidates.length, 0);
   });
+
+  /*
+   * 2026-11-20 补：内核此前把 `reasoning` 分片直接丢弃（契约声明了
+   * `RefSearchStepDto.thinking`、前端也渲染思考块，实现从不产出）。
+   */
+  it('⑥ reasoning 流 → tools step 的 thinking / thinkingChars', async () => {
+    let round = 0;
+    const stream = (async function* gen() {
+      round += 1;
+      if (round === 1) {
+        yield { type: 'reasoning', text: '先看错误库。' } as LlmStreamPart;
+        yield {
+          type: 'tool_calls',
+          calls: [{ id: 'c1', name: 'ki_get_module_info', arguments: JSON.stringify({ group: '错误库', relation: 'doc-a' }) }],
+        } as LlmStreamPart;
+        return;
+      }
+      yield { type: 'reasoning', text: '这篇讲的就是它。' } as LlmStreamPart;
+      yield { type: 'content', text: JSON.stringify(OK_FINAL) } as LlmStreamPart;
+    }) as unknown as StreamFn;
+
+    const res = await runDeepFindCore(baseArgs({
+      stream,
+      runTool: async () => ({
+        text: '{"doc":{"content":"正文"}}',
+        read: { scope: 'kb-a', group: '错误库', name: 'doc-a', truncated: false },
+      }),
+      cachesOf: cachesWith('错误库', 'doc-a'),
+    }));
+
+    assert.equal(res.steps.length, 1, '过程区仍只是一条 tools 步骤');
+    assert.match(String(res.steps[0]!.thinking), /先看错误库/, '第 1 轮思考要带上');
+    assert.match(String(res.steps[0]!.thinking), /这篇讲的就是它/, '第 2 轮思考要合并进来');
+    assert.equal(res.steps[0]!.thinkingChars, '先看错误库。这篇讲的就是它。'.length);
+  });
+
+  it('⑥ 没调工具但有 reasoning：仍产出步骤，否则思考无处安放', async () => {
+    const stream = (async function* gen() {
+      yield { type: 'reasoning', text: '凭成员清单就能判断。' } as LlmStreamPart;
+      yield { type: 'content', text: JSON.stringify({ ...OK_FINAL, candidates: [] }) } as LlmStreamPart;
+    }) as unknown as StreamFn;
+
+    const res = await runDeepFindCore(baseArgs({ stream, cachesOf: () => new Map() }));
+    assert.equal(res.steps.length, 1);
+    assert.equal(res.steps[0]!.metrics?.calls, 0);
+    assert.match(String(res.steps[0]!.thinking), /凭成员清单/);
+  });
+
+  it('⑥ reasoning 超 2000 字截断，thinkingChars 保留原始长度', async () => {
+    const long = '想'.repeat(3000);
+    const stream = (async function* gen() {
+      yield { type: 'reasoning', text: long } as LlmStreamPart;
+      yield { type: 'content', text: JSON.stringify({ ...OK_FINAL, candidates: [] }) } as LlmStreamPart;
+    }) as unknown as StreamFn;
+
+    const res = await runDeepFindCore(baseArgs({ stream, cachesOf: () => new Map() }));
+    assert.equal(String(res.steps[0]!.thinking).length, 2000, '与契约「单步截断 2000 字」同口径');
+    assert.equal(res.steps[0]!.thinkingChars, 3000, '前端据此提示「已截断（原文 3000 字）」');
+  });
 });
 
 describe('⑦ 工具调用次数上限（2026-11-19）', () => {

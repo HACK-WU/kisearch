@@ -25,6 +25,7 @@ import { readAnalysisDocRaw, normalizeAnalysisDocForRead } from './analysis-stor
 import type {
   ConclusionNode, EventAnalysisDoc, EventRecord, EventStage, EventStageLog, EventTypeRecord, Visibility,
 } from './types.js';
+import type { EventDetailResponseDto } from '../governance-contract.js';
 
 /** 单块上限：超过就截断并给 note（默认值见工具层 zod，服务层只做兜底夹取） */
 const HARD_CAP = 100;
@@ -84,64 +85,15 @@ export interface EventLogView {
   status?: 'committed' | 'aborted';
 }
 
-export interface EventDetailView {
-  event: {
-    id: string;
-    shortId: string;
-    title: string;
-    description: string | null;
-    closed: boolean;
-    closedAt: number | null;
-    /** 置顶时间；null = 未置顶（2026-11-19） */
-    pinnedAt: number | null;
-    revision: number;
-    createdAt: number;
-    updatedAt: number;
-  };
-  type: {
-    id: string;
-    name: string;
-    terminalAction: 'keep' | 'trash';
-    fallbackDays: number | null;
-    stages: Array<{ key: string; name: string; visibility: string; disabled: boolean; current: boolean }>;
-  } | null;
-  stage: {
-    key: string;
-    name: string;
-    index: number;
-    visibility: string;
-    legend: string;
-  };
-  members: { total: number; items: MemberItemView[]; note?: string };
-  refs: { total: number; items: RefItemView[]; note?: string };
-  analysis: {
-    /** 分析目标目录；`confirmed[].file` 是相对它的路径 */
-    targetDir: string | null;
-    draft: {
-      status: string;
-      conclusion: string | null;
-      /** 结论因果链（2026-11-19）；旧数据为空数组，前端回退渲染 `conclusion` */
-      chain: ConclusionNode[];
-      unconfirmed: string[];
-      commit: string | null;
-      startedAt: number;
-      updatedAt: number;
-      errorCode?: string;
-      errorMessage?: string;
-    } | null;
-    /** 候选**正文**不返回，只给计数（0 与 null 含义不同：null = 从未分析过） */
-    candidateTotal: number;
-    /**
-     * 仅在「候选数 ≠ 已确认数」时出现：说明还有几个候选没确认。
-     *
-     * 为什么需要：两个数相等时（真实事件 #37 就是 12 = 12）光看 `candidateTotal`
-     * 容易被读成「还有 12 个候选待处理」，而实际是全部已确认。
-     */
-    candidateNote?: string;
-    confirmed: { total: number; items: ConfirmedLocationView[]; note?: string };
-  };
-  logs: { total: number; items: EventLogView[]; note?: string };
-}
+/**
+ * 单事件详情响应形状。
+ *
+ * **真源是契约** `EventDetailResponseDto`（`src/lib/governance-contract.ts`）：
+ * 这里只做 alias，不再本地重写一遍。2026-11-20 前本文件自持一份完整定义，
+ * 与契约、与 HTTP 详情三方各写各的，改实现不会触发任何告警
+ * （排查记录见 `.debug/contract-ssot-drift-20261120/`）。
+ */
+export type EventDetailView = EventDetailResponseDto;
 
 function clamp(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;

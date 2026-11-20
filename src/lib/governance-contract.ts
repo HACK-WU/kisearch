@@ -39,10 +39,16 @@ export interface EventStageSummary {
   visibility: VisibilityDto;
 }
 
+/**
+ * 列表里的成员文档预览。
+ *
+ * 只有定位三元组里的 `group` / `name`（`scope` 由列表项的 `scope` 给）：
+ * 逐篇可见性不在这里，汇总档位见 `visibilitySummary`。
+ * 2026-11-20 修正：此前声明了 `visibility`，实现层从不产出（幽灵字段）。
+ */
 export interface PreviewDoc {
   group: string;
   name: string;
-  visibility: VisibilityDto;
 }
 
 export interface EventRefSummary {
@@ -53,20 +59,37 @@ export interface EventRefSummary {
   visibility: VisibilityDto;
 }
 
+/**
+ * `GET /governance/events` 列表项（视图合并时同形状，`scope` 是成员库而非视图名）。
+ *
+ * 2026-11-20 按真实响应逐字段校正：删掉 `type`（整个类型对象）、`docCount`、`refCount`
+ * 三个实现层从不产出的幽灵字段；补上 `scope`/`typeId`/`typeName`/`stageKey`/`stageIndex`/
+ * `description`/`revision`/`createdAt`/`memberTotal` 九个一直在返回却未被声明的字段。
+ * 约束通道见 `src/lib/events/event-view.ts`（返回类型即本接口）。
+ */
 export interface EventListItem {
   id: string;
   shortId: number;
+  /** 事件所属库：详情 / refs / analysis 都靠它定位 */
+  scope: string;
   title: string;
-  type: EventTypeSummary;
-  stage: EventStageSummary;
+  description?: string;
+  typeId: string;
+  /** 类型名；类型被删除时为 null */
+  typeName: string | null;
+  stageKey: string;
+  stageIndex: number;
   closedAt: number | null;
   /** 置顶时间；缺省 = 未置顶（2026-11-19）。置顶项在列表里恒排最前 */
   pinnedAt?: number;
-  docCount: number;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+  stage: EventStageSummary;
+  /** 已绑定成员文档总数（`docsPreview` 可能只是前几条） */
+  memberTotal: number;
   docsPreview: PreviewDoc[];
   visibilitySummary: VisibilitySummary;
-  refCount: number;
-  updatedAt: number;
 }
 
 export interface ClassificationRow {
@@ -599,4 +622,140 @@ export interface CreateEventResult {
   visibility: { mode: VisibilityDto; dense: boolean; fts: boolean };
   pending: string[];
   hint?: string;
+}
+
+// ─── 单事件详情（2026-11-20 补齐：此前详情整体形状完全没有契约）─────────────
+//
+// 消费方：MCP `ki_event_get`（服务层 `src/lib/events/event-detail.ts`）。
+// 约束通道：该文件的 `EventDetailView` 就是本接口的 alias，字段一改 tsc 立即报错。
+// 体积纪律：`analysis.draft` 是**精简版**（不含 steps / candidates 正文），
+// 候选只给 `candidateTotal` 计数 —— 详情响应会被 AI 上下文整段吃掉。
+
+/** 文档定位三元组：取正文时必须三者齐全（跨库引用看 `scope`） */
+export interface DocRefDto {
+  scope: string;
+  group: string;
+  name: string;
+}
+
+/** 详情里的 event 块（`shortId` 带 `#` 前缀，与列表项的裸数字不同） */
+export interface EventDetailEventDto {
+  id: string;
+  shortId: string;
+  title: string;
+  description: string | null;
+  closed: boolean;
+  closedAt: number | null;
+  /** 置顶时间；null = 未置顶 */
+  pinnedAt: number | null;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** 详情里的 type 块（含完整阶段链与禁用/当前标记） */
+export interface EventDetailTypeDto {
+  id: string;
+  name: string;
+  terminalAction: 'keep' | 'trash';
+  fallbackDays: number | null;
+  stages: Array<{
+    key: string;
+    name: string;
+    visibility: string;
+    disabled: boolean;
+    current: boolean;
+  }>;
+}
+
+/** 详情里的 stage 块（当前阶段 + 该档位的可见性说明） */
+export interface EventDetailStageDto {
+  key: string;
+  name: string;
+  index: number;
+  visibility: string;
+  /** 人话说明：这一阶段的事件能被怎么检索到 */
+  legend: string;
+}
+
+/** 详情 members 块里的成员文档 */
+export interface MemberItemDto extends DocRefDto {
+  /** 是否由本事件导入（false = 原本就在库里、被引用） */
+  isImported: boolean;
+}
+
+/** 详情 refs 块里的参考文档 */
+export interface RefItemDto extends DocRefDto {
+  addedBy: 'ai' | 'manual';
+  addedAt: number;
+  /** 被引文档已不存在（保留并标失效，不静默消失） */
+  stale: boolean;
+  staleReason?: 'doc-deleted' | 'scope-missing';
+  visibility: string;
+}
+
+/** 详情 analysis.confirmed 里的已确认代码位置 */
+export interface ConfirmedLocationDto {
+  file: string;
+  line: number;
+  endLine?: number;
+  why: string;
+  confidence: number;
+  /** 分析时的 commit；历史位置可能为 null */
+  commit: string | null;
+  confirmedAt: number;
+  /** 代码快照（`location_snippet_limit=0` 时省略） */
+  snippet?: string;
+}
+
+/** 详情 logs 块里的阶段流转日志 */
+export interface EventLogDto {
+  at: number;
+  /** null = 创建事件 */
+  fromKey: string | null;
+  toKey: string;
+  by: 'user' | 'ai';
+  note?: string;
+  status?: 'committed' | 'aborted';
+}
+
+/** 详情 analysis.draft 的精简版（**不含** steps / candidates 正文） */
+export interface AnalysisDraftSummaryDto {
+  status: string;
+  conclusion: string | null;
+  /** 结论因果链；旧数据为空数组，前端回退渲染 `conclusion` 纯文本 */
+  chain: ConclusionNodeDto[];
+  unconfirmed: string[];
+  commit: string | null;
+  startedAt: number;
+  updatedAt: number;
+  errorCode?: string;
+  errorMessage?: string;
+}
+
+/** 详情 analysis 块 */
+export interface EventAnalysisDetailDto {
+  /** 分析目标目录；`confirmed[].file` 是相对它的路径 */
+  targetDir: string | null;
+  draft: AnalysisDraftSummaryDto | null;
+  /** 候选**正文**不返回，只给计数（0 与 null 含义不同：null = 从未分析过） */
+  candidateTotal: number;
+  /** 仅在「候选数 ≠ 已确认数」时出现，说明还有几个候选没确认 */
+  candidateNote?: string;
+  confirmed: { total: number; items: ConfirmedLocationDto[]; note?: string };
+}
+
+/**
+ * 单事件详情响应（`ki_event_get` 返回体）。
+ *
+ * 每块都带 `total`，被截断时给 `note`：让调用方知道"还有多少没显示"。
+ */
+export interface EventDetailResponseDto {
+  event: EventDetailEventDto;
+  type: EventDetailTypeDto | null;
+  stage: EventDetailStageDto;
+  members: { total: number; items: MemberItemDto[]; note?: string };
+  refs: { total: number; items: RefItemDto[]; note?: string };
+  analysis: EventAnalysisDetailDto;
+  logs: { total: number; items: EventLogDto[]; note?: string };
 }

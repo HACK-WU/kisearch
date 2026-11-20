@@ -207,7 +207,16 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     });
   }
 
-  const steps: RefSearchStep[] = grounded.toolTrace.length > 0
+  /*
+   * 过程面板的 tools step。
+   *
+   * 2026-11-20 两处调整：
+   *   ① 条件放宽为「有调用**或有思考**」—— 模型没调工具就直接给结论时，
+   *      思考也要能显示，否则内核采到了却无处安放、面板一片空白；
+   *   ② 挂上 `thinking` / `thinkingChars`：共享内核此前把 reasoning 分片丢了
+   *      （契约与前端一直声明该字段，实现从不产出）。
+   */
+  const steps: RefSearchStep[] = grounded.toolTrace.length > 0 || grounded.thinking
     ? [{
       name: 'tools' as const,
       ms: grounded.durationMs,
@@ -216,6 +225,9 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
         ok: grounded.toolTrace.filter((t) => t.ok).length,
         rounds: grounded.rounds,
       },
+      ...(grounded.thinking
+        ? { thinking: grounded.thinking.text, thinkingChars: grounded.thinking.chars }
+        : {}),
       calls: grounded.toolTrace.map((t) => ({
         kind: 'tool' as const,
         name: t.name,

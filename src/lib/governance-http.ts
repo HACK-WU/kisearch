@@ -47,6 +47,8 @@ import {
   listEvents, createEventWithBinding, updateEvent, transitionEvent, deleteEvent, reopenEvent, setEventPinned,
   type CreateEventOutcome,
 } from './events/event-service.js';
+// 列表响应形状的唯一组装点（返回类型绑契约 DTO，见 event-view.ts 头注释）
+import { toEventListView } from './events/event-view.js';
 import { bindMembers, unbindMember, type BindMembersOutcome } from './events/members.js';
 import { readLastFind, saveLastFind } from './events/refs-store.js';
 import { listRefs, addRefs, removeRef, searchRefCandidates, searchDocsForAdd, REF_LIMIT } from './events/refs-service.js';
@@ -820,19 +822,8 @@ export async function handleGovernanceRoutes(
         const typeScope = typeRaw && typeSep > 0 ? typeRaw.slice(0, typeSep) : null;
         const typeId = typeRaw ? (typeSep > 0 ? typeRaw.slice(typeSep + 1) : typeRaw) : null;
 
-        const toView = (
-          item: ReturnType<typeof listEvents>['items'][number],
-          scopeOf: string,
-        ): Record<string, unknown> => ({
-          ...item.event,
-          // 事件所属库：详情 / refs / analysis 都靠它定位（视图名不是库）
-          scope: scopeOf,
-          typeName: item.type?.name ?? null,
-          stage: item.stage,
-          memberTotal: item.memberTotal,
-          docsPreview: item.members.map((m) => ({ group: m.group, name: m.name })),
-          visibilitySummary: item.visibilitySummary,
-        });
+        // 形状组装已抽到 events/event-view.ts（返回类型绑契约 DTO）
+        const toView = toEventListView;
 
         if (targets.view) {
           const buckets: Array<{ scope: string; total?: number; error?: string }> = [];

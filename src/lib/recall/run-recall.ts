@@ -20,6 +20,14 @@ import type { ChatTurn, LlmStreamPart, ToolDef } from '../chat/llm-client.js';
 import { RecallKernelError } from './codes.js';
 import type { NeedMoreItem, NextAction, RecallHit } from './types.js';
 
+/**
+ * 单次调用内 reasoning 流的保留上限（字符）。
+ *
+ * 与契约 `RefSearchStepDto.thinking` 的「单步截断 2000 字」同口径；
+ * 跨轮累积后截断，`thinkingChars` 记原始长度供前端提示「已截断」。
+ */
+const THINKING_MAX_CHARS = 2000;
+
 /** 一次工具调用的结果 */
 export interface GroundedToolOutcome {
   /** 回给模型的文本（调用方负责按字符预算截断） */
@@ -91,6 +99,14 @@ export interface GroundedResult {
    * 「AI 查找」把它映射成 steps，让用户看到"检索了什么、读了几篇"。
    */
   toolTrace: Array<{ name: string; args: Record<string, unknown>; ms: number; ok: boolean }>;
+  /**
+   * 模型 reasoning 流（跨轮合并，截断到 `THINKING_MAX_CHARS`）。
+   *
+   * 给「过程面板」用：AI 查找把它塞进 tools step 的 `thinking`，让用户看到模型
+   * 在挑文档时想了什么。**`ki_recall` 不透出**（它的返回体是喂给模型吃的，
+   * 思考会白烧上下文），所以这里是可选字段、由调用方决定要不要消费。
+   */
+  thinking?: { text: string; chars: number };
   /** 模型输出是否可解析（false = 面板应显示"模型未给出可解析结果"，而不是"没有相关文档"） */
   parsedOk: boolean;
   rounds: number;
@@ -252,6 +268,14 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
 
   /** 工具调用轨迹（顺序即发生顺序） */
   const toolTrace: Array<{ name: string; args: Record<string, unknown>; ms: number; ok: boolean }> = [];
+  /**
+   * 模型 reasoning 流（跨轮累积）。
+   *
+   * 2026-11-20 补：此前 `reasoning` 分片在这里被直接丢弃 —— 契约写了
+   * `RefSearchStepDto.thinking`、前端也渲染思考块，但实现从不产出，
+   * 表现为「AI 查找的过程面板永远没有思考」。这一行就是那个缺口。
+   */
+  let thinking = '';
   /** 本次真正读到文档 / 检索模式足迹 */
   const sawSearchModes = new Set<'hybrid' | 'fulltext'>();
   const aggregatedMode = (): 'hybrid' | 'fulltext' | undefined => {
@@ -302,6 +326,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
       });
       for await (const part of stream) {
         if (part.type === 'content') text += part.text;
+        else if (part.type === 'reasoning') thinking += part.text;
         else if (part.type === 'tool_calls') calls = part.calls;
       }
     } catch (err) {
@@ -449,6 +474,9 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
       partial: true,
       ...(stopReason ? { stopReason } : {}),
       toolTrace,
+      ...(thinking.trim()
+        ? { thinking: { text: thinking.slice(0, THINKING_MAX_CHARS), chars: thinking.length } }
+        : {}),
       parsedOk: false,
       ...(aggregatedMode() ? { mode: aggregatedMode()! } : {}),
       durationMs: now() - started,
@@ -512,6 +540,9 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
     ...(timedOut || stopReason === 'budget' || snippetOnly > 0 ? { partial: true } : {}),
     ...(stopReason ? { stopReason } : {}),
     toolTrace,
+    ...(thinking.trim()
+      ? { thinking: { text: thinking.slice(0, THINKING_MAX_CHARS), chars: thinking.length } }
+      : {}),
     parsedOk: true,
     ...(aggregatedMode() ? { mode: aggregatedMode()! } : {}),
     durationMs: now() - started,

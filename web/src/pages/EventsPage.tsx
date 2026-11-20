@@ -185,11 +185,15 @@ export function EventsPage(): JSX.Element {
   /** 当前 scope 是视图（事件列表本期不支持聚合，空列表要说明原因，而不是显示「暂无事件」） */
   const [isViewScope, setIsViewScope] = useState(false);
   /**
-   * 视图响应的「部分成功」元信息（null = 单库 / 还没取到）。
+   * 列表响应的「部分成功」元信息（null = 还没取到）。
    *
-   * 三件事都直接影响「用户以为自己看到的是全部」：
+   * **两种模式都记**：`hasMore` / `total` 单库与视图都会下发，只有
+   * `failed`（buckets[].error）/ `skipped` / `truncated` / `members` 是视图专有，
+   * 单库拿到的自然是空值 / false。
+   *
+   * 四件事都直接影响「用户以为自己看到的是全部」：
    *   · failed   —— 某个成员库读失败（后端 buckets[].error，事件 #57）
-   *   · hasMore  —— 后端按全量 total 算出的「还有更多」（事件 #56：此前前端从不读）
+   *   · hasMore  —— 后端按全量 total 算出的「还有更多」（#56 视图 / #58 单库）
    *   · skipped / truncated —— 成员超上限被截掉
    */
   const [viewMeta, setViewMeta] = useState<{
@@ -268,8 +272,12 @@ export function EventsPage(): JSX.Element {
    * 点开正文的文档（关联文档 / 参考文档）。null = 未打开。
    * 复用浏览页的 `ModuleDrawer`（抽屉态，S-07 §3.3「文档抽屉直接复用 ModuleDrawer」），
    * 不新造一个只读弹窗 —— 用户在这里看到的阅读器与浏览页一致（大纲 / 文档内查找 / 全屏）。
+   *
+   * `scope` 必须跟着行一起带（2026-11-20）：参考文档可能是跨库引用，
+   * 只有 `group + name` 时只能退回事件所属库去读 —— 视图下还会叠上「组名被拼成展示文案」
+   * 的老问题（`Group "kisearch-memory · 错误库" 未匹配到有效路径`）。口径与分类页一致。
    */
-  const [docTarget, setDocTarget] = useState<{ group: string; name: string } | null>(null);
+  const [docTarget, setDocTarget] = useState<{ scope: string; group: string; name: string } | null>(null);
 
   /**
    * 切 scope / 换事件时收起正文抽屉：`ModuleDrawer` 一旦载入正文就不再重取
@@ -348,6 +356,20 @@ export function EventsPage(): JSX.Element {
   // 鉴权加载中（permissions 暂空）只禁用、不弹"只读"横幅，避免进页闪一下
   // 只读横幅只针对「账号只读」；视图态另有自己的提示条，两者不能混
   const showReadOnlyHint = !canWrite && !isViewScope && authStatus !== 'loading';
+  /**
+   * 视图下要说的**状态**（2026-11-20 用户拍板：删掉「聚合视图 / 编号 #N / 流转说明」那段
+   * 解释性文案，只保留会影响「你以为看到的是全部」的三种状态；三种都没有时整条不渲染）。
+   *
+   * 顺序按严重度：读取失败（数据缺失）> 还有更多（数据未加载）> 成员超上限。
+   */
+  const viewNotices = viewMeta
+    ? [
+      viewMeta.failed.length > 0 ? govFailedNotice(viewMeta.failed) : '',
+      viewMeta.hasMore ? govLoadedNotice(events.length, viewMeta.total, viewMeta.hasMore) : '',
+      viewMeta.truncated ? `仅合并前 ${viewMeta.members.length} 个成员库。` : '',
+      viewMeta.skipped.length > 0 ? `未参与：${viewMeta.skipped.map((s) => s.scope).join('、')}。` : '',
+    ].filter((s) => s !== '').join(' ')
+    : '';
 
   /**
    * 列表视图要真正「到底」：给主内容区挂 `--noscroll`（浏览页 / 资源页同款范式），
@@ -412,17 +434,19 @@ export function EventsPage(): JSX.Element {
       // 视图判定优先看列表响应（本页自己的请求），counts 仅作兜底
       const viewNow = Boolean(list.view ?? govCounts?.view);
       setIsViewScope(viewNow);
-      setViewMeta(viewNow
-        ? {
-          failed: govFailedMembers(list),
-          skipped: list.skipped ?? [],
-          truncated: list.truncated === true,
-          // `hasMore` 后端按全量 total 算（视图下也是），前端此前完全忽略（#56）
-          hasMore: list.hasMore === true,
-          total: list.total,
-          members: list.members ?? [],
-        }
-        : null);
+      /*
+       * **两种模式都记**（#58）：`hasMore` / `total` 单库分支同样下发（后端单库 return
+       * 里显式带 `hasMore: result.hasMore`），此前只在视图下保存，单库截断就没人管。
+       * buckets / skipped / members 是视图专有字段，单库拿到的自然是空值。
+       */
+      setViewMeta({
+        failed: govFailedMembers(list),
+        skipped: list.skipped ?? [],
+        truncated: list.truncated === true,
+        hasMore: list.hasMore === true,
+        total: list.total,
+        members: list.members ?? [],
+      });
       // 视图下深链只认 evt_ id（shortId 跨库撞号）
       setActiveId((prev) => prev ?? matchDeepLink(list.events, viewNow) ?? list.events[0]?.id ?? null);
     } catch (err) {
@@ -882,15 +906,24 @@ export function EventsPage(): JSX.Element {
           「AI 查找」可照常用，只有「加入参考文档」需要写权限。
         </p>
       ) : null}
-      {isViewScope ? (
-        <p className="gov-hint" title={govFailedTitle(viewMeta?.failed ?? [])}>
-          聚合视图：事件按成员库合并展示（编号 #N 为各库独立计数，详情按事件 id 定位）。
-          流转 / 编辑 / 删除 / AI 分析会落到事件所属库；新建事件与类型维护请先切到具体知识库。
-          {/* 三条「你看到的可能不是全部」必须说出来，按严重度排序：#57 读失败 → #56 截断 → 成员超上限 */}
-          {viewMeta && viewMeta.failed.length > 0 ? ` ${govFailedNotice(viewMeta.failed)}` : ''}
-          {viewMeta?.hasMore ? ` ${govLoadedNotice(events.length, viewMeta.total, viewMeta.hasMore)}` : ''}
-          {viewMeta?.truncated ? ` 仅合并前 ${viewMeta.members.length} 个成员库。` : ''}
-          {viewMeta && viewMeta.skipped.length > 0 ? ` 未参与：${viewMeta.skipped.map((s) => s.scope).join('、')}。` : ''}
+      {/*
+       * 视图提示条：只留「状态」，没有状态时整条不渲染（文案拼装在 viewNotices 里）。
+       *
+       * 2026-11-20 用户拍板删掉「聚合视图 / 编号 #N 独立计数 / 流转落库」那段解释性文案。
+       * 代价要说清：编号跨库重复、写入口落到事件所属库这两条语义，页面上不再有书面说明
+       * （每行仍显示所属库、视图写入口仍按 `eventScope` 发请求）。删的是说明，不是能力。
+       */}
+      {isViewScope && viewNotices !== '' ? (
+        <p className="gov-hint" title={govFailedTitle(viewMeta?.failed ?? [])}>{viewNotices}</p>
+      ) : null}
+      {/*
+       * 单库截断提示（#58）：上面那条挂在 `isViewScope` 下，单库同样写死 limit 100 却没有出口。
+       * 位置 / 样式 / 文案与视图那条完全同源（同为 `.gov-hint` + `govLoadedNotice`），
+       * 只是不掺「未参与 / 成员超上限」这些视图专有说法。不截断时不渲染（0 像素差）。
+       */}
+      {!isViewScope && viewMeta?.hasMore ? (
+        <p className="gov-hint">
+          {govLoadedNotice(events.length, viewMeta.total, viewMeta.hasMore)}
         </p>
       ) : null}
 
@@ -1243,7 +1276,7 @@ export function EventsPage(): JSX.Element {
                   emptyText="暂无关联文档，点右上「＋ 添加」把要跟踪的文档挂上来"
                   confirmKey={pendingRemove}
                   onConfirmChange={setPendingRemove}
-                  onOpen={(group, name) => setDocTarget({ group, name })}
+                  onOpen={(group, name) => setDocTarget({ scope: eventScope, group, name })}
                   onRemove={(row) => void run(async () => {
                     const r = await removeMember(eventScope, active.id, row.group, row.name);
                     setMemberVisWarn(null);
@@ -1268,11 +1301,15 @@ export function EventsPage(): JSX.Element {
                   docs={refs.map((ref) => ({
                     key: (ref.sourceScope ?? "") + "/" + ref.group + "/" + ref.name,
                     name: ref.name,
-                    group: [
+                    /* 业务键：原样传，点开正文靠它定位（曾经这里塞的是下面那段展示文案） */
+                    group: ref.group,
+                    /* 展示串：「来源库 · 组名[ · 失效原因]」；视图下顶栏 scope 是视图名，故一律标注来源库 */
+                    meta: [
                       ref.sourceScope && ref.sourceScope !== scope ? ref.sourceScope + " · " : "",
                       ref.group,
                       ref.stale ? (ref.staleReason === "scope-missing" ? " · 源库已不存在" : " · 文档已不存在") : "",
                     ].join(""),
+                    ...(ref.sourceScope ? { sourceScope: ref.sourceScope } : {}),
                     vis: { tone: (VIS_CLASS[ref.visibility] ?? "hidden") as VisTone, text: VIS_TEXT[ref.visibility] },
                   }))}
                   canWrite={canWrite}
@@ -1332,7 +1369,7 @@ export function EventsPage(): JSX.Element {
                   emptyText="暂无参考文档：可用「AI 查找」、「＋ 添加」或「上传文件」"
                   confirmKey={refConfirmKey}
                   onConfirmChange={setRefConfirmKey}
-                  onOpen={(group, name) => setDocTarget({ group, name })}
+                  onOpen={(group, name, sourceScope) => setDocTarget({ scope: sourceScope ?? eventScope, group, name })}
                   onRemove={(row) => {
                     const ref = refs.find((r) => (r.sourceScope ?? "") + "/" + r.group + "/" + r.name === row.key);
                     if (!ref) return;
@@ -1419,9 +1456,10 @@ export function EventsPage(): JSX.Element {
       */}
       {docTarget ? (
         <ModuleDrawer
-          key={`${docTarget.group}/${docTarget.name}`}
-          /* 关联文档来自事件所属库：传顶栏 scope（视图名）会读不到正文 */
-          scope={eventScope}
+          /* key 含所属库：同名同组的两篇文档存在于不同库时，换篇也必须重挂载 */
+          key={`${docTarget.scope}/${docTarget.group}/${docTarget.name}`}
+          /* 必须用条目所属库（关联文档=事件库 / 参考文档=来源库）：传顶栏 scope（视图名）会读不到正文 */
+          scope={docTarget.scope}
           module={docTarget.name}
           group={docTarget.group}
           fetcher={getDocContent}

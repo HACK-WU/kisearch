@@ -73,6 +73,8 @@ export interface RefSearchStep {
    * 旧数据无该字段；只在模型真的产出 reasoning 时写入。
    */
   thinking?: string;
+  /** `thinking` 截断前的原始字符数（2026-11-20 补齐，与 `AnalysisStepDto` 同口径） */
+  thinkingChars?: number;
   calls?: RefSearchCall[];
 }
 
