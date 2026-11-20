@@ -57,8 +57,14 @@ export interface GroupTreePanelProps {
   activeDocName?: string;
   /** Reader remounts when its document changes; keep horizontal context for same-group navigation. */
   scrollPositionRef?: MutableRefObject<DirectoryScrollPosition | null>;
-  /** 点击文档叶子 */
-  onOpenDoc: (doc: { group: string; name: string; path?: string }) => void;
+  /**
+   * 点击文档叶子。
+   *
+   * 视图模式（多库）下必须一并交出 `scope`（成员库）与 `rawGroup`（真实 group）：
+   * 树里的 `group` 带「库名/」前缀只供展示，拿去读正文会报「未匹配到有效路径」。
+   * 单库模式下这两个字段为 `undefined`，消费方回退到自身 scope / group 即可。
+   */
+  onOpenDoc: (doc: { group: string; name: string; path?: string; scope?: string; rawGroup?: string }) => void;
 }
 
 export function GroupTreePanel({
@@ -74,7 +80,16 @@ export function GroupTreePanel({
    * 不归一的话全屏阅读器的导航树是**空的**（不报错，只是没内容）。
    * 单库模式原样返回。
    */
-  const data = normalizeDocData(rawDocList);
+  /**
+   * ⚠️ 必须 `useMemo`（2026-11-20 修复「目录点不开」）。
+   *
+   * 视图 scope（多库）下 `normalizeDocData` 每次调用都新建对象；若在渲染期裸调，
+   * `data.groups` 每次渲染都是**新引用** ⇒ 下方同步 effect 的 `groupsChanged` 恒为 true
+   * ⇒ 每次重渲染都把树重置成 `withDefaultOpen`（根开、子目录关）⇒ **用户点目录一律无效**
+   * （点开即被弹回，表现为「目录点不开」）。单库模式因归一直接返回原引用而不受影响，
+   * 所以问题只在视图 scope 下暴露。
+   */
+  const data = useMemo(() => normalizeDocData(rawDocList), [rawDocList]);
   const activeGroupDocs = useGroupDocs(scope, activeGroup || null);
   const docs = data?.docs ?? [];
   /** 展开态保存在本地树：首次由 groups 构建，之后文档刷新不重置用户的展开选择 */
@@ -203,7 +218,7 @@ export function GroupTreePanel({
                 className={`ki-tree-doc${activeGroup === doc.group && activeDocName === doc.name ? ' ki-tree-doc--active' : ''}`}
                 data-ki-group={doc.group}
                 data-ki-document={doc.name}
-                onClick={() => onOpenDoc({ group: doc.group, name: doc.name, path: doc.path })}
+                onClick={() => onOpenDoc({ group: doc.group, name: doc.name, path: doc.path, scope: doc.scope, rawGroup: doc.rawGroup })}
                 title={doc.path ?? [groupPathSegment(doc.group), doc.name].filter(Boolean).join(' / ')}
               >
                 <Icon name="file" className="ki-icon ki-icon--sm" />
@@ -258,7 +273,7 @@ export function GroupTreePanel({
             className={`ki-tree-doc${activeGroup === doc.group && activeDocName === doc.name ? ' ki-tree-doc--active' : ''}`}
             data-ki-group={doc.group}
             data-ki-document={doc.name}
-            onClick={() => onOpenDoc({ group: doc.group, name: doc.name, path: doc.path })}
+            onClick={() => onOpenDoc({ group: doc.group, name: doc.name, path: doc.path, scope: doc.scope, rawGroup: doc.rawGroup })}
             title={doc.path ?? doc.name}
           >
             <Icon name="file" className="ki-icon ki-icon--sm" />

@@ -1241,8 +1241,22 @@ export function parseRefs(body: { refs?: unknown }): ChatRef[] | undefined {
     if (content.length > CHAT_REF_TEXT_MAX) {
       throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `单条引用不得超过 ${CHAT_REF_TEXT_MAX} 字（「${d}」）`);
     }
+    // 引用类型（2026-11-20）：缺省 = 划选片段；只认 'doc'（整篇），其它值视为畸形请求。
+    // `totalChars` 仅用于注入块的「原文 M 字 / 此处 N 字」标注，非法值直接丢弃（不影响正文）。
+    if (r.kind !== undefined && r.kind !== 'doc') {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, 'refs 每项的 kind 只能是 "doc" 或缺省');
+    }
+    const totalChars = typeof r.totalChars === 'number' && Number.isFinite(r.totalChars) && r.totalChars > 0
+      ? Math.floor(r.totalChars)
+      : undefined;
     total += content.length;
-    refs.push({ group: g, doc: d, text: content });
+    refs.push({
+      group: g,
+      doc: d,
+      text: content,
+      ...(r.kind === 'doc' ? { kind: 'doc' as const } : {}),
+      ...(totalChars !== undefined ? { totalChars } : {}),
+    });
   }
   if (total > CHAT_REF_TOTAL_MAX) {
     throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, `全部引用合计不得超过 ${CHAT_REF_TOTAL_MAX} 字`);

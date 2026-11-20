@@ -6,10 +6,12 @@ import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { GroupTreePanel } from '@/components/GroupTreePanel';
 import { Icon } from '@/components/icons';
 import { useDocSearch } from '@/lib/hooks';
+import { normalizeDocData } from '@/lib/viewBuckets';
 // 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略；请求/键值仍用原键
 import { groupPathSegment } from '@/lib/groupTree';
 import { hasSearchTerm } from '@/lib/browseSearchGroups';
 import { CHAT_REF_MAX_COUNT, CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX, type ChatRef } from '@/api/chatContract';
+import { refDocBudget } from '@/chat/refSelection';
 import { anchorBlock, findAnchorBlocks, type KiLinkTarget } from '@/lib/kiLinks';
 import { externalTarget, insertReaderLink } from '@/lib/readerLinks';
 
@@ -141,7 +143,10 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
     return () => window.clearTimeout(timer);
   }, [query]);
   const searching = hasSearchTerm(query);
-  const { data: searchData, isFetching: searchFetching, error: searchError } = useDocSearch(scope, searchQ);
+  const { data: rawSearchData, isFetching: searchFetching, error: searchError } = useDocSearch(scope, searchQ);
+  // 视图模式（多库）下接口返回 buckets：不归一会得到空 docs（表现为「命中 0 篇」）；
+  // 归一还顺带给每条命中补上成员库 `scope` 与真实 `rawGroup` —— 读正文要靠这两个字段。
+  const searchData = useMemo(() => normalizeDocData(rawSearchData), [rawSearchData]);
   const matches = useMemo(() => (searching ? (searchData?.docs ?? []) : []), [searching, searchData]);
   const matchTotal = searching ? (searchData?.total ?? matches.length) : 0;
   /** 服务端最多 2000 条；宽泛词（如「的」）全量渲染会撑出上千行，只展示前 N 条并提示细化 */
@@ -165,14 +170,21 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
     let active = true;
     setTargetContent(null);
     setTargetLoading(true);
-    void kiGetModuleInfo(scope, selectedDoc.group, selectedDoc.name).then((result) => {
+    /**
+     * 视图模式（多库）下 `selectedDoc.group` 带「库名/」前缀，只供展示与树路径；
+     * 读正文必须回到**成员库 + 真实 group**，否则后端报「未匹配到有效路径」，
+     * 右侧就永远停在「无法显示目标文档正文」（真机复现：视图 scope 下所有文档都读不出）。
+     */
+    const readScope = selectedDoc.scope ?? scope;
+    const readGroup = selectedDoc.rawGroup ?? selectedDoc.group;
+    void kiGetModuleInfo(readScope, readGroup, selectedDoc.name).then((result) => {
       if (!active) return;
       if (!result.content) throw new Error(result.error || result.hint || '无法读取目标文档正文');
       setTargetContent(result.content);
     }).catch((error: Error) => { if (active) setMessage(`读取目标文档失败：${error.message}`); })
       .finally(() => { if (active) setTargetLoading(false); });
     return () => { active = false; };
-  }, [pickerOpen, scope, group, relation, selectedDoc.group, selectedDoc.name, currentContent]);
+  }, [pickerOpen, scope, group, relation, selectedDoc.group, selectedDoc.name, selectedDoc.scope, selectedDoc.rawGroup, currentContent]);
 
   useEffect(() => {
     if (!pickerOpen || !targetContent) return;
@@ -268,6 +280,38 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
   const commitRef = (): void => {
     if (refDisabled || !onAddRef) return;
     onAddRef({ group: selectedDoc.group, doc: selectedDoc.name, text: refText });
+    onClose();
+  };
+
+  /**
+   * 「引用整篇」（2026-11-20）：不用划选，直接把当前文档作为一条引用加入。
+   *
+   * · 正文**已在内存**（`targetContent` 由加载链读入），不需要额外请求；
+   * · 可用预算 = min(单条上限, 合计剩余) —— 后端两道闸门（2000 / 6000）前端先算好再截，
+   *   否则用户点下去会拿到一个 400；
+   * · 截断事实在成功提示与悬停预览里如实说明，不假装「整篇 = 全文」。
+   */
+  const docBudget = refDocBudget(currentRefs);
+  const docSource = targetContent ?? '';
+  const docText = docSource.slice(0, docBudget);
+  const docDuplicated = currentRefs.some((r) => r.kind === 'doc' && r.group === selectedDoc.group && r.doc === selectedDoc.name);
+  const docDisabled = !onAddRef || targetLoading || docSource.length === 0 || docText.length === 0 || refFull || docDuplicated;
+  const docActionLabel = docDuplicated
+    ? '整篇已在引用中'
+    : refFull
+      ? `已达上限 ${CHAT_REF_MAX_COUNT} 段`
+      : docBudget <= 0
+        ? `引用合计将超过 ${CHAT_REF_TOTAL_MAX} 字`
+        : '引用整篇';
+  const commitDoc = (): void => {
+    if (docDisabled || !onAddRef) return;
+    onAddRef({
+      group: selectedDoc.group,
+      doc: selectedDoc.name,
+      text: docText,
+      kind: 'doc',
+      totalChars: docSource.length,
+    });
     onClose();
   };
 
@@ -369,9 +413,10 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
              两个选择器打开时视觉一致；搜索框移到左栏顶部（见 aside）。 */
           <header className="ki-reader-link-dialog__head">
             <div>
-              <small>加入引用 · 已引用 {currentRefs.length} / {CHAT_REF_MAX_COUNT} 段</small>
+              {/* 预算显性化：加入前就要能判断「还能不能再加」，否则用户会在发送时撞后端上限 */}
+              <small>加入引用 · 已引用 {currentRefs.length} / {CHAT_REF_MAX_COUNT} 段 · 合计 {refUsedChars} / {CHAT_REF_TOTAL_MAX} 字</small>
               <h2>选择要加入提问的文档内容</h2>
-              <p>左侧选文档（可搜索），右侧在正文里划选要引用的文字；加入后可在输入框标签上移除。</p>
+              <p>左侧选文档（可搜索），右侧划选文字加入片段，或不划选直接「引用整篇」；加入后可在输入框标签上移除。</p>
             </div>
             <button type="button" onClick={onClose} aria-label="关闭选择器">×</button>
           </header>
@@ -412,7 +457,7 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
                         <button
                           type="button"
                           className={`ki-chat-refpicker__result${d.group === selectedDoc.group && d.name === selectedDoc.name ? ' ki-chat-refpicker__result--active' : ''}`}
-                          onClick={() => { setSelectedDoc({ group: d.group, name: d.name }); setRefText(''); setMessage(''); }}
+                          onClick={() => { setSelectedDoc({ group: d.group, name: d.name, scope: d.scope, rawGroup: d.rawGroup }); setRefText(''); setMessage(''); }}
                         >
                           <span className="ki-chat-refpicker__result-name">{d.name}</span>
                           {groupPathSegment(d.group) ? (
@@ -430,7 +475,7 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
                 activeGroup={isRef ? selectedDoc.group : group}
                 activeDocName={isRef ? selectedDoc.name : relation}
                 onOpenDoc={(doc) => {
-                  setSelectedDoc({ group: doc.group, name: doc.name, path: doc.path });
+                  setSelectedDoc({ group: doc.group, name: doc.name, path: doc.path, scope: doc.scope, rawGroup: doc.rawGroup });
                   if (isRef) setRefText(''); else setPosition(null);
                   setMessage('');
                 }}
@@ -467,8 +512,17 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
             <footer className="ki-reader-link-dialog__selection">
               {isRef ? (
                 <>
-                  <div><strong>{refText ? `已选中 ${refText.length} 字` : '尚未选中内容'}</strong><small title={refText}>{refText ? `“${refText.slice(0, 60)}${refText.length > 60 ? '…' : ''}”` : '在右侧正文里划选一段文字'}</small></div>
-                  <button type="button" className="ki-btn ki-btn--primary" onClick={commitRef} disabled={refDisabled}>{refActionLabel}</button>
+                  <div><strong>{refText ? `已选中 ${refText.length} 字` : '尚未选中内容'}</strong><small title={refText}>{refText ? `“${refText.slice(0, 60)}${refText.length > 60 ? '…' : ''}”` : '在右侧正文里划选一段文字，或直接引用整篇'}</small></div>
+                  <span className="ki-reader-link-dialog__acts">
+                    <button
+                      type="button"
+                      className="ki-btn ki-btn--secondary"
+                      onClick={commitDoc}
+                      disabled={docDisabled}
+                      title={docSource.length ? `当前文档 ${docSource.length} 字，将提供前 ${docText.length} 字` : '先在左侧选择一篇文档'}
+                    >{docActionLabel}</button>
+                    <button type="button" className="ki-btn ki-btn--primary" onClick={commitRef} disabled={refDisabled}>{refActionLabel}</button>
+                  </span>
                 </>
               ) : (
                 <>

@@ -45,8 +45,15 @@ export interface ChatRef {
   group: string;
   /** 文档名（= relation） */
   doc: string;
-  /** 用户选中的片段原文（按 CHAT_REF_TEXT_MAX 截断后上送） */
+  /** 引用的正文：片段 = 划选原文；整篇 = 按预算截断后的正文（按 CHAT_REF_TEXT_MAX 截断后上送） */
   text: string;
+  /**
+   * 引用类型（2026-11-20 新增，**可选**）：缺省 = 划选的片段；`'doc'` = 整篇文档。
+   * 与后端 `chat-contract.ts` 手工同源，改一处必须同步另一处。
+   */
+  kind?: 'doc';
+  /** 整篇文档的原文总字数（仅 `kind='doc'` 有意义）：用于提示「原文 M 字，已截断至 N 字」 */
+  totalChars?: number;
 }
 
 /** 单次提问的引用条数上限（UI 据此禁用「加入」） */

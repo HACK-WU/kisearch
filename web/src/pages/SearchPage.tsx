@@ -949,7 +949,8 @@ export function SearchPage(): JSX.Element {
              传下去会让 doc/get 读到空目录、useScopeReadonly 也查不到只读态 */
           scope={viewing.scope ?? scope}
           module={viewing.module}
-          group={viewing.group}
+          /* apiGroup = 后端真实 group（视图下 viewing.group 带库名前缀，直接查会「未匹配到有效路径」） */
+          group={viewing.apiGroup ?? viewing.group}
           initialContent={viewing.content}
           fallbackContent={viewing.fallbackContent}
           highlightQuery={viewing.highlightQuery}
@@ -969,7 +970,10 @@ export function SearchPage(): JSX.Element {
               activeGroup={viewing.group}
               activeDocName={viewing.module}
               scrollPositionRef={directoryScrollRef}
-              onOpenDoc={({ group, name, path }) => openDocument({ module: name, group, path }, true)}
+              /* 视图模式（多库）：树里的 `group` 带「库名/」前缀只供展示，
+                 读正文要回到成员库 + 真实 group（与 BrowsePage 同款口径，否则正文读不出来） */
+              onOpenDoc={({ group, name, path, scope: docScope, rawGroup }) =>
+                openDocument({ module: name, group, path, scope: docScope, apiGroup: rawGroup }, true)}
             />
           }
           fullscreen={readerFullscreen}

@@ -11,6 +11,7 @@
  * 运行：cd web && npm run test
  */
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { after, beforeEach, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -133,5 +134,44 @@ describe('treeStateFromTree', () => {
     const many = Array.from({ length: MAX_OPEN_PATHS + 20 }, (_, i) => ({ name: `g${i}`, count: 1 }));
     const state = treeStateFromTree(withDefaultOpen(buildGroupTree(many)), false, 'g0');
     assert.equal(state.openPaths.length, MAX_OPEN_PATHS);
+  });
+});
+
+/**
+ * 「目录点不开」回归锚点（2026-11-20 修）。
+ *
+ * 真实缺陷：`GroupTreePanel` 在渲染期裸调 `normalizeDocData(rawDocList)`，视图 scope 下
+ * 该函数每次返回**新对象** ⇒ `data.groups` 引用每次渲染都变 ⇒ 同步 effect 的
+ * `groupsChanged` 恒为 true ⇒ 每次重渲染都把树重置成 `withDefaultOpen`（根开、子目录关）
+ * ⇒ 用户点目录一律被弹回（真机复现：点子目录 aria-expanded 始终 false、点根始终 true）。
+ *
+ * 单库模式因归一直接返回原引用而不受影响，所以只有视图 scope 暴露。
+ * 修法是 `useMemo(..., [rawDocList])`；这条断言防止有人把它"简化"回裸调用。
+ */
+describe('GroupTreePanel 视图适配（归一 memo + 成员库身份）', () => {
+  const panelSrc = fs.readFileSync(path.join(webRoot, 'src/components/GroupTreePanel.tsx'), 'utf8');
+
+  it('normalizeDocData 包在 useMemo 里，且依赖是 rawDocList', () => {
+    assert.match(
+      panelSrc,
+      /useMemo\(\(\) => normalizeDocData\(rawDocList\), \[rawDocList\]\)/,
+      '归一结果必须 memo 到 rawDocList：裸调用会让 data.groups 每帧换引用，把用户展开的目录弹回默认态',
+    );
+    assert.doesNotMatch(panelSrc, /^  const data = normalizeDocData\(rawDocList\);$/m, '不得回退为渲染期裸调用');
+  });
+
+  /**
+   * 视图模式（多库）下树里的 `group` 带「库名/」前缀，仅供展示与树路径；
+   * 拿去 `ki_get_module_info` 会报「未匹配到有效路径」⇒ 右侧永远「无法显示目标文档正文」。
+   * 所以 `onOpenDoc` 必须把成员库 `scope` 与真实 `rawGroup` 一并交出去。
+   */
+  it('onOpenDoc 必须交出成员库 scope 与真实 rawGroup', () => {
+    assert.match(
+      panelSrc,
+      /onOpenDoc: \(doc: \{ group: string; name: string; path\?: string; scope\?: string; rawGroup\?: string \}\) => void;/,
+      '回调类型必须声明 scope / rawGroup',
+    );
+    const calls = [...panelSrc.matchAll(/onOpenDoc\(\{ group: doc\.group, name: doc\.name, path: doc\.path, scope: doc\.scope, rawGroup: doc\.rawGroup \}\)/g)];
+    assert.equal(calls.length, 2, `两处文档叶子（组内 / 根散）都必须带身份，实际 ${calls.length} 处`);
   });
 });

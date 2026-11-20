@@ -9415,3 +9415,16 @@ select.ki-chat-cfg__ta--select {
   .ki-cond-panel__hint { display: none; }
   .cond-chip__value { max-width: 150px; }
 }
+
+/* ── 引用整篇（2026-11-20）──────────────────────────────────────
+   ① 选择器底部两个动作并排（次级「引用整篇」+ 主「加入对话」），
+      原规则 `.ki-reader-link-dialog__selection button { flex: none }` 仍生效于子按钮；
+   ② 「整篇」类型徽标：草稿 chip 与已发送回显共用一套视觉，不抢文档名。 */
+.ki-reader-link-dialog__acts { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.ki-chat-refbar__kind,
+.ki-chat-refs__kind {
+  flex-shrink: 0; padding: 0 4px;
+  border: 1px solid color-mix(in srgb, var(--ki-color-primary) 45%, transparent);
+  border-radius: var(--ki-radius-tag);
+  color: var(--ki-color-primary); font-size: 10px; line-height: 14px;
+}

@@ -256,3 +256,46 @@ describe('parseRefs 请求体校验', () => {
     assert.deepEqual(out, [{ group: 'g', doc: 'd', text: '内容' }]);
   });
 });
+
+// ─── 整篇引用（kind='doc'，2026-11-20）───
+
+describe('整篇引用 kind=doc', () => {
+  const docItem = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    group: 'g', doc: '整篇文档', text: '正文开头', kind: 'doc', ...over,
+  });
+
+  it('parseRefs 透传 kind 与 totalChars（落盘后回看仍能认出整篇）', () => {
+    const out = parseRefs({ refs: [docItem({ totalChars: 5200 })] });
+    assert.deepEqual(out, [{ group: 'g', doc: '整篇文档', text: '正文开头', kind: 'doc', totalChars: 5200 }]);
+  });
+
+  it('kind 只认 "doc"：其它值 → 400（不静默降级成片段）', () => {
+    assert.throws(() => parseRefs({ refs: [docItem({ kind: 'partial' })] }), /kind 只能是/);
+  });
+
+  it('非法 totalChars 丢弃且不影响正文（元数据不阻塞引用本身）', () => {
+    const out = parseRefs({ refs: [docItem({ totalChars: -3 })] });
+    assert.deepEqual(out, [{ group: 'g', doc: '整篇文档', text: '正文开头', kind: 'doc' }]);
+  });
+
+  it('★ 注入块标注整篇与截断事实（模型据此可自行检索补齐）', async () => {
+    const cap = await runTurn(convOf([u('m1', 'Q1')]), 'Q1', [
+      { group: 'k8s', doc: '01-概述', text: '前两千字', kind: 'doc', totalChars: 5200 },
+    ]);
+    const block = refsBlockOf(cap)!;
+    assert.ok(
+      block.includes('整篇文档：原文约 5200 字，此处仅提供前 4 字'),
+      `围栏应交代原文规模与实际提供量，实际：${block.split('\n').find((l) => l.startsWith('--- 引用')) ?? '（未找到围栏）'}`,
+    );
+    assert.ok(block.includes('调用检索工具查阅'), '截断时必须给出补齐路径，否则模型会把开头当成全文');
+  });
+
+  it('未截断的整篇只标注类型，不编造原文规模', async () => {
+    const cap = await runTurn(convOf([u('m1', 'Q1')]), 'Q1', [
+      { group: 'k8s', doc: '01-概述', text: '全文', kind: 'doc' },
+    ]);
+    const block = refsBlockOf(cap)!;
+    assert.ok(block.includes('01-概述（整篇文档）'));
+    assert.ok(!block.includes('原文约'));
+  });
+});

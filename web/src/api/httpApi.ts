@@ -70,6 +70,18 @@ export interface DocItem {
   /** 导入源相对路径（relation.sourcePath）；MCP / CLI 写入的文档没有该字段 */
   path?: string;
   /**
+   * 视图模式（多库 / `data.scope === 视图名`）下由 `normalizeDocData` 注入的**成员库名**。
+   * 视图名不是物理库：读正文、写入都必须回到成员库，否则后端找不到文档。
+   */
+  scope?: string;
+  /**
+   * 视图模式下的**后端真实 group**（不含 `库名/` 前缀）。
+   *
+   * `group` 带库前缀是为了让树路径 / 同名文档可区分（展示与去重用）；
+   * **读正文必须用 `rawGroup`** —— 把前缀传给 `ki_get_module_info` 会报「未匹配到有效路径」。
+   */
+  rawGroup?: string;
+  /**
    * 检索命中来源（**仅 `q` 检索时下发**）：`name` 名称命中 / `path` 路径命中。
    * 旧版 daemon 不返回 → 组件按"名称命中"降级，不丢结果。
    */

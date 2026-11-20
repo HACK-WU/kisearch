@@ -257,7 +257,17 @@ function renderRefsBlock(refs: readonly ChatRef[] | undefined): string | null {
      *    `groupDisplayName()` 给的「根」—— 单个字在路径位置读起来像缺字）。
      */
     const group = isRootGroup(r.group) ? '根目录' : r.group;
-    lines.push('', `--- 引用 ${i + 1}：group 路径：${group} / ${r.doc} ---`, r.text);
+    /**
+     * 整篇引用（2026-11-20）：用户点「引用整篇」时正文按预算截断后才上送，模型若不知道
+     * 这是截断文本，会把"只看到开头"当成"这就是全文"。故在围栏里显式标注原文规模与截断事实，
+     * 并保留自行检索补齐的许可（与块首「可继续调用检索工具」一致）。
+     */
+    const kindTag = r.kind === 'doc'
+      ? (r.totalChars !== undefined && r.totalChars > r.text.length
+        ? `（整篇文档：原文约 ${r.totalChars} 字，此处仅提供前 ${r.text.length} 字，其余内容如需请调用检索工具查阅）`
+        : '（整篇文档）')
+      : '';
+    lines.push('', `--- 引用 ${i + 1}：group 路径：${group} / ${r.doc}${kindTag} ---`, r.text);
   });
   return lines.join('\n');
 }

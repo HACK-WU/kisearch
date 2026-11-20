@@ -55,7 +55,7 @@ import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMes
 import { ComposerMirror } from './ComposerMirror';
 import { SkillSlashMenu } from './SkillSlashMenu';
 import { applySkillToken, filterSkills, hasSlashToken, parseSkillTokenIds, slashTriggerAt, splitSkillSegments } from './skillSlash';
-import { buildRefCandidate, checkRefAdd, drawerOfSelection, type RefAddResult } from './refSelection';
+import { buildRefCandidate, checkRefAdd, drawerOfSelection, refDocBudget, type RefAddResult } from './refSelection';
 // 根散文件的 group 是保留键（`__root__`）：路径段位置整段省略，不留空槽
 import { groupPathSegment } from '../lib/rootGroup';
 import {
@@ -212,6 +212,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const [cfgOpen, setCfgOpen] = useState(false);
   /** 引用选择器开合（纯瞬时 UI 态，REQ-20261009-002 需求 B） */
   const [refPickerOpen, setRefPickerOpen] = useState(false);
+  /** 「+ 整篇」读取正文中（纯瞬时 UI 态；读取失败要能在原地看到原因，不静默） */
+  const [docRefBusy, setDocRefBusy] = useState(false);
   /**
    * `/` 斜杠点名 skill（2026-11-12）—— 全部是**纯瞬时 UI 态**（不累积、不跨挂载）。
    *
@@ -1418,7 +1420,15 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const handleAddRef = (ref: ChatRef): void => {
     // 守卫复用同一实现（chat/refSelection.ts）：三条入口（划选 / Ctrl+L / 选择器）口径一致
     const cur = store.getState().pendingRefs;
-    const result = checkRefAdd(cur, { group: ref.group, doc: ref.doc, text: ref.text });
+    // 整篇引用（kind='doc'）必须把类型透传给守卫：去重按文档身份、文案按「原文 N 字」——
+    // 丢掉这两个字段会被当成普通片段处理（重复加同一篇会绕过去重）。
+    const result = checkRefAdd(cur, {
+      group: ref.group,
+      doc: ref.doc,
+      text: ref.text,
+      ...(ref.kind === 'doc' ? { kind: 'doc' as const } : {}),
+      ...(ref.totalChars !== undefined ? { totalChars: ref.totalChars } : {}),
+    });
     if (!result.ok) {
       // 保持选择器路径的**既有行为**：条数达上限与重复时静默（按钮已禁用 / 已去重），
       // 只有"合计超限"给提示 —— 改成两类都提示会让同一次操作出现两种反馈口径。
@@ -1428,6 +1438,54 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     store.dispatch({ type: 'setRefs', refs: [...cur, result.ref] });
     // 成功反馈与「正文划选」路径保持一致（否则两条入口一个提示一个静默）
     setRefToast(result.message);
+  };
+
+  /**
+   * 「+ 整篇」（2026-11-20）：把**当前打开的文档**整篇加入引用。
+   *
+   * 为什么需要这个入口：`+ 加入引用` 在有文档打开时只进入「划选模式」，根本到不了选择器，
+   * 而「引用整篇」按钮在选择器底部 —— 不加本入口，最常见的场景（正在读文档时想引用整篇）
+   * 会变成不可达。
+   *
+   * 口径与选择器里的「引用整篇」完全一致（同走 `handleAddRef` → `checkRefAdd`）：
+   * 正文超预算由守卫截断，提示里如实说明「原文 M 字 / 截断至 N 字」。
+   * 没有打开的文档时退回选择器（那里可以选文档，也有整篇按钮）。
+   */
+  const addWholeDoc = (): void => {
+    if (docRefBusy || !(config?.enabled ?? false)) return;
+    const cur = store.getState().pendingRefs;
+    const drawer = document.querySelector<HTMLElement>('.ki-drawer[data-ki-doc-name]');
+    const doc = drawer?.getAttribute('data-ki-doc-name') ?? '';
+    if (!doc) {
+      setRefPickerOpen(true);
+      return;
+    }
+    const group = drawer?.getAttribute('data-ki-doc-group') ?? '';
+    // 上限 / 重复先在本地拦掉，省一次正文请求（文案与守卫同一份口径）
+    if (cur.length >= CHAT_REF_MAX_COUNT) {
+      setRefToast(`一次提问最多引用 ${CHAT_REF_MAX_COUNT} 段内容，请先移除一条`);
+      return;
+    }
+    if (cur.some((r) => r.kind === 'doc' && r.group === group && r.doc === doc)) {
+      setRefToast(`该文档的整篇已在引用中：${doc}`);
+      return;
+    }
+    const budget = refDocBudget(cur);
+    if (budget <= 0) {
+      setRefToast(`引用内容合计已达 ${CHAT_REF_TOTAL_MAX} 字，请先移除部分引用`);
+      return;
+    }
+    setDocRefBusy(true);
+    void kiGetModuleInfo(scope, group, doc)
+      .then((result) => {
+        if (!result.content) throw new Error(result.error || result.hint || '无法读取文档正文');
+        // 按剩余预算截断（与选择器里的「引用整篇」同一函数）：只看单条 2000 会在已有引用时撞后端合计上限
+        const text = result.content.slice(0, budget);
+        if (!text) throw new Error('文档正文为空');
+        handleAddRef({ group, doc, text, kind: 'doc', totalChars: result.content.length });
+      })
+      .catch((error: Error) => setRefToast(`读取文档失败：${error.message}`))
+      .finally(() => setDocRefBusy(false));
   };
 
   /** 移除一条待发送引用（需求 B：已加入的引用必须可单独删除） */
@@ -2106,6 +2164,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                 >
                   <span className="ki-chat-refbar__no">{i + 1}</span>
                   <span className="ki-chat-refbar__doc">{r.doc}</span>
+                  {/* 整篇引用与片段必须一眼可辨：两者可共存于同一文档，只显示文档名会混淆 */}
+                  {r.kind === 'doc' ? <span className="ki-chat-refbar__kind">整篇</span> : null}
                   <span className="ki-chat-refbar__x" aria-hidden="true">✕</span>
                   <RefPreview item={r} hint="点击移除该引用" />
                 </button>
@@ -2150,11 +2210,20 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                       ? '已达引用上限，请先移除一条再继续。'
                       : refArmed
                         ? '回到文档正文里划选要引用的内容；再点一次按钮即退出引用模式。'
-                        : '点击本按钮后，在打开的文档正文里划选要引用的内容；引用会随本次提问一起发送。'}
+                        : '点击本按钮后，在打开的文档正文里划选要引用的内容；要引用整篇文档请点右侧「+ 整篇」。'}
                   </span>
                   <u>一次提问最多 {CHAT_REF_MAX_COUNT} 段，合计不超过 {CHAT_REF_TOTAL_MAX} 字</u>
                 </span>
               </span>
+              {/* 整篇入口（2026-11-20）：有打开的文档时一步引用整篇；没有时打开选择器（那里也能整篇） */}
+              <button
+                type="button"
+                className="ki-chat-refbar__add"
+                onClick={addWholeDoc}
+                disabled={!(config?.enabled ?? false) || docRefBusy || state.pendingRefs.length >= CHAT_REF_MAX_COUNT}
+                aria-label="引用整篇文档（当前打开的文档；超长会按预算截断）"
+                title="把当前打开的文档整篇加入引用；没有打开的文档时会打开选择器"
+              >{docRefBusy ? '读取中…' : '+ 整篇'}</button>
             </div>
             {/* 高亮镜像层与 textarea 必须同处一个定位容器：镜像层 `absolute` 贴合它的
                 client box，排版属性全部从 textarea 现取（见 ComposerMirror 头注释）。
@@ -2749,6 +2818,7 @@ function MessageBubble({
                 <li key={`${r.group}/${r.doc}/${i}`} className="ki-chat-refs__item" tabIndex={0}>
                   <span className="ki-chat-refs__no">{i + 1}</span>
                   <span className="ki-chat-refs__doc">{r.doc}</span>
+                  {r.kind === 'doc' ? <span className="ki-chat-refs__kind">整篇</span> : null}
                   {groupPathSegment(r.group) ? (
                     <span className="ki-chat-refs__group">{groupPathSegment(r.group)}</span>
                   ) : null}
@@ -3174,6 +3244,15 @@ function RefPreview({ item, hint }: { item: ChatRef; hint?: string }): JSX.Eleme
     <span className="ki-chat-ref-pop" role="tooltip" aria-hidden="true">
       <b>{item.doc}</b>
       {path ? <em>{path}</em> : null}
+      {/* 整篇引用：如实交代"原文多大 / 实际提供了多少"，别让用户以为整篇都进上下文了 */}
+      {item.kind === 'doc' ? (
+        <u>
+          整篇文档
+          {item.totalChars !== undefined && item.totalChars > item.text.length
+            ? ` · 原文 ${item.totalChars} 字，此处提供前 ${item.text.length} 字`
+            : ` · ${item.text.length} 字`}
+        </u>
+      ) : null}
       {snippet ? <q>{snippet}</q> : null}
       {hint ? <u>{hint}</u> : null}
     </span>

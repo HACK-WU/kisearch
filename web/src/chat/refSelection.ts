@@ -20,8 +20,12 @@ export interface RefCandidate {
   group: string;
   /** 文档名（= relation） */
   doc: string;
-  /** 选区原文（可能超长，由 `checkRefAdd` 截断） */
+  /** 待引用正文（片段 = 选区原文，整篇 = 已截断的正文；可能超长，由 `checkRefAdd` 再截断） */
   text: string;
+  /** `'doc'` = 整篇文档引用（缺省 = 划选片段） */
+  kind?: 'doc';
+  /** 整篇文档的原文总字数（用于成功提示与预览标注） */
+  totalChars?: number;
 }
 
 /**
@@ -40,6 +44,18 @@ export type RefGuardReason =
 export type RefAddResult =
   | { ok: true; ref: ChatRef; message: string }
   | { ok: false; reason: RefGuardReason; message: string };
+
+/**
+ * 整篇引用可用的**正文预算** = min(单条上限, 合计剩余)，`<= 0` 表示已无空间。
+ *
+ * 为什么必须抽成共享函数：整篇有两个入口（选择器底部按钮 / 面板「+ 整篇」），
+ * 若只按单条 2000 截断、不看合计剩余，用户已有 5900 字引用时点整篇会直接被后端
+ * `CHAT_REF_TOTAL_MAX` 打回（400），而不是"截断到剩下的 100 字"。
+ */
+export function refDocBudget(refs: readonly ChatRef[]): number {
+  const used = refs.reduce((n, r) => n + r.text.length, 0);
+  return Math.max(0, Math.min(CHAT_REF_TEXT_MAX, CHAT_REF_TOTAL_MAX - used));
+}
 
 /** 选区锚点 → 所在文档查看器（`.ki-drawer`）；选区不在查看器内时返回 null */
 export function drawerOfSelection(selection: Selection | null): Element | null {
@@ -61,6 +77,11 @@ export function buildRefCandidate(raw: string, drawer: Element | null): RefCandi
  * 守卫判定（纯数据，可单测）：条数 → 单条长度（截断）→ 合计长度 → 重复。
  *
  * 返回的 `message` 即用户可见提示（成功分支含"超长已截断"说明）——文案与口径只维护这一份。
+ *
+ * ★ 整篇引用（`kind='doc'`，2026-11-20）的两条差异：
+ *   ① 去重按**文档身份**（group + doc），不按文本 —— 整篇的 `text` 会随剩余预算变化，
+ *      用文本比对会让"同一篇加两次"绕过守卫；
+ *   ② 文案说明"原文 M 字 / 截断至 N 字"，避免用户以为点一下就引用了全文。
  */
 export function checkRefAdd(refs: readonly ChatRef[], candidate: RefCandidate): RefAddResult {
   if (refs.length >= CHAT_REF_MAX_COUNT) {
@@ -70,6 +91,7 @@ export function checkRefAdd(refs: readonly ChatRef[], candidate: RefCandidate): 
       message: `一次提问最多引用 ${CHAT_REF_MAX_COUNT} 段内容，请先移除一条`,
     };
   }
+  const isDoc = candidate.kind === 'doc';
   const text = candidate.text.length > CHAT_REF_TEXT_MAX
     ? candidate.text.slice(0, CHAT_REF_TEXT_MAX)
     : candidate.text;
@@ -81,6 +103,28 @@ export function checkRefAdd(refs: readonly ChatRef[], candidate: RefCandidate): 
       ok: false,
       reason: 'total-max',
       message: `引用内容合计不得超过 ${CHAT_REF_TOTAL_MAX} 字（当前 ${usedChars} 字），请先移除部分引用`,
+    };
+  }
+  if (isDoc) {
+    if (refs.some((r) => r.kind === 'doc' && r.group === candidate.group && r.doc === candidate.doc)) {
+      return { ok: false, reason: 'duplicate', message: `该文档的整篇已在引用中：${candidate.doc}` };
+    }
+    const total = candidate.totalChars !== undefined && candidate.totalChars > text.length
+      ? candidate.totalChars
+      : undefined;
+    const ref: ChatRef = {
+      group: candidate.group,
+      doc: candidate.doc,
+      text,
+      kind: 'doc',
+      ...(total !== undefined ? { totalChars: total } : {}),
+    };
+    return {
+      ok: true,
+      ref,
+      message: total !== undefined
+        ? `已引用整篇：${candidate.doc}（原文 ${total} 字，截断至 ${text.length} 字）`
+        : `已引用整篇：${candidate.doc}（${text.length} 字）`,
     };
   }
   if (refs.some((r) => r.group === candidate.group && r.doc === candidate.doc && r.text === text)) {
