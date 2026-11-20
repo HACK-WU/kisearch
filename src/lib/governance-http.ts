@@ -1618,15 +1618,42 @@ export async function handleGovernanceRoutes(
 
     // ─── 文档搜索（手动添加参考文档）────────────────────
     if (segs[0] === 'docs' && segs[1] === 'search' && method === 'GET') {
-      const scope = scopeFromQuery();
+      const targets = readTargets(str(q.get('scope')));
+      const keyword = str(q.get('q')) ?? '';
+      const limit = num(q.get('limit')) ?? 20;
       // 带 eventId 时排除「该事件已关联 / 已加入参考文档」（R31），排除放服务端而非前端
       const eventId = str(q.get('eventId'));
+      const opts = { ...(eventId ? { eventId } : {}) };
+
+      if (targets.view) {
+        const buckets: Array<{ scope: string; total?: number; error?: string }> = [];
+        const hits: Array<Record<string, unknown>> = [];
+        for (const member of targets.members) {
+          try {
+            const found = searchDocsForAdd(member, keyword, limit, opts);
+            buckets.push({ scope: member, total: found.length });
+            // 每条带来源库：同名文档在成员库里都可能存在，前端/脚本要能区分
+            for (const h of found) hits.push({ ...h, scope: member } as unknown as Record<string, unknown>);
+          } catch (err) {
+            buckets.push({ scope: member, error: (err as Error).message });
+          }
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          scope: targets.requested,
+          view: targets.view,
+          members: targets.members,
+          hits,
+          buckets,
+          ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+          ...(targets.truncated ? { truncated: true } : {}),
+        });
+      }
+
       return sendJson(res, 200, {
         ok: true,
-        scope,
-        hits: searchDocsForAdd(scope, str(q.get('q')) ?? '', num(q.get('limit')) ?? 20, {
-          ...(eventId ? { eventId } : {}),
-        }),
+        scope: targets.requested,
+        hits: searchDocsForAdd(targets.members[0], keyword, limit, opts),
       });
     }
 
@@ -1752,19 +1779,65 @@ export async function handleGovernanceRoutes(
 
     // ─── 诊断与计数 ─────────────────────────────────────
     if (segs[0] === 'diagnostics' && method === 'GET') {
-      const scope = scopeFromQuery();
-      let failures: FailureFile = { version: 1, items: [] };
-      try {
-        const raw = readJson<FailureFile>(failureFilePath(scope));
-        if (raw && Array.isArray(raw.items)) failures = raw;
-      } catch { /* 诊断文件损坏时按空处理 */ }
+      const targets = readTargets(str(q.get('scope')));
+      /** 诊断文件损坏时按空处理：诊断页不能因为一个坏文件打不开 */
+      const readFailures = (s: string): FailureFile => {
+        try {
+          const raw = readJson<FailureFile>(failureFilePath(s));
+          if (raw && Array.isArray(raw.items)) return raw;
+        } catch { /* 损坏即空 */ }
+        return { version: 1, items: [] };
+      };
+
+      if (targets.view) {
+        const buckets: Array<Record<string, unknown>> = [];
+        const pendingItems: Array<Record<string, unknown>> = [];
+        const failureItems: Array<Record<string, unknown>> = [];
+        const emptyContent: Array<Record<string, unknown>> = [];
+        let pendingTotal = 0;
+        let trashTotal = 0;
+        let scanned = 0;
+        for (const member of targets.members) {
+          try {
+            const failures = readFailures(member);
+            // 只遍历一次回收站目录：total 与实际条目必须来自同一份快照
+            const trash = listTrash(member, { limit: 200 });
+            const pending = { count: pendingCount(member), items: listPending(member) };
+            buckets.push({ scope: member, pending: pending.count, failures: failures.items.length, trash: trash.total });
+            pendingTotal += pending.count;
+            for (const i of pending.items) pendingItems.push({ ...i, scope: member } as unknown as Record<string, unknown>);
+            for (const i of failures.items) failureItems.push({ ...i, scope: member } as unknown as Record<string, unknown>);
+            trashTotal += trash.total;
+            scanned += trash.items.length;
+            for (const item of trash.items.filter((i) => i.sizeBytes === 0)) {
+              emptyContent.push({ scope: member, group: item.group, name: item.name, dirName: item.dirName, reason: item.reason });
+            }
+          } catch (err) {
+            buckets.push({ scope: member, error: (err as Error).message });
+          }
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          scope: targets.requested,
+          view: targets.view,
+          members: targets.members,
+          pending: { count: pendingTotal, items: pendingItems },
+          failures: { version: 1, items: failureItems },
+          trash: { total: trashTotal, emptyContent, scanned },
+          buckets,
+          ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+          ...(targets.truncated ? { truncated: true } : {}),
+        });
+      }
+
+      const scope = targets.members[0];
       // 只遍历一次回收站目录：total 与实际条目必须来自同一份快照，否则两次数值可能不一致
       const trash = listTrash(scope, { limit: 200 });
       return sendJson(res, 200, {
         ok: true,
-        scope,
+        scope: targets.requested,
         pending: { count: pendingCount(scope), items: listPending(scope) },
-        failures,
+        failures: readFailures(scope),
         trash: {
           total: trash.total,
           /**

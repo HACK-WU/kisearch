@@ -164,6 +164,27 @@ describe('治理页视图聚合', { timeout: 120_000 }, () => {
     assert.deepEqual(byScope.map((s) => s.scope), [A, B]);
   });
 
+  it('视图 /docs/search：逐库命中合并，每条带 scope', async () => {
+    const { status, body } = await getJson(base, `/api/governance/docs/search?scope=${VIEW}&q=文档`);
+    assert.equal(status, 200);
+    assert.equal(body.view, VIEW);
+    const hits = body.hits as Array<Record<string, unknown>>;
+    assert.equal(hits.length, 2, '两个成员库各命中一篇');
+    assert.deepEqual(hits.map((h) => h.scope).sort(), [A, B].sort());
+    const buckets = body.buckets as Array<{ scope: string; total: number }>;
+    assert.deepEqual(buckets.map((b) => b.total), [1, 1]);
+  });
+
+  it('视图 /diagnostics：合并 pending / failures / trash 并给分桶', async () => {
+    const { status, body } = await getJson(base, `/api/governance/diagnostics?scope=${VIEW}`);
+    assert.equal(status, 200);
+    assert.equal(body.view, VIEW);
+    assert.equal(typeof (body.pending as { count: number }).count, 'number');
+    assert.equal((body.trash as { total: number }).total, 0);
+    assert.equal((body.failures as { items: unknown[] }).items.length, 0);
+    assert.equal((body.buckets as unknown[]).length, 2);
+  });
+
   it('多段 scope → 400 SCOPE_MULTI_UNSUPPORTED', async () => {
     const { status, body } = await getJson(base, `/api/governance/docs?scope=${A},${B}`);
     assert.equal(status, 400);
