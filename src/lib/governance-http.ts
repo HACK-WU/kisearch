@@ -1469,6 +1469,17 @@ export async function handleGovernanceRoutes(
              */
             const wantStream = String(req.url ?? '').includes('stream=1');
             let sseStep: ((payload: unknown) => void) | null = null;
+            /**
+             * 写一帧 SSE。两个护栏的依据不同（2026-11-20 实测）：
+             * · `writableEnded`：已 `end()` 再写会以**异步 `error` 事件**抛
+             *   `ERR_STREAM_WRITE_AFTER_END`，无监听器 → 进程退出；成功分支 `res.end()`
+             *   之后若还有迟到的 progress 回调就会踩中，必须拦。
+             * · `destroyed`：客户端断开后写只是被静默丢弃（不崩），这里提前拦掉省一次无意义写入。
+             */
+            const writeFrame = (frame: string): void => {
+              if (res.destroyed || res.writableEnded) return;
+              res.write(frame);
+            };
             if (wantStream) {
               res.writeHead(200, {
                 'Content-Type': 'text/event-stream; charset=utf-8',
@@ -1479,7 +1490,7 @@ export async function handleGovernanceRoutes(
               // SSE 必须立刻刷头：否则前端要等到第一条事件才拿到 200
               res.flushHeaders?.();
               res.socket?.setNoDelay?.(true);
-              sseStep = (payload) => { res.write(`event: step\ndata: ${JSON.stringify(payload)}\n\n`); };
+              sseStep = (payload) => { writeFrame(`event: step\ndata: ${JSON.stringify(payload)}\n\n`); };
             }
             try {
               const deepResult = await runDeepFindAsSearchResult(scope, id, {
@@ -1496,7 +1507,7 @@ export async function handleGovernanceRoutes(
                 ...(skipped.length > 0 ? { skippedTargets: skipped } : {}),
               };
               if (sseStep) {
-                res.write(`event: result\ndata: ${JSON.stringify(payload)}\n\n`);
+                writeFrame(`event: result\ndata: ${JSON.stringify(payload)}\n\n`);
                 res.end();
                 // 该路由处理器返回 boolean（true = 已处理），`return;` 在这里类型不合法
                 return true;
@@ -1513,7 +1524,7 @@ export async function handleGovernanceRoutes(
                */
               if (!sseStep) throw err;
               const ge = err instanceof GovernanceError ? err : null;
-              res.write(`event: error\ndata: ${JSON.stringify({
+              writeFrame(`event: error\ndata: ${JSON.stringify({
                 ok: false,
                 code: ge?.code ?? 'FIND_FAILED',
                 error: (err as Error)?.message ?? String(err),

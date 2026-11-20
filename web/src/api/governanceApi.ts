@@ -988,7 +988,7 @@ export async function findRefCandidatesStream(
       } else if (evName === 'result') {
         result = payload as RefSearchResult;
       } else if (evName === 'error') {
-        failure = payload as typeof failure;
+        failure = payload as RefSearchStreamError;
       }
     }
   }

@@ -1777,6 +1777,17 @@ export async function handleApiRequest(
     })) return;
     sendJson(res, 404, { ok: false, error: `Not Found: /api${p}` });
   } catch (err) {
+    /*
+     * 响应头已发出（SSE / 流式分支出错）时**不能再写 JSON**：二次 `writeHead` 抛
+     * ERR_HTTP_HEADERS_SENT，而这里已是最后一道 catch，异常逃出去就是 unhandledRejection
+     * → 整个 daemon 退出（2026-11-20 实测复现，见 `.debug/find-stream-error-20261120/`）。
+     * 错误正文由流式分支自己以事件下发，这里只收尾。
+     */
+    if (res.headersSent) {
+      console.error(`[api] 响应头已发出后仍走了统一错误出口：${(err as Error)?.message ?? String(err)}`);
+      if (!res.writableEnded) res.end();
+      return;
+    }
     // status 允许 handler 表达「服务在、但这个检查暂时给不出结果」（503），
     // 而不是一律压成 400 客户端错误。
     const e = err as Error & { code?: string; status?: number };
