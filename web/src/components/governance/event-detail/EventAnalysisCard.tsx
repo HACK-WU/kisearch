@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ConfirmedCodeLocation, EventAnalysis, EventView } from '@/api/governanceApi';
 import { AiAnalyzePanel } from '@/components/governance/AiAnalyzePanel';
 import { CodeLocRow } from './CodeLocRow';
@@ -28,6 +28,13 @@ export interface EventAnalysisCardProps {
   onUpdated: (next: EventAnalysis) => void;
   onOpenSettings: () => void;
   onRemoveLocation: (loc: ConfirmedCodeLocation) => void;
+  /**
+   * 整份重置（2026-11-23 用户要求）：清空结论 + 已确认的代码位置，不可恢复。
+   *
+   * 卡片只负责入口与二次确认；实际请求、错误提示、成功后**把 `startSignal` 归零**都由父级做
+   * —— 卡片"清空即消失"依赖那条渲染条件（见下方 D-02/D-03），信号不归零就会剩一张空壳卡。
+   */
+  onReset: () => void;
 }
 
 type ChipTone = 'idle' | 'run' | 'ok' | 'warn' | 'err';
@@ -50,7 +57,7 @@ function chipOf(analysis: EventAnalysis | null): { tone: ChipTone; text: string 
 }
 
 export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | null {
-  const { scope, event, analysis, canWrite, canAsk, busy, startSignal, onUpdated, onOpenSettings, onRemoveLocation } = props;
+  const { scope, event, analysis, canWrite, canAsk, busy, readOnlyHint, startSignal, onUpdated, onOpenSettings, onRemoveLocation, onReset } = props;
   const draft = analysis?.draft ?? null;
   const confirmed = analysis?.confirmed ?? [];
   /** 结论按事件类型换视角（2026-11-20）：bug / 性能 / 需求 / 自建各有自己的骨架与词表 */
@@ -62,6 +69,25 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
   const chain = draft?.chain ?? [];
   /** 可多行同时展开（I-28） */
   const [openLocs, setOpenLocs] = useState<string[]>([]);
+  /**
+   * 重置的二次确认（2026-11-23，用户指定用**弹框**）：`gov-modal-mask` + `gov-modal`，
+   * 与治理页的上传 / 选文档弹窗同一家族，不引入新样式域。
+   *
+   * 为什么弹框而不是内联条：这是「删了就没有回头路」的动作，遮罩能把人从连续操作里打断；
+   * 而且弹框宽度足够把"会失去哪几条"逐项列清（内联条挤在卡里会被压成一行掠过）。
+   * 清点数字在渲染期算好 —— 点「确认重置」时这些数据已经不存在了。
+   * 切事件时本组件随 `key={active.id}` 重挂，弹框自动消失。
+   */
+  const [resetConfirm, setResetConfirm] = useState(false);
+  /** Esc 取消：危险动作的默认出口必须是安全的那一个 */
+  useEffect(() => {
+    if (!resetConfirm) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setResetConfirm(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [resetConfirm]);
 
   /*
    * D-02 / D-03：无草稿且无已确认位置 → 整卡不渲染。
@@ -72,6 +98,18 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
 
   const chip = chipOf(analysis);
   const running = draft?.status === 'running';
+  /** 有东西可清才出「重置分析」（运行中也算"有"，但按钮禁用） */
+  const hasResettable = Boolean(draft) || confirmed.length > 0;
+  /**
+   * 确认条里的清点**必须在发请求前算好** —— 请求成功回来这里已经什么都没有了。
+   * 老数据可能只有纯文本结论（没有 `chain`），按"1 段文本"计，不要显示"结论 0 个节点"。
+   */
+  const unconfirmedCount = draft?.unconfirmed?.length ?? 0;
+  const resetItems = [
+    chain.length > 0 ? `结论 ${chain.length} 个节点` : draft?.conclusion ? '结论 1 段文本' : '',
+    unconfirmedCount > 0 ? `未确认点 ${unconfirmedCount} 项` : '',
+    confirmed.length > 0 ? `已确认代码位置 ${confirmed.length} 处` : '',
+  ].filter((item) => item !== '');
 
   return (
     <section className={`gov-dcard gov-dcard--analysis${running ? ' gov-dcard--live' : ''}`}>
@@ -80,6 +118,26 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
         <span className="gov-dcard__title">AI 分析</span>
         <span className="gov-dcard__hint">基于事件描述与类型，分析原因与结论</span>
         <span className="gov-dcard__actions">
+          {/*
+           * 重置入口（2026-11-23）：放在 chip 左侧，与其它卡片的"先动作后状态"一致。
+           * 运行中只禁用不隐藏 —— 隐藏会让人以为功能没了；禁用时用 title 指向该怎么做（先停止）。
+           * 只读 / 视图 scope 同样禁用：写入口在 `AiAnalyzePanel` 里也是这个口径。
+           */}
+          {hasResettable ? (
+            <button
+              type="button"
+              className="gov-btn gov-btn--sm gov-btn--danger-ghost"
+              disabled={busy || !canWrite || running}
+              title={!canWrite
+                ? readOnlyHint
+                : running
+                  ? '分析进行中：先「停止」或等完成再重置'
+                  : '清空本次 AI 分析的结论与已确认的代码位置（不可恢复）'}
+              onClick={() => setResetConfirm(true)}
+            >
+              重置分析
+            </button>
+          ) : null}
           <span className={`gov-dchip gov-dchip--${chip.tone}`}>{chip.text}</span>
         </span>
       </div>
@@ -163,6 +221,47 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
           <AskBlock scope={scope} eventId={event.id} canAsk={canAsk} canWrite={canWrite} activeRunId={draft.runId} />
         ) : null}
       </div>
+
+      {/*
+       * 重置的二次确认弹框（2026-11-23，用户指定用弹框）：沿用治理页既有的
+       * `.gov-modal-mask` / `.gov-modal`（与上传、选文档同款），不引入新样式域。
+       *
+       * 挂在 section 内部没问题：遮罩是 `position: fixed`（包含块是 viewport），
+       * 卡片的 `overflow: hidden` 裁不到它。**不要给这张卡加 transform / filter** ——
+       * 那会让卡片成为包含块，把弹框关在卡里。
+       */}
+      {resetConfirm ? (
+        <div className="gov-modal-mask" onClick={() => setResetConfirm(false)}>
+          <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="gov-modal__head">重置 AI 分析</div>
+            <div className="gov-modal__body">
+              <p className="gov-error">
+                重置会清空本次分析的全部产物
+                {resetItems.length > 0 ? `：${resetItems.join(' · ')}` : ''}
+                ，且不可恢复。
+              </p>
+              <p className="gov-hint">分析断点与这次的追问记录也会一并清空。</p>
+            </div>
+            <div className="gov-modal__foot">
+              <button type="button" className="gov-btn gov-btn--sm" onClick={() => setResetConfirm(false)}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="gov-btn gov-btn--sm gov-btn--danger"
+                disabled={busy}
+                onClick={() => {
+                  // 先关弹框：请求失败时由父级 run() 给错误提示，不该留一个"已点过"的弹框
+                  setResetConfirm(false);
+                  onReset();
+                }}
+              >
+                确认重置
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

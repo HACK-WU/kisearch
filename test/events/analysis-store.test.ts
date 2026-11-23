@@ -24,6 +24,7 @@ import {
   normalizeAnalysisDocForRead,
   readAnalysisDocRaw,
   removeConfirmedLocation,
+  resetAnalysis,
   updateDraftIfMatch,
   writeDraftStart,
 } from '../../src/lib/events/analysis-store.js';
@@ -226,5 +227,56 @@ describe('S-03 事件描述与分析存储契约', () => {
     await transitionEvent(scope, { event: ev.id, stage: '已关闭' });
     await deleteEvent(scope, { event: ev.id, docAction: 'wiki' });
     assert.equal(fs.existsSync(getAnalysisPath(scope, ev.id)), false, '删除事件必须清理 .analysis.json');
+  });
+
+  it('⑤ 重置分析：draft 与 confirmed 一起清空、幂等，且不波及其它事件', async () => {
+    const ev = await createEvent(scope, { title: '重置分析测试', typeId: 'et_1' });
+    const other = await createEvent(scope, { title: '不应被波及的事件', typeId: 'et_1' });
+
+    const runningDraft = (runId: string, at: number) => ({
+      runId,
+      status: 'running' as const,
+      targetDir: '/tmp/repo',
+      commit: 'abc1234',
+      candidates: [],
+      unconfirmed: [],
+      steps: [],
+      stats: { turns: 0, filesRead: 0, tokens: 0, ms: 0 },
+      startedAt: at,
+      updatedAt: at,
+    });
+
+    // 造出"有结论 + 有已确认位置"的终态；另一个事件留一份 running 草稿当对照
+    await writeDraftStart(scope, other.id, runningDraft('run_other1', 1000));
+    await writeDraftStart(scope, ev.id, runningDraft('run_r1', 1000));
+    await updateDraftIfMatch(scope, ev.id, 'run_r1', (d) => ({
+      ...d,
+      status: 'ready',
+      candidates: [
+        { id: 'c1', file: 'src/reset.ts', line: 7, snippet: 'export const x = 1;', why: '主因', confidence: 0.9 },
+      ],
+      updatedAt: 2000,
+    }));
+    await confirmDraftLocations(scope, ev.id, { candidateIds: ['c1'], expectedRunId: 'run_r1' });
+    const before = readAnalysisDocRaw(scope, ev.id);
+    assert.equal(before.draft?.status, 'ready');
+    assert.equal(before.confirmed.length, 1, '前置：应当有一条已确认位置');
+
+    // 重置：草稿与已确认位置一起清（区别于 discardAnalysisDraft 只清草稿）
+    const afterReset = await resetAnalysis(scope, ev.id);
+    assert.equal(afterReset.draft, null);
+    assert.deepEqual(afterReset.confirmed, []);
+    const onDisk = readAnalysisDocRaw(scope, ev.id);
+    assert.equal(onDisk.draft, null, '落盘后 draft 必须为 null');
+    assert.equal(onDisk.confirmed.length, 0, '落盘后 confirmed 必须为空');
+
+    // 幂等：按钮可能被点两次，再清一次不该报错
+    const again = await resetAnalysis(scope, ev.id);
+    assert.equal(again.draft, null);
+    assert.deepEqual(again.confirmed, []);
+
+    // 不波及其它事件的分析文件
+    assert.ok(fs.existsSync(getAnalysisPath(scope, other.id)), '其它事件的 .analysis.json 必须保留');
+    assert.equal(readAnalysisDocRaw(scope, other.id).draft?.runId, 'run_other1');
   });
 });

@@ -64,21 +64,24 @@ import {
   confirmDraftLocations,
   discardAnalysisDraft,
   removeConfirmedLocation,
+  resetAnalysis,
 } from './events/analysis-store.js';
 import {
   cancelEventAnalysis,
+  forgetFinishedAnalysis,
   isAnalysisActive,
   listActiveAnalysisIds,
   readNormalizedAnalysisDoc,
   startEventAnalysis,
   listFinishedAnalysis,
 } from './events/analysis-runner.js';
-import { hasResume } from './events/analysis-resume.js';
+import { clearResume, hasResume } from './events/analysis-resume.js';
 import {
   ASK_DOC_MAX_BYTES,
   ASK_DOC_MAX_TURNS,
   clearAskTurns,
   readAskDoc,
+  removeAskFile,
 } from './events/analysis-ask-store.js';
 import { askEventAnalysis, type AskTargetEvent } from './events/analysis-ask-runner.js';
 import { listTrash, readTrashSettings, writeTrashSettings, removeTrashItem } from './trash-store.js';
@@ -1252,6 +1255,54 @@ export async function handleGovernanceRoutes(
             eventId: event.id,
             draft: doc.draft,
             confirmed: doc.confirmed,
+          });
+        }
+        /*
+         * 整份重置（2026-11-23 · 用户要求「事件详情加一个重置 AI 分析的按钮」）：
+         * 清空 `draft`（结论 / 因果链 / 未确认点 / 候选 / 过程）与 `confirmed[]`（已确认代码位置）。
+         *
+         * 与相邻的 `DELETE .../analysis/draft` 的区别：那个只丢草稿、**保留**已确认位置；
+         * 这里两者都清，因此必须由前端给独立的第二次确认（不可恢复）。
+         *
+         * 除 `.analysis.json` 外还要收拾三处**附属产物**，否则会出现"清不干净"的表象：
+         *   · `.analysis.resume.json`（断点）：中断态最长留 7 天 / 8MB；而且 draft 为空时
+         *     resume 的 runId 守卫失效（`startEventAnalysis` 要求 `draft?.runId` 为真），
+         *     后续带 `resume:true` 的请求可能续到一份过期上下文；
+         *   · `.ask.json`（追问记录）：`AskBlock` 拉取不带 runId，不清会让下一轮分析把
+         *     上一轮的问答与新结论同屏（问的是已经删掉的旧结论）；
+         *   · 进程内 `finishedRuns`：列表行「分析失败」徽标不判已读，不清就常亮。
+         *
+         * 运行中一律拒（与 confirm / draft 同口径）：此时清掉 draft 会让后台收尾的
+         * `updateDraftIfMatch` 因 runId 不匹配而 no-op —— 这一轮 LLM 白跑。
+         */
+        if (method === 'DELETE' && !segs[3]) {
+          const scope = scopeFromQuery();
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          if (isAnalysisRunning(scope, event.id)) {
+            return sendJson(res, 409, {
+              ok: false,
+              code: 'ANALYSIS_ALREADY_RUNNING',
+              error: '分析仍在进行中：请先「停止」或等待完成，再重置分析',
+            });
+          }
+          const doc = await resetAnalysis(scope, event.id);
+          /*
+           * 附属清理一律用**同步强删**（`clearResume` / `removeAskFile` 内部都吞掉 IO 异常）：
+           * 主数据此时已经清完了，这里再抛（比如去抢写锁遇到 SCOPE_BUSY）只会让一次
+           * 成功的重置表现为"失败"——用户看着报错、数据其实已经没了。
+           * 与 `deleteEvent` 的清理口径一致（它也是 sync 强删 `.refs.json` / `.analysis.json`）。
+           */
+          clearResume(scope, event.id);
+          removeAskFile(scope, event.id);
+          forgetFinishedAnalysis(scope, event.id);
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: event.id,
+            draft: doc.draft,
+            confirmed: doc.confirmed,
+            resumeAvailable: false,
           });
         }
         if (method === 'DELETE' && segs[3] === 'confirmed' && segs[4] && !segs[5]) {

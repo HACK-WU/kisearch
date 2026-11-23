@@ -30,6 +30,15 @@ import { matchRoute } from '../src/lib/auth/route-permissions.js';
 import { TOOL_CAPABILITIES } from '../src/lib/auth/tool-permissions.js';
 import { READ_ONLY_TOOL_NAMES } from '../src/lib/mcp-tools/tool-access.js';
 import { handleGovernanceRoutes } from '../src/lib/governance-http.js';
+import { createEvent } from '../src/lib/events/event-service.js';
+import {
+  confirmDraftLocations,
+  getAnalysisPath,
+  readAnalysisDocRaw,
+  updateDraftIfMatch,
+  writeDraftStart,
+} from '../src/lib/events/analysis-store.js';
+import { resumeFilePath } from '../src/lib/events/analysis-resume.js';
 
 const ROOT = process.cwd();
 
@@ -69,6 +78,8 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['GET', '/governance/events/evt_1/analysis', 'knowledge.read'],
   ['POST', '/governance/events/evt_1/analysis/confirm', 'knowledge.write'],
   ['DELETE', '/governance/events/evt_1/analysis/draft', 'knowledge.write'],
+  // 整份重置分析（2026-11-23）：与上面 /analysis/draft 并列，清草稿 + 已确认位置
+  ['DELETE', '/governance/events/evt_1/analysis', 'knowledge.write'],
   ['POST', '/governance/events/evt_1/analysis/cancel', 'knowledge.write'],
   ['DELETE', '/governance/events/evt_1/analysis/confirmed/loc_1', 'knowledge.write'],
   ['GET', '/governance/docs', 'knowledge.read'],
@@ -88,7 +99,7 @@ const WRITE_TOOLS = ['ki_event_set_stage'];
 const FORBIDDEN_CREATE_TOOLS = ['ki_event_create', 'ki_lifecycle_create', 'ki_event_type_create', 'ki_event_delete', 'ki_event_type_write'];
 
 describe('① 路由权限登记（漏一条就是 404）', () => {
-  it('42 条全部命中 permission 且能力正确', () => {
+  it('44 条全部命中 permission 且能力正确', () => {
     const problems: string[] = [];
     for (const [method, p, capability] of ROUTES) {
       const match = matchRoute(method, p);
@@ -103,8 +114,8 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
     assert.deepEqual(problems, [], `以下路由登记有误：\n${problems.join('\n')}`);
   });
 
-  it('表里正好 42 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 43);
+  it('表里正好 44 条（新增/删除路由必须同步这张表）', () => {
+    assert.equal(ROUTES.length, 44);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {
@@ -310,6 +321,86 @@ describe('⑤ 真实 HTTP 冒烟（body 只读一次）', () => {
       const got = await fetch(`${base}/api/governance/lifecycle/presets?scope=${presetScope}`);
       const gotBody = await got.json() as { presets: Array<{ name: string }> };
       assert.ok(gotBody.presets.some((p) => p.name === '七天内清理'), '预设必须落在请求体指定的 scope');
+    } finally {
+      await close();
+    }
+  });
+
+  /*
+   * 整份重置分析（2026-11-23）：这条走真实 HTTP，把「路由登记 → 权限 → 写盘 → 附属清理」
+   * 串起来验一遍。纯 store 单测（analysis-store.test.ts ⑤）覆盖不到路由与权限登记。
+   */
+  it('DELETE /events/:id/analysis：清草稿 + 已确认位置 + 断点，幂等，缺事件 404', { timeout: 10_000 }, async () => {
+    const resetScope = `gov-http-reset-${Date.now()}`;
+    registerTestScope(resetScope);
+    created.push(resetScope);
+    initScope(resetScope);
+
+    const ev = await createEvent(resetScope, { title: '重置分析冒烟', typeId: 'et_1' });
+    const draftBase = {
+      status: 'running' as const,
+      targetDir: '/tmp/repo',
+      commit: 'abc1234',
+      candidates: [],
+      unconfirmed: [],
+      steps: [],
+      stats: { turns: 0, filesRead: 0, tokens: 0, ms: 0 },
+      startedAt: 1000,
+      updatedAt: 1000,
+    };
+    await writeDraftStart(resetScope, ev.id, { ...draftBase, runId: 'run_smoke' });
+    await updateDraftIfMatch(resetScope, ev.id, 'run_smoke', (d) => ({
+      ...d,
+      status: 'ready',
+      candidates: [
+        { id: 'c1', file: 'src/smoke.ts', line: 3, snippet: 'export const a = 1;', why: '主因', confidence: 0.9 },
+      ],
+      updatedAt: 2000,
+    }));
+    await confirmDraftLocations(resetScope, ev.id, { candidateIds: ['c1'], expectedRunId: 'run_smoke' });
+    assert.equal(readAnalysisDocRaw(resetScope, ev.id).confirmed.length, 1, '前置：应有一条已确认位置');
+
+    // 造一份断点文件，验证重置会连带清掉（draft 为空时它的 runId 守卫会失效）
+    fs.writeFileSync(resumeFilePath(resetScope, ev.id), JSON.stringify({
+      version: 1,
+      eventId: ev.id,
+      runId: 'run_smoke',
+      round: 1,
+      turns: 1,
+      tokens: 0,
+      elapsedMs: 0,
+      messages: [{ role: 'user', content: 'x' }],
+      steps: [],
+      filesRead: [],
+      startedAt: 1,
+      updatedAt: Date.now(),
+    }));
+    assert.ok(fs.existsSync(resumeFilePath(resetScope, ev.id)));
+
+    const { base, close } = await startServer(null);
+    try {
+      const res = await fetch(`${base}/api/governance/events/${ev.id}/analysis?scope=${resetScope}`, { method: 'DELETE' });
+      assert.equal(res.status, 200);
+      const payload = await res.json() as {
+        ok: boolean; draft: unknown; confirmed: unknown[]; resumeAvailable: boolean;
+      };
+      assert.equal(payload.ok, true);
+      assert.equal(payload.draft, null);
+      assert.deepEqual(payload.confirmed, []);
+      assert.equal(payload.resumeAvailable, false);
+      assert.ok(fs.existsSync(getAnalysisPath(resetScope, ev.id)), '文件保留但内容清空（与丢弃草稿同规格）');
+      assert.equal(readAnalysisDocRaw(resetScope, ev.id).draft, null);
+      assert.equal(fs.existsSync(resumeFilePath(resetScope, ev.id)), false, '断点文件必须一并清掉');
+
+      // 幂等：按钮可能点两次，不该报错
+      const again = await fetch(`${base}/api/governance/events/${ev.id}/analysis?scope=${resetScope}`, { method: 'DELETE' });
+      assert.equal(again.status, 200);
+
+      // 事件不存在 → 404（不是 500，也不能静默建目录）
+      const missing = await fetch(`${base}/api/governance/events/evt_missing/analysis?scope=${resetScope}`, { method: 'DELETE' });
+      assert.equal(missing.status, 404);
+      const errBody = await missing.json() as { code?: string };
+      assert.equal(errBody.code, 'EVENT_NOT_FOUND');
     } finally {
       await close();
     }

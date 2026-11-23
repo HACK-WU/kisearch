@@ -328,3 +328,69 @@ describe('S-05c · 过程可观测（去重 + 工具明细）', () => {
     assert.doesNotMatch(modalSrc, /gov-ask/, 'AI 分析组件保持独立，不回引追问样式');
   });
 });
+
+/**
+ * 重置分析（2026-11-23 用户要求）：清空结论 + 已确认的代码位置，删前二次确认。
+ *
+ * 这里守三件事，都是"删错了就没有回头路"的地方：
+ *   ① 入口只在真有东西可清时出现（避免空按钮/误导）；
+ *   ② 二次确认必须是**弹框**（2026-11-23 用户指定），且把"会失去什么"列清楚；
+ *   ③ 父级必须把 `startSignal` 归零 —— 否则清完还剩一张空壳卡，且面板会显示"分析完成"。
+ */
+describe('S-05d · 重置分析：清空结论与已确认位置（2026-11-23）', () => {
+  const govApiSrc = fs.readFileSync(path.join(webRoot, 'src/api/governanceApi.ts'), 'utf8');
+
+  it('入口只在有草稿或已确认位置时出现，且运行中 / 只读 / 请求中禁用', () => {
+    assert.ok(
+      analysisCardSrc.includes('const hasResettable = Boolean(draft) || confirmed.length > 0;'),
+      '可重置判定必须同时看草稿与已确认位置（丢弃草稿后只剩位置也要能清）',
+    );
+    assert.match(analysisCardSrc, /\{hasResettable \? \(/, '没有东西可清时不得渲染按钮');
+    assert.match(analysisCardSrc, />\s*重置分析\s*<\/button>/, '按钮文案');
+    assert.ok(
+      analysisCardSrc.includes('disabled={busy || !canWrite || running}'),
+      '运行中、只读账号、请求进行中都要禁用',
+    );
+    assert.ok(analysisCardSrc.includes('gov-btn gov-btn--sm gov-btn--danger-ghost'), '危险操作用 ghost 危险态样式（不抢主色）');
+    assert.ok(analysisCardSrc.includes('分析进行中：先「停止」或等完成再重置'), '禁用时要说明怎么办');
+  });
+
+  it('二次确认是弹框，把"会失去什么"列清楚，且清点在触发前算好', () => {
+    assert.match(analysisCardSrc, /\{resetConfirm \? \(/, '确认态在这里渲染');
+    // 用治理页既有弹窗家族（mask + modal），不引入新样式域、也不引第三方弹窗组件
+    assert.ok(analysisCardSrc.includes('gov-modal-mask'), '弹框遮罩');
+    assert.ok(analysisCardSrc.includes('gov-modal__head'), '弹框标题区');
+    assert.ok(analysisCardSrc.includes('gov-modal__foot'), '弹框底部动作区');
+    assert.ok(analysisCardSrc.includes('e.stopPropagation()'), '点弹框内部不应关闭（只有遮罩点击才关）');
+    assert.match(analysisCardSrc, /e\.key === 'Escape'/, 'Esc = 取消（危险动作的默认出口必须安全）');
+    assert.ok(analysisCardSrc.includes('重置会清空本次分析的全部产物'), '必须写明清空什么');
+    assert.ok(analysisCardSrc.includes('且不可恢复'), '必须写明不可恢复');
+    assert.ok(analysisCardSrc.includes("resetItems.join(' · ')"), '要列出本次会清掉的条目与数量');
+    assert.ok(analysisCardSrc.includes('确认重置'), '确认按钮文案要说清动作');
+    assert.ok(
+      analysisCardSrc.indexOf('const resetItems =') < analysisCardSrc.indexOf('onReset();'),
+      '清点必须在触发重置之前计算（请求成功后这些数据已经没了）',
+    );
+    // 只查"调用"，注释里提到这个词是允许的（组件注释解释了为什么不用它）
+    assert.doesNotMatch(analysisCardSrc, /window\.confirm\(/, '不用浏览器原生确认框');
+  });
+
+  it('父级：重置后把触发信号归零，请求打到 DELETE /analysis', () => {
+    assert.ok(eventsSrc.includes('onReset={() => void run(async () => {'), '重置动作走 run()，复用错误提示与详情刷新');
+    assert.ok(eventsSrc.includes('await resetEventAnalysis(eventScope, active.id)'), '必须落在事件所属库（视图下顶栏 scope 是视图名）');
+    const resetBlock = eventsSrc.slice(eventsSrc.indexOf('onReset={() => void run('));
+    assert.match(
+      resetBlock.slice(0, 900),
+      /setStartSignal\(0\)/,
+      '信号必须归零：卡片要「无草稿 + 无已确认 + startSignal===0」三条同时成立才消失',
+    );
+
+    assert.ok(govApiSrc.includes('export function resetEventAnalysis'), 'API 层要有独立方法（不要复用 discard 草稿那个）');
+    assert.ok(
+      govApiSrc.includes('/analysis?${new URLSearchParams({ scope }).toString()}'),
+      '端点是不带子路径的 /analysis，与 /analysis/draft 区分',
+    );
+    const resetFn = govApiSrc.slice(govApiSrc.indexOf('export function resetEventAnalysis'));
+    assert.match(resetFn.slice(0, 600), /method: 'DELETE'/, '重置用 DELETE');
+  });
+});

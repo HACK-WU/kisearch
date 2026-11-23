@@ -150,6 +150,9 @@ const RULES: Rule[] = [
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/confirm$/, 'permission', 'knowledge.write'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/draft$/, 'permission', 'knowledge.write'),
+  // 整份重置分析（2026-11-23）：清草稿 + 已确认位置 + 断点 + 追问记录，属写操作。
+  // 与上面 `/analysis/draft` 并列，正则互斥（一个带 `/draft` 段、一个不带），顺序无关。
+  pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis$/, 'permission', 'knowledge.write'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/confirmed\/[^/]+$/, 'permission', 'knowledge.write'),
   pattern('GET', /^\/governance\/events\/[^/]+$/, 'permission', 'knowledge.read'),
   pattern('PATCH', /^\/governance\/events\/[^/]+$/, 'permission', 'knowledge.write'),

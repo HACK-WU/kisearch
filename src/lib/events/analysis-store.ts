@@ -232,6 +232,34 @@ export async function discardAnalysisDraft(scope: string, eventId: string, now =
   });
 }
 
+/**
+ * 整份重置（2026-11-23 · 用户要求「清空 AI 分析的结论与已关联的代码」）。
+ *
+ * 与 {@link discardAnalysisDraft} 的**唯一区别**：那个只清 `draft`、原样保留 `confirmed[]`
+ * （"这次结论不满意，重跑一次但位置留着"）；本函数把两者一起清，回到"从没分析过"。
+ * 两者必须在 UI 上表现为两个按钮 —— 把"保留已确认位置"的人误清掉是最典型的误操作。
+ *
+ * 两个约束：
+ *   1. **一次锁内写完整份 doc**：分两次写会出现「草稿没了、位置还在」的半清态；
+ *   2. **幂等**：已经是空的再调一次也成功（按钮可能被点两次，不该报错）。
+ *
+ * 断点 / 追问 / 列表徽标是**别的文件 / 别的缓存**，由调用方（HTTP 层）组合清理：
+ * 在这里调会让 store 之间互相依赖。
+ */
+export async function resetAnalysis(scope: string, eventId: string, now = Date.now()): Promise<EventAnalysisDoc> {
+  return withAnalysisLock(scope, eventId, 'analysis-reset', async () => {
+    const next: EventAnalysisDoc = {
+      version: 1,
+      eventId,
+      draft: null,
+      confirmed: [],
+      updatedAt: now,
+    };
+    writeAnalysisDoc(scope, next);
+    return next;
+  });
+}
+
 export async function removeConfirmedLocation(
   scope: string,
   eventId: string,

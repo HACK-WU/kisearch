@@ -250,6 +250,19 @@ function forgetFinished(key: string): void {
 }
 
 /**
+ * 丢弃某事件的「已结束」登记（2026-11-23 · 重置分析）。
+ *
+ * 为什么必须清：徽标读的是这份**进程内缓存**，而列表行的 `failed` 分支不判"已读"
+ * （见 `EventsPage`）—— 重置把 `.analysis.json` 清空后，不清这里就会出现
+ * 「详情里什么都没有、列表上还挂着『分析失败』」。
+ *
+ * 导出成带 `scope` 的包装，而不是把 `runKey` 的内部拼接口径交给调用方。
+ */
+export function forgetFinishedAnalysis(scope: string, eventId: string): void {
+  forgetFinished(runKey(scope, eventId));
+}
+
+/**
  * 手动停止一次正在进行的分析（2026-11-16 用户要求「弹窗里要有停止按钮」）。
  *
  * · 只做两件事：置标记 + abort；**终态由后台任务自己落盘**（已完成步骤与候选保留），

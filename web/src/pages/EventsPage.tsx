@@ -35,7 +35,7 @@ import { getDocContent } from '@/api/httpApi';
 import {
   addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
   listEventTypes, listEvents, listRefs, listRunningAnalyses, removeConfirmedCodeLocation, removeMember, removeRef,
-  reopenEvent, setEventPinned, setEventStage, updateEvent, updateEventType,
+  reopenEvent, resetEventAnalysis, setEventPinned, setEventStage, updateEvent, updateEventType,
   REF_LIMIT,
   GovernanceApiError,
   type EventAnalysis, type EventDetail, type EventTypeView, type EventView, type RefItem, type StagePatch,
@@ -1386,6 +1386,19 @@ export function EventsPage(): JSX.Element {
                   onRemoveLocation={(loc) => void run(async () => {
                     await removeConfirmedCodeLocation(eventScope, active.id, loc.id);
                     return `已移除代码位置「${loc.file}:${loc.line}」`;
+                  })}
+                  onReset={() => void run(async () => {
+                    await resetEventAnalysis(eventScope, active.id);
+                    /*
+                     * 信号必须归零：卡片要「无草稿 + 无已确认位置 + startSignal===0」三个条件
+                     * 同时成立才整卡消失（EventAnalysisCard 的 D-02/D-03）。不归零会留一张只剩
+                     * 过程面板的卡，那面板还会显示「分析完成 · 未定位到候选位置」—— 刚清空却说
+                     * 分析完成，自相矛盾。归零只更新面板基线，不会触发启动（见 AiAnalyzePanel 的 lastSignal）。
+                     *
+                     * 数据回写不用手动做：`run()` 收尾会 `loadDetail`，详情里本就是空的分析。
+                     */
+                    setStartSignal(0);
+                    return '已重置 AI 分析：结论与已确认代码位置都已清空';
                   })}
                 />
 

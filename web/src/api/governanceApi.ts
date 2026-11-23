@@ -691,6 +691,29 @@ export function discardEventAnalysisDraft(
   });
 }
 
+/**
+ * 整份重置这次分析（2026-11-23）：清草稿 + 已确认的代码位置，后端同时清掉
+ * 断点（`.analysis.resume.json`）与追问记录（`.ask.json`）。
+ *
+ * 与上面的 `discardEventAnalysisDraft` 的区别：那个只丢草稿、保留已确认位置。
+ * 运行中会被后端拒（409 `ANALYSIS_ALREADY_RUNNING`），调用方应只在非运行态暴露入口。
+ */
+export function resetEventAnalysis(
+  scope: string,
+  eventId: string,
+): Promise<{
+  ok: true;
+  scope: string;
+  eventId: string;
+  draft: AnalysisDraft | null;
+  confirmed: ConfirmedCodeLocation[];
+  resumeAvailable?: boolean;
+}> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis?${new URLSearchParams({ scope }).toString()}`, {
+    method: 'DELETE',
+  });
+}
+
 /** 追问这次分析（B2）：提问一轮 */
 export function askEventAnalysis(
   scope: string,
