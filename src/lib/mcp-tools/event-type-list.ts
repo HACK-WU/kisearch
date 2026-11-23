@@ -36,6 +36,8 @@ export function registerEventTypeListTool(server: McpServer): void {
           types: types.map((type) => ({
             id: type.id,
             name: type.name,
+            // 有描述才输出：省略比 "description": undefined 更省 token，也便于 AI 判断「未描述」
+            ...(type.description ? { description: type.description } : {}),
             builtin: type.builtin,
             terminalAction: type.terminalAction,
             fallbackDays: type.fallbackDays,
@@ -54,7 +56,7 @@ export function registerEventTypeListTool(server: McpServer): void {
             'fts-only': '仅全文可命中（语义检索不召回）',
             hidden: '都不可检索，只能按名读取',
           },
-          hint: '流转用 ki_event_set_stage（stage 可传阶段 key 或名称）；创建事件用 ki_event_create（type 可传 id 或名称）；类型本身只能在页面增删改',
+          hint: '选类型时优先依据 description（说明这类事件装什么），不要只看 name；流转用 ki_event_set_stage（stage 可传阶段 key 或名称）；创建事件用 ki_event_create（type 可传 id 或名称）；类型本身只能在页面增删改',
         };
 
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };

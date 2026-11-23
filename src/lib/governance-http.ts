@@ -83,6 +83,7 @@ import {
   clearAskTurns,
   markAskProposalAccepted,
   readAskDoc,
+  readAskRunning,
   removeAskFile,
 } from './events/analysis-ask-store.js';
 import { askEventAnalysis, type AskTargetEvent } from './events/analysis-ask-runner.js';
@@ -1174,6 +1175,13 @@ export async function handleGovernanceRoutes(
             const onlyRun = str(q.get('runId'));
             const turns = onlyRun ? doc.turns.filter((t) => t.runId === onlyRun) : doc.turns;
             const activeRunId = readNormalizedAnalysisDoc(scope, event.id).draft?.runId ?? null;
+            /*
+             * 进行中的那一轮（2026-11-23 · #82）：追问是单次请求上的 SSE 流，
+             * 切页 / 刷新会断开连接、前端内存态随之消失。把运行态一并下发，
+             * 前端回来即可先展示「正在追答 + 半截答案」并轮询到落库。
+             * 僵尸记录（进程被杀）由 readAskRunning 按过期处理并清掉。
+             */
+            const live = readAskRunning(scope, event.id);
             return sendJson(res, 200, {
               ok: true,
               scope,
@@ -1183,6 +1191,16 @@ export async function handleGovernanceRoutes(
               truncated: doc.turns.length > ASK_DOC_MAX_TURNS
                 || Buffer.byteLength(JSON.stringify(doc.turns)) > ASK_DOC_MAX_BYTES,
               activeRunId,
+              running: live
+                ? {
+                  question: live.question,
+                  runId: live.runId,
+                  startedAt: live.startedAt,
+                  updatedAt: live.updatedAt,
+                  answer: live.answer,
+                  steps: live.steps,
+                }
+                : null,
             });
           }
           if (method === 'POST') {

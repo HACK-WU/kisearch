@@ -126,7 +126,7 @@ describe('事件页视图只读合并', { timeout: 120_000 }, () => {
     assert.equal(status, 200);
     assert.equal(body.view, VIEW);
     const types = body.types as Array<Record<string, unknown>>;
-    assert.equal(types.length, 6, '两库各 3 个内置类型');
+    assert.equal(types.length, 8, '两库各 4 个内置类型（2026-11-23 加入技术债）');
     for (const t of types) {
       assert.match(String(t.typeKey), new RegExp(`^(${A}|${B}):et_\\d+$`));
       assert.ok(t.scope === A || t.scope === B);
@@ -137,7 +137,8 @@ describe('事件页视图只读合并', { timeout: 120_000 }, () => {
     const { body } = await getJson(base, `/api/governance/event-types?scope=${A}`);
     assert.equal(body.view, undefined);
     const types = body.types as Array<Record<string, unknown>>;
-    assert.equal(types.length, 3);
+    // 内置 4 条（2026-11-23 加入技术债）
+    assert.equal(types.length, 4);
     assert.equal(types[0].typeKey, undefined);
   });
 

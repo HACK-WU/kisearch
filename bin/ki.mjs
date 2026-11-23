@@ -53,6 +53,7 @@ const COMMANDS = {
   'wiki-backfill': 'src/wiki-backfill.ts',
   'migrate-relation-cache': 'src/migrate-relation-cache.ts',
   'index-optimize': 'src/index-optimize.ts',
+  'event-types': 'src/event-types.ts',
 };
 
 // 获取命令和参数
@@ -89,6 +90,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   import            导入外部 Wiki（--source 直导，幂等追加）
   datasource        数据源登记与同步：add / list / remove / sync（只导入+算候选，永不删除）
   index-optimize    整理 zvec 索引（optimize：构建 dense 索引；导入收尾已自动触发，可手动重跑）
+  event-types       事件类型运维（migrate：把存量「技术债」中间插入成四阶段，幂等、可 --dry-run）
   group             Group 管理：create / delete / list（单一路径，无 --parent/--name）
   get-module-info   读取本地 KB 原文
   sync-relation     写入 Relation + 本地 KB

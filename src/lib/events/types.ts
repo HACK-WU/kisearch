@@ -28,6 +28,12 @@ export interface EventTypeRecord {
   id: string;
   scope: string;
   name: string;
+  /**
+   * 类型用途说明（≤200 字，可选）。
+   * 为什么是类型级而不是阶段级：阶段名已自解释，描述只回答「这类事件装什么」；
+   * 它同时是 AI 选型的唯一语义依据（`ki_event_type_list` 透传），缺了只能按名字猜。
+   */
+  description?: string;
   builtin: boolean;
   /** 有序；末位 = 终态 */
   stages: EventStage[];
@@ -42,6 +48,13 @@ export interface EventTypeRecord {
 }
 
 export const EVENT_DESCRIPTION_MAX_CHARS = 4000;
+
+/**
+ * 事件类型描述的上限（2026-11-23 REQ-20261123-007）。
+ * 与事件的 4000 字刻意不同：类型描述是「一句话说清装什么」，长到需要分段说明
+ * 就说明该写进事件的 description。200 字约等于类型 tab 下方两行。
+ */
+export const EVENT_TYPE_DESCRIPTION_MAX_CHARS = 200;
 
 export interface EventRecord {
   id: string;
@@ -337,4 +350,45 @@ export interface EventAnalysisAskDoc {
   eventId: string;
   turns: AnalysisAskTurn[];
   updatedAt: number;
+}
+
+/**
+ * 进行中追问的一步过程（2026-11-23 · #82）。
+ *
+ * 与 SSE 的 `step` 事件同形，但落盘后要在「用户切页回来」时重建过程区，
+ * 因此只保留渲染必需的四个字段（不带工具响应正文）。
+ */
+export interface AskRunningStep {
+  id: string;
+  kind: 'thinking' | 'tool' | 'answer';
+  label: string;
+  text: string;
+  at: number;
+}
+
+/**
+ * 进行中的追问运行态：`{scope}/.events/{eventId}.ask.running.json`。
+ *
+ * 为什么需要它：追问是「一次 HTTP 请求上的 SSE 流」，进行中那一轮原先只活在前端
+ * 组件内存（`AskBlock` 的 `pending`/`steps`）、服务端只在**整轮结束**才 `appendAskTurn`，
+ * 于是切页 / 刷新后那一轮从界面上消失（数据最终会落盘，但回来时看不到、也不会自动补）。
+ *
+ * 约定：
+ * 1. **不是历史记录**：不参与 `EventAnalysisAskDoc.turns`、不受条数/字节上限约束；
+ * 2. **结束即删**：成功、失败、异常三条出口都删（由 runner 的 finally 保证）；
+ * 3. `answer`/`steps` 是**节流快照**（默认 800ms），只为让回来的人先看到半截，最终正文仍以落库的 turn 为准；
+ * 4. 超过 `ASK_RUNNING_STALE_MS` 没更新的视为僵尸（进程被杀留下的），读时按无运行态处理并顺手删。
+ */
+export interface AnalysisAskRunning {
+  version: 1;
+  /** 运行态唯一标识：结束删除时用它确认「文件里这条还是不是我自己」（防并发误删） */
+  id: string;
+  eventId: string;
+  question: string;
+  /** 该轮所依据的分析 runId；前端据此与当前草稿比对（分析被重跑则不续接） */
+  runId: string | null;
+  startedAt: number;
+  updatedAt: number;
+  answer: string;
+  steps: AskRunningStep[];
 }

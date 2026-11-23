@@ -205,6 +205,15 @@ describe('③ MCP 工具四处登记', () => {
 });
 
 describe('④ 工具名与路由路径一致（防"改了名没改表"）', () => {
+  it('ki_event_type_list 透传类型描述（AI 选型的唯一语义依据）', () => {
+    const src = fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/event-type-list.ts'), 'utf8');
+    /*
+     * 描述是「这类事件装什么」的唯一载体：丢了它 AI 只能按名字猜，
+     * 会退回到把技术债塞进「需求实现」那种错配。
+     */
+    assert.ok(src.includes('type.description'), '工具返回体必须带上 description');
+  });
+
   it('工具名集合 = 3 读 + 1 写', () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/lifecycle-list.ts'), 'utf8')
       + fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/event-list.ts'), 'utf8')

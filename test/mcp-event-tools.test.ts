@@ -139,7 +139,7 @@ describe('② ki_event_create', () => {
     assert.equal(res.isError, true);
     const body = parse(res);
     assert.equal(body.code, 'TYPE_NOT_FOUND');
-    assert.equal(body.details?.available?.length, 3);
+    assert.equal(body.details?.available?.length, 4, '内置 4 条（含技术债）');
   });
 });
 

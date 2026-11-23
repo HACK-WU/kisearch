@@ -1165,6 +1165,55 @@
   border-bottom: 1px solid var(--ki-color-border);
 }
 
+/*
+ * 类型描述行（REQ-20261123-007 · S-01）：tab 条正下方紧贴、与阶段表之间留一线。
+ * 无描述时不渲染，所以这里不需要「空态」样式。
+ */
+.gov-typedesc {
+  display: flex;
+  align-items: center;
+  gap: var(--ki-space-2);
+  /*
+   * 独立一张卡，位置在**类型卡片下方**（2026-11-23 用户两次纠正）。
+   * 形态刻意不跟上方 `.gov-card` 同款：同一屏两张白底描边卡会读成「重复的同一个东西」。
+   * 改为「左侧强调条 + 浅底 + 正文色」的引述块形态 —— 一眼看出这是内容，不是又一个空面板。
+   * 块间距由 `.gov-page` 的 flex gap 提供，这里不加 margin。
+   */
+  padding: var(--ki-space-3) var(--ki-space-4);
+  background: var(--ki-color-bg-secondary);
+  border-left: 3px solid var(--ki-color-primary);
+  border-radius: var(--ki-radius-sm);
+  font-size: var(--ki-font-size-md);
+  color: var(--ki-color-text);
+}
+/* 行首标签：说明这行是什么，避免单行文字悬在卡里没有归属 */
+.gov-typedesc__label {
+  flex: 0 0 auto;
+  padding-right: var(--ki-space-2);
+  border-right: 1px solid var(--ki-color-border);
+  font-size: var(--ki-font-size-xs);
+  font-weight: 600;
+  color: var(--ki-color-text-subtle);
+  letter-spacing: 0.04em;
+}
+/* 单行截断 + title 给全文：描述可到 200 字，长句不应把阶段表推下去 */
+.gov-typedesc__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 无描述时的添加入口：不画空卡片，只留一个轻量按钮，避免占掉一张卡的视觉重量 */
+.gov-typedesc--empty {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.gov-typedesc__edit { flex: 0 0 auto; margin-left: auto; }
+.gov-typedesc__input { flex: 1 1 auto; min-width: 0; }
+.gov-typedesc__count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
 /* ════════ 回收站 ════════ */
 .gov-strike { text-decoration: line-through; text-decoration-thickness: 1px; color: var(--ki-color-text-subtle); }
 
@@ -1757,6 +1806,7 @@
 /* 渐进出现：结论打完前**整块塌陷到 0 高**（否则打字期下面是一大片空白），
    打完再展开 + 子元素按 --i 顺序上浮淡入（整批 ≤ 300ms）
    ⚠️ 2026-11-18 现状：`.gov-reveal` 在 web/src 里**已无任何 tsx 使用**（demo 遗留死样式）。
+   ⚠️ 若将来启用：这两条 `both` 要一并去掉（同下方 `gov-rise` 的合成层坑），只保留 delay 需要的 `backwards`。
    若将来启用，注意 1296/1300 两条 `animation-delay: calc(var(--i) * ...)` 是「按下标设延迟」，
    列表增删会让 --i 变化 ⇒ 动画重播 ⇒ 抖动（与已修的 :nth-child 延迟同类，见下方第 4 条注释）。 */
 .gov-reveal {
@@ -2464,11 +2514,19 @@
    ⚠️ **不得再用 `:nth-child(N)` 给每行设 animation-delay**（2026-11-18 用户报障「点删除页面抖一下」）：
    删掉一行后，后面所有行的 nth-child 序号都变 ⇒ animation-delay 变化 ⇒ 浏览器**取消并重启**这行的
    `gov-rise` 动画 ⇒ 整列表一起从 opacity 0 + translateY(5px) 重新淡入，看起来就是"抖一下"。
-   现在所有行共用同一条 animation（无 delay），删除只会让上面一行平滑补位。 */
+   现在所有行共用同一条 animation（无 delay），删除只会让上面一行平滑补位。
+
+   ⚠️ **不要给这条 animation 加 `fill-mode`（both / forwards）**（2026-11-23 用户报障
+   「切到事件后快速滑动，已确认的相关位置这块有点糊」）：末尾带 `both` 时动画跑完仍处于
+   fill 生效状态（playState=finished 但末帧继续套用），Chrome 就一直给整行留一个独占合成层；
+   合成层里的文字拿不到子像素抗锯齿，比同页其它文字更「毛」，快速滚动时合成层还要按纹理
+   采样，糊感更明显。末帧（`opacity:1` / `transform:none`）本来就是这行的自然样式，所以
+   `both` 一点收益都没有 —— 去掉后动画一结束就释放合成层，首帧也不会闪（opacity 仍从 0 起）。
+   证据与对照指标见 `.debug/ui-codeloc-blur-20261123/`。 */
 @keyframes gov-rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
 .gov-codelist .gov-codeloc,
 .gov-cand-list .gov-cand,
-.gov-doclist .gov-docline { animation: gov-rise 260ms ease both; }
+.gov-doclist .gov-docline { animation: gov-rise 260ms ease; }
 @media (prefers-reduced-motion: reduce) {
   .gov-codelist .gov-codeloc, .gov-cand-list .gov-cand, .gov-doclist .gov-docline { animation: none; }
 }

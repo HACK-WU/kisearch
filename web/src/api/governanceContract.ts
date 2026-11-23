@@ -152,6 +152,8 @@ export interface EventStageDto {
 export interface EventTypeDto {
   id: string;
   name: string;
+  /** 类型用途说明（≤200 字）；未描述时省略该字段 */
+  description?: string;
   builtin: boolean;
   stages: EventStageDto[];
   terminalAction: 'keep' | 'trash';

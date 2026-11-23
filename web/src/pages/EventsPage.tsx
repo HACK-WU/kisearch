@@ -32,6 +32,7 @@ import { EventAnalysisCard } from '@/components/governance/event-detail/EventAna
 import { EventDocsCard } from '@/components/governance/event-detail/EventDocsCard';
 import type { VisTone } from '@/components/governance/event-detail/types';
 import { getDocContent } from '@/api/httpApi';
+import { pickInitialEventId, readLastEventId, rememberLastEventId } from '@/lib/eventsSelection';
 import {
   addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
   listEventTypes, listEvents, listRefs, listRunningAnalyses, removeConfirmedCodeLocation, removeMember, removeRef,
@@ -228,6 +229,12 @@ export function EventsPage(): JSX.Element {
   const [addStageOpen, setAddStageOpen] = useState(false);
   const [newEventOpen, setNewEventOpen] = useState(false);
   const [newTypeOpen, setNewTypeOpen] = useState(false);
+  /**
+   * 类型描述的编辑草稿：`null` = 非编辑态。
+   * 用 null 而不是空串区分「没在编辑」与「正在编辑且已清空」——
+   * 后者要能提交空串来清除描述。
+   */
+  const [descDraft, setDescDraft] = useState<string | null>(null);
   /** 递增触发一次 AI 分析（面板用 useRef 比对上次值，挂载时不会误触发） */
   const [startSignal, setStartSignal] = useState(0);
   /**
@@ -501,8 +508,23 @@ export function EventsPage(): JSX.Element {
         total: list.total,
         members: list.members ?? [],
       });
-      // 视图下深链只认 evt_ id（shortId 跨库撞号）
-      setActiveId((prev) => prev ?? matchDeepLink(list.events, viewNow) ?? list.events[0]?.id ?? null);
+      /*
+       * 视图下深链只认 evt_ id（shortId 跨库撞号）。
+       *
+       * 2026-11-23：URL 里没有 `?event=`（典型是从别的页面点侧栏回来 —— 侧栏链接不带 query）
+       * 时不再直接落到「列表第一条」，先回「上次看的那条」（按 scope 记在 localStorage）。
+       * 否则右栏换成了另一条事件，用户会以为追问记录 / 分析卡丢了（真机复现见
+       * `.debug/ask-gone-on-tab-switch-20261123/`）。记忆里那条已删 / 不在当前列表 → 仍回落第一条。
+       */
+      const deepLinked = matchDeepLink(list.events, viewNow);
+      const rememberedRaw = readLastEventId(scope);
+      const remembered = rememberedRaw ? findEventKey(list.events, rememberedRaw, !viewNow) : null;
+      setActiveId((prev) => pickInitialEventId({
+        current: prev,
+        deepLinked,
+        remembered,
+        firstId: list.events[0]?.id ?? null,
+      }));
     } catch (err) {
       if (seq !== listSeq.current) return;
       setMessage({ tone: 'err', text: (err as Error).message });
@@ -510,9 +532,20 @@ export function EventsPage(): JSX.Element {
       // 只有「最后一次请求」能收掉转圈，否则中途的过期响应会提前把 loading 关掉
       if (seq === listSeq.current) setListLoading(false);
     }
-  }, [scope, status, keyword, typeFilter, matchDeepLink]);
+  }, [scope, status, keyword, typeFilter, matchDeepLink, findEventKey]);
 
   useEffect(() => { void loadList(); }, [loadList]);
+
+  /**
+   * 记住「当前看的是哪条」：侧栏链接不带 query，切页回来全靠这份记忆恢复选中
+   * （否则右栏会换成列表第一条，看着像追问记录丢了）。
+   *
+   * 只记非空值 —— 换库时 `selectEvent(null)` 是主动清空，不该覆盖上一个库的记忆
+   * （key 已按 scope 分开，这里不写即可保留）。
+   */
+  useEffect(() => {
+    if (activeId) rememberLastEventId(scope, activeId);
+  }, [scope, activeId]);
 
   /** 兜底同步：首屏与深链的选中由 `loadList` 直接 `setActiveId`，不经过 `selectEvent` */
   useEffect(() => {
@@ -687,9 +720,24 @@ export function EventsPage(): JSX.Element {
     [types, active],
   );
 
+  /**
+   * 视图模式下同一类型在每个成员库各有一份（内置 `id` 相同，`typeKey=scope:id` 不同）：
+   * tab 必须按**名称**去重，否则 4 个类型会渲染成 7 个 tab，且同名项同时高亮
+   * （`aria-pressed` 用裸 id 判断时，两个 `et_1` 都为 true）。2026-11-23 真机走查发现。
+   */
+  const typeTabs = useMemo(() => {
+    const seen = new Set<string>();
+    return types.filter((t) => {
+      if (seen.has(t.name)) return false;
+      seen.add(t.name);
+      return true;
+    });
+  }, [types]);
+
+  /** 选中键统一取 `typeKey ?? id`：后端只为视图模式补 typeKey，单库回退裸 id */
   const selectedType = useMemo(
-    () => types.find((t) => t.id === selectedTypeId) ?? types[0] ?? null,
-    [types, selectedTypeId],
+    () => types.find((t) => (t.typeKey ?? t.id) === selectedTypeId) ?? typeTabs[0] ?? null,
+    [types, typeTabs, selectedTypeId],
   );
 
   /**
@@ -699,8 +747,18 @@ export function EventsPage(): JSX.Element {
   const patchType = async (mutate: (stages: StagePatch[], type: EventTypeView) => {
     stages?: StagePatch[];
     terminalAction?: 'keep' | 'trash';
+    /**
+     * 描述：`undefined` = 不改；空串 = 清除。
+     * 必须用 `!== undefined` 判断 —— 把空串当「没传」会让用户永远清不掉描述。
+     */
+    description?: string;
   }): Promise<void> => {
     if (!selectedType) return;
+    /*
+     * 取最新 revision 用裸 id 反查：这里只在**可写**场景走到，而视图 scope 的写是全禁的
+     * （后端 409），因此不存在「命中另一个库的同名类型」的问题。
+     * 若将来放开视图写，这里必须改成按 `typeKey` 精确定位。
+     */
     const latest = types.find((t) => t.id === selectedType.id) ?? selectedType;
     const base: StagePatch[] = latest.stages.map((st) => ({
       key: st.key,
@@ -714,6 +772,7 @@ export function EventsPage(): JSX.Element {
         revision: latest.revision,
         ...(patch.stages ? { stages: patch.stages } : {}),
         ...(patch.terminalAction ? { terminalAction: patch.terminalAction } : {}),
+        ...(patch.description !== undefined ? { description: patch.description } : {}),
       });
       return `「${res.type.name}」已更新`;
     });
@@ -1089,8 +1148,18 @@ export function EventsPage(): JSX.Element {
           <div className="gov-card">
           <div className="gov-typebar">
             <div className="gov-seg" role="group" aria-label="事件类型">
-              {types.map((t) => (
-                <button key={t.id} aria-pressed={selectedType?.id === t.id} onClick={() => setSelectedTypeId(t.id)}>
+              {typeTabs.map((t) => (
+                <button
+                  key={t.typeKey ?? t.id}
+                  /* 用 selectedType 反查而非 selectedTypeId：初始未选中时 selectedType 已退化为首个，两处口径要一致 */
+                  aria-pressed={selectedType ? (t.typeKey ?? t.id) === (selectedType.typeKey ?? selectedType.id) : false}
+                  title={t.scope ? `「${t.name}」来自 ${t.scope}（视图下同名类型只显示一次）` : undefined}
+                  onClick={() => {
+                    // 切类型时丢弃未保存的描述草稿，避免把 A 的描述写进 B
+                    setDescDraft(null);
+                    setSelectedTypeId(t.typeKey ?? t.id);
+                  }}
+                >
                   {t.name}
                 </button>
               ))}
@@ -1209,6 +1278,88 @@ export function EventsPage(): JSX.Element {
               <div className="gov-cell-muted" style={{ padding: 24 }}>暂无事件类型</div>
             )}
           </div>
+
+          {/*
+           * 类型描述行（REQ-20261123-007 · S-01）：**在类型卡片下方单独一张卡**（2026-11-23 用户纠正：不是 tab 条与阶段表之间）。
+           * 无描述时只留轻量添加入口，不画空卡片。
+           */}
+          {selectedType ? (selectedType.description || descDraft !== null ? (
+            <div className="gov-typedesc">
+              {descDraft === null ? (
+                <>
+                  <span className="gov-typedesc__label">描述</span>
+                  <span className="gov-typedesc__text" title={selectedType.description}>
+                    {selectedType.description}
+                  </span>
+                  <button
+                    type="button"
+                    className="gov-btn gov-btn--ghost gov-btn--sm gov-typedesc__edit"
+                    disabled={busy || libWriteBlocked}
+                    title={writeBlocked ? (isViewScope ? VIEW_WRITE_HINT : readOnlyHint) : '编辑类型描述'}
+                    onClick={() => setDescDraft(selectedType.description ?? '')}
+                  >
+                    ✎ 编辑描述
+                  </button>
+                </>
+              ) : (
+                <>
+                  <input
+                    className="gov-input gov-typedesc__input"
+                    value={descDraft}
+                    maxLength={200}
+                    autoFocus
+                    placeholder="一句话说明这类事件装什么（可留空）"
+                    onChange={(e) => setDescDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const next = descDraft;
+                        setDescDraft(null);
+                        // 空串走「清除」分支：PATCH 省略字段等于不改，清不掉
+                        void patchType(() => ({ description: next }));
+                      } else if (e.key === 'Escape') {
+                        e.preventDefault();
+                        setDescDraft(null);
+                      }
+                    }}
+                  />
+                  <span className="gov-hint gov-typedesc__count">{descDraft.length}/200</span>
+                  <button
+                    type="button"
+                    className="gov-btn gov-btn--sm gov-btn--primary"
+                    disabled={busy}
+                    onClick={() => {
+                      const next = descDraft;
+                      setDescDraft(null);
+                      void patchType(() => ({ description: next }));
+                    }}
+                  >
+                    保存
+                  </button>
+                  <button type="button" className="gov-btn gov-btn--sm" onClick={() => setDescDraft(null)}>
+                    取消
+                  </button>
+                </>
+              )}
+            </div>
+          ) : (
+            /*
+             * 无描述时不能整行不渲染：新建时没写描述，就永远补不回来了
+             * （2026-11-23 真机走查发现——清空后页面上再无任何入口）。
+             * 所以这里给一个紧凑的添加入口，而不是空行。
+             */
+            <div className="gov-typedesc gov-typedesc--empty">
+              <button
+                type="button"
+                className="gov-btn gov-btn--ghost gov-btn--sm"
+                disabled={busy || libWriteBlocked}
+                title={writeBlocked ? (isViewScope ? VIEW_WRITE_HINT : readOnlyHint) : '为这个类型添加描述'}
+                onClick={() => setDescDraft('')}
+              >
+                ＋ 添加描述
+              </button>
+            </div>
+          )) : null}
 
           {selectedType ? (
             <p className="gov-notice">
@@ -1587,7 +1738,7 @@ export function EventsPage(): JSX.Element {
       ) : null}
       {newTypeOpen ? (
         <NewTypeModal
-          types={types}
+          types={typeTabs}
           onClose={() => setNewTypeOpen(false)}
           onCreate={(payload) => {
             setNewTypeOpen(false);
@@ -2132,9 +2283,15 @@ function NewEventModal(args: {
 function NewTypeModal(args: {
   types: EventTypeView[];
   onClose: () => void;
-  onCreate: (payload: { name: string; stages: Array<{ name: string; visibility: Visibility }>; terminalAction: 'keep' | 'trash' }) => void;
+  onCreate: (payload: {
+    name: string;
+    description?: string;
+    stages: Array<{ name: string; visibility: Visibility }>;
+    terminalAction: 'keep' | 'trash';
+  }) => void;
 }): JSX.Element {
   const [name, setName] = useState('');
+  const [description, setDescription] = useState('');
   const [stages, setStages] = useState<Array<{ name: string; visibility: Visibility }>>([
     { name: '进行中', visibility: 'hidden' },
   ]);
@@ -2192,6 +2349,22 @@ function NewTypeModal(args: {
               placeholder="如「线上事故」「技术调研」"
               onChange={(e) => setName(e.target.value)}
             />
+          </label>
+
+          <label className="gov-field">
+            <span>类型描述（可选）</span>
+            <textarea
+              className="gov-input"
+              rows={2}
+              value={description}
+              maxLength={200}
+              placeholder="一句话说明这类事件装什么，如「线上可用性故障；从发现到复盘的处置过程」"
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            <span className="gov-hint">{description.length}/200</span>
+            <span className="gov-hint">
+              会显示在类型 tab 下方，也会提供给 <code>ki_event_type_list</code> —— AI 选类型时优先看它。
+            </span>
           </label>
 
           <div className="gov-field">
@@ -2305,7 +2478,13 @@ function NewTypeModal(args: {
           <button
             className="gov-btn gov-btn--sm gov-btn--primary"
             disabled={!canSubmit}
-            onClick={() => args.onCreate({ name: name.trim(), stages, terminalAction: action })}
+            onClick={() => args.onCreate({
+              name: name.trim(),
+              // 空描述不上传字段：后端「省略 = 不改」，「空串 = 清除」在新建场景没有意义
+              ...(description.trim() ? { description: description.trim() } : {}),
+              stages,
+              terminalAction: action,
+            })}
           >
             创建类型
           </button>

@@ -15,14 +15,14 @@
  */
 
 import { readAllGroupCaches } from '../group-cache.js';
-import { readAllEvents, readEventTypes, findEventIn, isEventClosed, mustFindEvent } from './store.js';
+import { readAllEvents, findEventIn, isEventClosed, mustFindEvent } from './store.js';
 import { addRefDocs, readRefs, refKey, removeRefDoc } from './refs-store.js';
 import { listAllScopes } from '../scope.js';
 import { isScopeAccessAllowed } from '../scope-access.js';
 import { loadConfig } from '../config.js';
 import { readViews } from '../scope-view.js';
 import { countDocsByTargets } from './find-targets.js';
-import { getType, resolveStageVisibility } from './type-service.js';
+import { getType, listTypes, resolveStageVisibility } from './type-service.js';
 import { collectMembers } from './members.js';
 import { resolveVisibility, resolveVisibilityOfRelation } from '../visibility-index.js';
 import { GovernanceError } from '../governance-errors.js';
@@ -736,7 +736,12 @@ export function searchDocsForAdd(
    */
   const allEvents = readAllEvents(scope);
   const eventsById = new Map(allEvents.map((e) => [e.id, e]));
-  const typesById = new Map(readEventTypes(scope).map((t) => [t.id, t]));
+  /*
+   * 必须走 `listTypes`（含内置补齐）而不是 `readEventTypes`（只读盘）：
+   * 两者在「新 scope 尚未落盘」时给出不同的阶段可见性，会让引用文档的档位判定
+   * 与 `visibility-index` 不一致 —— 那种不一致不报错、只在检索结果里显形。
+   */
+  const typesById = new Map(listTypes(scope).map((t) => [t.id, t]));
   const lookupEvent = (id: string): { stageKey: string; typeId: string } | null => {
     const e = eventsById.get(id);
     return e ? { stageKey: e.stageKey, typeId: e.typeId } : null;

@@ -74,12 +74,14 @@ after(async () => {
 });
 
 describe('① 事件类型', () => {
-  it('`_types.json` 不存在时返回内置 3 类（不落盘）', () => {
+  it('`_types.json` 不存在时返回内置 4 类（不落盘）', () => {
     const types = listTypes(scope);
-    assert.equal(types.length, 3);
-    assert.deepEqual(types.map((t) => t.name), ['bug 排查', '性能优化', '需求实现']);
+    // 2026-11-23 起内置 4 条：bug 排查 / 性能优化 / 需求实现 / 技术债（REQ-20261123-007）
+    assert.equal(types.length, 4);
+    assert.deepEqual(types.map((t) => t.name), ['bug 排查', '性能优化', '需求实现', '技术债']);
     assert.equal(types[0].terminalAction, 'keep');
     assert.equal(types[1].terminalAction, 'trash');
+    assert.equal(types[3].terminalAction, 'keep', '技术债收口后文档保留（复盘值得长期可检索）');
     assert.ok(!fs.existsSync(path.join(getKbDir(scope), '.events', '_types.json')), '读路径不得创建文件');
   });
 
@@ -167,6 +169,34 @@ describe('① 事件类型', () => {
     );
 
     await deleteEvent(scope, { event: event.id, docAction: 'wiki' }).catch(() => undefined);
+  });
+
+  it('类型描述：创建写入 → 超长 fail-loud → PATCH 三态（不改 / 清除 / 写入）', async () => {
+    const created = await createType(scope, {
+      name: '描述验证',
+      description: '  一句话说明这类事件装什么  ',
+      stages: [
+        { name: '开始', visibility: 'hidden' },
+        { name: '结束', visibility: 'full' },
+      ],
+    });
+    assert.equal(created.description, '一句话说明这类事件装什么', '前后空白应被裁剪');
+
+    // 超长必须报错：静默截断会让「用户写的」与「看到的」不是一回事
+    await assert.rejects(
+      () => updateType(scope, created.id, { revision: created.revision, description: 'x'.repeat(201) }),
+      (err: { code?: string }) => err.code === 'TYPE_DESCRIPTION_TOO_LONG',
+    );
+
+    // 省略 = 不改（PATCH 语义）
+    const keep = await updateType(scope, created.id, { revision: created.revision });
+    assert.equal(keep.description, '一句话说明这类事件装什么');
+
+    // 空串 = 清除，且不把空串留在文件里
+    const cleared = await updateType(scope, created.id, { revision: keep.revision, description: '' });
+    assert.equal(cleared.description, undefined);
+
+    await deleteType(scope, created.id);
   });
 });
 

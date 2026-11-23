@@ -16,12 +16,34 @@
 
 import { withScopeWriteLock } from '../scope-write-lock.js';
 import { GovernanceError } from '../governance-errors.js';
-import { buildBuiltinTypes, BUILTIN_EVENT_TYPE_IDS } from './builtin-types.js';
+import { buildBuiltinTypes } from './builtin-types.js';
 import { readTypesDoc, writeTypesDoc, readAllEvents } from './store.js';
+import { EVENT_TYPE_DESCRIPTION_MAX_CHARS } from './types.js';
 import type { EventStage, EventTypeRecord, EventTypesDoc, Visibility } from './types.js';
 
 const MAX_STAGES = 12;
 const MIN_STAGES = 2;
+
+/**
+ * 类型描述归一（REQ-20261123-007 · S-01）。
+ *
+ * 三种输入必须区分开，否则 PATCH 会误伤：
+ *   · `undefined` → 不改（PATCH 语义：省略即保持）
+ *   · `null` / 空串 / 纯空白 → **清除**（落盘时删字段，不写空串）
+ *   · 超长 → fail-loud，不容忍静默截断（截断后用户看到的与他写的不是一回事）
+ */
+function normalizeTypeDescription(input: unknown): string | undefined {
+  if (input === undefined) return undefined;
+  const text = String(input ?? '').trim();
+  if (!text) return undefined;
+  if (text.length > EVENT_TYPE_DESCRIPTION_MAX_CHARS) {
+    throw new GovernanceError(
+      'TYPE_DESCRIPTION_TOO_LONG',
+      `类型描述 ${text.length} 字，超过上限 ${EVENT_TYPE_DESCRIPTION_MAX_CHARS} 字`,
+    );
+  }
+  return text;
+}
 
 function nowMs(): number {
   return Date.now();
@@ -30,8 +52,62 @@ function nowMs(): number {
 /** 当前类型视图：文件不存在时用内置（不落盘） */
 export function listTypes(scope: string): EventTypeRecord[] {
   const doc = readTypesDoc(scope);
-  if (doc && Array.isArray(doc.types) && doc.types.length > 0) return doc.types;
+  if (doc && Array.isArray(doc.types) && doc.types.length > 0) return mergeBuiltinTypes(scope, doc.types);
   return buildBuiltinTypes(scope, nowMs());
+}
+
+/**
+ * 把内置定义合进盘上视图（REQ-20261123-007 · S-02）。
+ *
+ * 为什么需要：内置定义原先只在 `_types.json` 缺失时生效，一旦落盘就再也不参与 ——
+ * 新增的内置类型（技术债）永远到不了已有库。这里改为**读时并集**：
+ *   · 盘上已有同名条目 → 视作「认领」，只补 `builtin: true`，**其余字段一律以盘上为准**
+ *     （否则用户对内置做过的阶段与可见性调整会在每次读时被代码常量打回，等于改了立刻失效）；
+ *   · 盘上没有 → 按内置 id 追加；id 已被别的类型占用时**改分配新 id 追加**，绝不顶替
+ *     （顶替会把「线上事故」改名成「技术债」，事件绑定全部错乱）。
+ *
+ * 硬约束：**读路径不写盘**（首次写操作才由 `persist` 把并集落盘完成转正）。
+ * 认领结果只存在于内存视图，`getType` / `listTypes` 的所有消费方立即看到正确集合。
+ */
+function mergeBuiltinTypes(scope: string, disk: EventTypeRecord[]): EventTypeRecord[] {
+  const builtins = buildBuiltinTypes(scope, nowMs());
+  const out: EventTypeRecord[] = [...disk];
+
+  for (const builtin of builtins) {
+    const claimIdx = out.findIndex((t) => t.name === builtin.name);
+    if (claimIdx >= 0) {
+      const disk = out[claimIdx];
+      const needsBuiltinFlag = !disk.builtin;
+      /*
+       * 描述是**唯一**会从内置定义补进盘上条目的字段，且只补「空」的情况。
+       * 为什么破例：内置描述是本需求新加的字段，早于它落盘的库（如 kisearch-memory）
+       * 盘上永远没有该字段，「以盘上为准」会让这批库永远看不到内置说明。
+       * 副作用是有意的：清空内置类型的描述 = 恢复默认描述（自定义类型不受影响，仍可留空）。
+       */
+      const needsDescription = !disk.description && Boolean(builtin.description);
+      if (needsBuiltinFlag || needsDescription) {
+        out[claimIdx] = {
+          ...disk,
+          ...(needsBuiltinFlag ? { builtin: true } : {}),
+          ...(needsDescription ? { description: builtin.description } : {}),
+        };
+      }
+      continue;
+    }
+
+    if (!out.some((t) => t.id === builtin.id)) {
+      out.push(builtin);
+      continue;
+    }
+
+    const occupant = out.find((t) => t.id === builtin.id)!;
+    const newId = nextTypeId(out);
+    console.warn(
+      `[events] 内置类型「${builtin.name}」的 id ${builtin.id} 已被「${occupant.name}」占用，改分配 ${newId}`,
+    );
+    out.push({ ...builtin, id: newId });
+  }
+  return out;
 }
 
 export function getType(scope: string, id: string): EventTypeRecord | null {
@@ -94,6 +170,8 @@ function validateStages(stages: EventStage[]): void {
 
 export interface CreateTypeInput {
   name: string;
+  /** 类型用途说明（≤200 字）；null / 空串等同未描述 */
+  description?: string | null;
   stages?: Array<{ name: string; visibility: Visibility; disabled?: boolean }>;
   terminalAction?: 'keep' | 'trash';
   fallbackDays?: number | null;
@@ -121,11 +199,13 @@ export async function createType(scope: string, input: CreateTypeInput): Promise
     }));
     validateStages(stages);
 
+    const description = normalizeTypeDescription(input.description);
     const now = nowMs();
     const record: EventTypeRecord = {
       id: nextTypeId(types),
       scope,
       name,
+      ...(description ? { description } : {}),
       builtin: false,
       stages,
       terminalAction: input.terminalAction ?? 'keep',
@@ -144,6 +224,8 @@ export interface UpdateTypePatch {
   /** 必填：乐观锁（N12：两个标签页同时编辑） */
   revision: number;
   name?: string;
+  /** 类型用途说明：省略 = 不改；null / 空串 = 清除 */
+  description?: string | null;
   /** **只允许追加**：长度不得减少，已有 key 不得消失 */
   stages?: Array<{ key?: string; name: string; visibility: Visibility; disabled?: boolean }>;
   terminalAction?: 'keep' | 'trash';
@@ -217,6 +299,15 @@ export async function updateType(scope: string, id: string, patch: UpdateTypePat
       revision: current.revision + 1,
       updatedAt: nowMs(),
     };
+    /*
+     * description 三态必须分开处理：`...current` 已把旧值带过来，
+     * 因此「清除」必须显式 delete —— 只靠展开永远清不掉。
+     */
+    if (patch.description !== undefined) {
+      const desc = normalizeTypeDescription(patch.description);
+      if (desc) next.description = desc;
+      else delete next.description;
+    }
 
     const nextTypes = [...types];
     nextTypes[idx] = next;
@@ -231,7 +322,12 @@ export async function deleteType(scope: string, id: string): Promise<void> {
     const target = types.find((t) => t.id === id);
     if (!target) throw new GovernanceError('TYPE_NOT_FOUND', `事件类型「${id}」不存在`);
 
-    if (target.builtin || (BUILTIN_EVENT_TYPE_IDS as readonly string[]).includes(target.id)) {
+    /*
+     * 只看 `builtin` 字段（S-02 起）：认领已在 `mergeBuiltinTypes` 里完成，
+     * 而原先的固定 id 名单（`BUILTIN_EVENT_TYPE_IDS`）会误伤 ——
+     * 任何库里恰好占用 `et_4` 的自定义类型都会被当成「内置不可删」。
+     */
+    if (target.builtin) {
       throw new GovernanceError('TYPE_BUILTIN', `「${target.name}」是内置类型，不能删除（可改阶段与可见性）`);
     }
 
