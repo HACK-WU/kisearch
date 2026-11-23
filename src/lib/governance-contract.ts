@@ -204,7 +204,11 @@ export interface TransitionResult {
 
 export type TrashReasonDto = 'temp-expired' | 'event-closed' | 'event-expired' | 'manual';
 
+/** 条目类型；存量条目后端补成 'doc' 后下发，前端可不做缺省判断 */
+export type TrashKindDto = 'doc' | 'group';
+
 export interface TrashItemDto {
+  kind: TrashKindDto;
   group: string;
   name: string;
   reason: TrashReasonDto;
@@ -217,6 +221,10 @@ export interface TrashItemDto {
   sizeBytes: number;
   hasAssets: boolean;
   dirName: string;
+  /** 仅 kind='group'：组内剩余篇数（部分恢复后收缩） */
+  docCount?: number;
+  /** 仅 kind='group'：被删组连同子组的节点数 */
+  groupCount?: number;
 }
 
 export interface RestoredDoc {
@@ -231,6 +239,33 @@ export interface RestoreResult {
   expiresAt?: number;
   ttlDays?: number;
   expiresAtChanged: boolean;
+  rebuild: 'pending' | 'done' | 'failed';
+  restoreCount: number;
+  hint?: string;
+}
+
+/** 组条目恢复的失败项：留在回收站里，可改名后重试 */
+export interface RestoreGroupFailure {
+  group: string;
+  name: string;
+  code: 'RESTORE_NAME_CONFLICT' | 'TRASH_CORRUPTED';
+  error: string;
+}
+
+/** 组条目恢复结果（REQ-20261123-005 · S04）—— doc 分支仍走 `RestoreResult`，形状不变 */
+export interface RestoreGroupResult {
+  ok: true;
+  scope: string;
+  kind: 'group';
+  restored: {
+    /** 被删组路径 */
+    group: string;
+    /** 重建的树节点（自身 + 子组） */
+    groups: string[];
+    /** 实际恢复的篇数 */
+    docs: number;
+  };
+  failed: RestoreGroupFailure[];
   rebuild: 'pending' | 'done' | 'failed';
   restoreCount: number;
   hint?: string;

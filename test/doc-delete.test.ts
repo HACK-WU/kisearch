@@ -23,7 +23,7 @@ const dataDir = path.join(fixture, 'kb');
 const vectorDir = path.join(fixture, 'vector');
 const configPath = path.join(fixture, 'config.json');
 
-const CASES = ['a', 'b', 'c', 'd', 'e', 'f', 'g'] as const;
+const CASES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'] as const;
 const scopes = CASES.map((name) => `del-${name}`);
 const sourceDirs: Record<string, string> = {};
 for (const name of scopes) sourceDirs[name] = path.join(fixture, `source-${name}`);
@@ -212,5 +212,42 @@ describe('doc delete', () => {
       () => deleteDocument({ scope, group: '__root__', relation }),
       (error: any) => error.status === 404 && error.code === 'DOC_NOT_FOUND',
     );
+  });
+});
+
+/**
+ * REQ-20261123-005 · S01：把后端一直在算、却被 doc-delete 丢掉的回收站回执透出。
+ *
+ * 前端靠 `trash` 有无来决定提示"可在回收站恢复"还是"不可恢复"（应急开关关闭时
+ * 确实没进站，承诺可恢复就是骗人），所以这两条必须锁住。
+ */
+describe('回收站回执（S01）', () => {
+  it('删除成功：回执带 trash，正文与元数据已落 .trash', async () => {
+    const scope = scopes[7];
+    seed(scope);
+    const result = await deleteDocument({ scope, group, relation });
+    assert.equal(result.deleted, true);
+    assert.ok(result.trash, '有入站就必须下发回执，否则前端只能按"不可恢复"提示');
+    assert.equal(result.trash!.reason, 'manual');
+    assert.ok(result.trash!.ttlDays > 0);
+    assert.ok(result.trash!.expiresAt > Date.now());
+
+    const itemDir = path.join(dataDir, scope, '.trash', group, result.trash!.dirName);
+    assert.ok(fs.existsSync(path.join(itemDir, 'meta.json')), '快照目录应有 meta.json');
+    assert.equal(fs.readFileSync(path.join(itemDir, 'content.md'), 'utf8'), body);
+  });
+
+  it('KI_TRASH_DISABLED=1：不进站，回执无 trash', async () => {
+    const scope = scopes[8];
+    seed(scope);
+    process.env.KI_TRASH_DISABLED = '1';
+    try {
+      const result = await deleteDocument({ scope, group, relation });
+      assert.equal(result.deleted, true);
+      assert.equal(result.trash, undefined, '未进站时不能谎报可恢复');
+      assert.equal(fs.existsSync(path.join(dataDir, scope, '.trash', group)), false);
+    } finally {
+      delete process.env.KI_TRASH_DISABLED;
+    }
   });
 });

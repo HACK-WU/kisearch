@@ -532,6 +532,14 @@ export interface DocDeletePrecheckResponse {
   datasourceSource?: string;
 }
 
+/** 回收站回执：缺省 = 本次未进站（应急开关 / 数据源 prune），不是失败 */
+export interface DocDeleteTrashReceipt {
+  dirName: string;
+  reason: 'temp-expired' | 'event-closed' | 'event-expired' | 'manual';
+  expiresAt: number;
+  ttlDays: number;
+}
+
 /** 删除结果（`POST /api/doc/delete`） */
 export interface DeleteDocumentResponse {
   ok: true;
@@ -542,6 +550,11 @@ export interface DeleteDocumentResponse {
   wikiRemoved: boolean;
   wikiSkipReason?: string;
   datasourceSource?: string;
+  /**
+   * 回收站回执（REQ-20261123-005 · S01）：有值 ⇒ 正文与元数据已进站，可恢复；
+   * 缺失 ⇒ 本次未进站，按"不可恢复"提示。
+   */
+  trash?: DocDeleteTrashReceipt;
   /** 成功但需要用户知道的事（源文件没删掉的原因、数据源会重新导入等） */
   warnings: string[];
 }
@@ -559,9 +572,10 @@ export async function precheckDocumentDelete(args: {
 }
 
 /**
- * 删除一篇文档（不可恢复）。
+ * 删除一篇文档：正文与元数据**先移入回收站**（可在回收站恢复），索引在恢复时重建。
  *
- * `wikiDelete` 缺省 true = 连仓库里的 .md 一起删；传 false 只从知识库移除、源文件原地不动。
+ * `wikiDelete` 缺省 true = 连仓库里的 .md 一起删 —— 源文件是物理删除，回收站**不保留**它；
+ * 传 false 只从知识库移除、源文件原地不动。
  * 错误由 `req` 抛出，带 `status` 与 `body.code`：
  * `DOC_NOT_FOUND` / `DOC_EDIT_IN_PROGRESS`（草稿未收口）/ `SCOPE_READONLY` / `DOC_DELETE_FAILED`。
  */

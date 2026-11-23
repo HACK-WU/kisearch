@@ -114,9 +114,15 @@ export function TrashPage(): JSX.Element {
 
   const visible = filter === 'all' ? items : items.filter((i) => i.reason === filter);
   const selectedItems = items.filter((i) => selected.has(keyOf(i)));
-  /** 正文缺失的条目不能恢复（写回去是空文档）——批量路径同样要挡 */
-  const restorable = selectedItems.filter((i) => i.sizeBytes > 0);
-  const brokenSelected = selectedItems.length - restorable.length;
+  /**
+   * 正文缺失的条目不能恢复（写回去是空文档）——批量路径同样要挡。
+   * 组条目也排除：它的回执是 `restored / failed` 明细，与文档的单条回执揉不进一句提示，
+   * 由行内的「恢复整组」单独处理（REQ-20261123-005 · S05）。
+   */
+  const docSelected = selectedItems.filter((i) => i.kind !== 'group');
+  const restorable = docSelected.filter((i) => i.sizeBytes > 0);
+  const brokenSelected = docSelected.length - restorable.length;
+  const groupSelected = selectedItems.length - docSelected.length;
 
   const run = async (fn: () => Promise<string>): Promise<void> => {
     setBusy(true);
@@ -179,7 +185,10 @@ export function TrashPage(): JSX.Element {
           disabled={busy || restorable.length === 0 || !canWrite || isView}
           title={isView
             ? VIEW_WRITE_HINT
-            : !canWrite ? readOnlyHint : brokenSelected > 0 ? `${brokenSelected} 篇正文缺失，恢复只会得到空文档，已排除` : '恢复到原位置'}
+            : !canWrite ? readOnlyHint
+              : groupSelected > 0 ? `已排除 ${groupSelected} 个分组条目，请点行内「恢复整组」`
+                : brokenSelected > 0 ? `${brokenSelected} 篇正文缺失，恢复只会得到空文档，已排除`
+                  : '恢复到原位置'}
           onClick={() => void (async () => {
             const targets = [...restorable];
             const skipped = brokenSelected;
@@ -269,8 +278,9 @@ export function TrashPage(): JSX.Element {
           <tbody>
             {visible.map((item) => {
               const left = daysLeft(item.expiresAt);
-              // 快照里没有正文（sizeBytes=0）时恢复只会写进空串 —— 禁用两条恢复路径
-              const broken = item.sizeBytes === 0;
+              // 快照里没有正文（sizeBytes=0）时恢复只会写进空串 —— 禁用两条恢复路径。
+              // 组条目是例外：空组快照本来就没有正文（它走「恢复整组」分支）
+              const broken = item.kind !== 'group' && item.sizeBytes === 0;
               return (
                 <tr key={keyOf(item)}>
                   <td>
@@ -287,7 +297,19 @@ export function TrashPage(): JSX.Element {
                     />
                   </td>
                   <td>
-                    <div className="gov-cell-name">{item.name}</div>
+                    <div className="gov-cell-name">
+                      {/* 组条目用 ▸ + 徽标区分：不新增筛选段 —— 「分组」与现有 reason 段是两套维度，
+                          混在一行会让计数重复（手动删除里已含组条目），用户会认为数字错乱 */}
+                      {item.kind === 'group' ? `▸ ${item.name}` : item.name}
+                      {item.kind === 'group' ? (
+                        <span className="gov-badge gov-badge--kb" style={{ marginLeft: 6 }}>
+                          {/* docCount 缺失（旧 daemon）时只说「分组」，不要显示「含 undefined 篇」 */}
+                          {typeof item.docCount === 'number'
+                            ? (item.docCount === 0 ? '分组 · 空' : `分组 · 含 ${item.docCount} 篇`)
+                            : '分组'}
+                        </span>
+                      ) : null}
+                    </div>
                     {broken ? <span className="gov-badge gov-badge--temp">正文缺失</span> : null}
                   </td>
                   <td>
@@ -302,22 +324,42 @@ export function TrashPage(): JSX.Element {
                   <td><span className={`gov-days ${left <= 2 ? 'gov-days--hot' : left <= 5 ? 'gov-days--warm' : 'gov-days--calm'}`}>剩 {left} 天</span></td>
                   <td>
                     <span style={{ display: 'inline-flex', gap: 6 }}>
-                      <button
-                        className="gov-btn gov-btn--sm"
-                        disabled={busy || broken || !canWrite || isView}
-                        title={isView ? VIEW_WRITE_HINT : !canWrite ? readOnlyHint : broken ? '快照里没有正文，恢复会得到空文档；请彻底删除' : '恢复到原位置'}
-                        onClick={() => void run(async () => {
-                          const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName });
-                        return `已恢复「${item.name}」${r.expiresAtChanged ? '（已按原期限续期）' : ''}`;
-                      })}>恢复</button>
-                      <button
-                        className="gov-btn gov-btn--ghost gov-btn--sm"
-                        disabled={busy || broken || !canWrite || isView}
-                        title={isView ? VIEW_WRITE_HINT : !canWrite ? readOnlyHint : broken ? '快照里没有正文' : '恢复并改为长期保留'}
-                        onClick={() => void run(async () => {
-                          const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName, targetLifecycle: 'wiki' });
-                        return `「${item.name}」已恢复并沉淀为 wiki（${r.lifecycle}）`;
-                      })}>沉淀为 wiki</button>
+                      {item.kind === 'group' ? (
+                        /* 组行只给「恢复整组」：组内每篇分类各自不同，不提供整组改分类；
+                           彻底删除走勾选 + 顶部批量按钮（与文档条目同一入口） */
+                        <button
+                          className="gov-btn gov-btn--sm"
+                          disabled={busy || !canWrite || isView}
+                          title={isView ? VIEW_WRITE_HINT : !canWrite ? readOnlyHint : '重建分组，并把整组文档与附件写回'}
+                          onClick={() => void run(async () => {
+                            const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName });
+                            if (r.kind === 'group') {
+                              return `已恢复整组「${r.restored.group}」${r.restored.docs} 篇${r.hint ? `；${r.hint}` : ''}`;
+                            }
+                            return `已恢复「${item.name}」`;
+                          })}>恢复整组</button>
+                      ) : (
+                        <>
+                          <button
+                            className="gov-btn gov-btn--sm"
+                            disabled={busy || broken || !canWrite || isView}
+                            title={isView ? VIEW_WRITE_HINT : !canWrite ? readOnlyHint : broken ? '快照里没有正文，恢复会得到空文档；请彻底删除' : '恢复到原位置'}
+                            onClick={() => void run(async () => {
+                              const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName });
+                              if (r.kind === 'group') return `已恢复整组「${r.restored.group}」`;
+                              return `已恢复「${item.name}」${r.expiresAtChanged ? '（已按原期限续期）' : ''}`;
+                            })}>恢复</button>
+                          <button
+                            className="gov-btn gov-btn--ghost gov-btn--sm"
+                            disabled={busy || broken || !canWrite || isView}
+                            title={isView ? VIEW_WRITE_HINT : !canWrite ? readOnlyHint : broken ? '快照里没有正文' : '恢复并改为长期保留'}
+                            onClick={() => void run(async () => {
+                              const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName, targetLifecycle: 'wiki' });
+                              if (r.kind === 'group') return `已恢复整组「${r.restored.group}」`;
+                              return `「${item.name}」已恢复并沉淀为 wiki（${r.lifecycle}）`;
+                            })}>沉淀为 wiki</button>
+                        </>
+                      )}
                     </span>
                   </td>
                 </tr>

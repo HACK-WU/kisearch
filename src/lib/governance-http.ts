@@ -87,7 +87,8 @@ import {
 } from './events/analysis-ask-store.js';
 import { askEventAnalysis, type AskTargetEvent } from './events/analysis-ask-runner.js';
 import { listTrash, readTrashSettings, writeTrashSettings, removeTrashItem } from './trash-store.js';
-import { restoreFromTrash, purgeExpired } from './trash-service.js';
+import { restoreAnyFromTrash, purgeExpired } from './trash-service.js';
+import { withScopeWriteLock } from './scope-write-lock.js';
 import { pendingCount, listPending, scheduleConsume } from './visibility-queue.js';
 import { failureFilePath, type FailureFile } from './visibility-index.js';
 
@@ -1845,7 +1846,13 @@ export async function handleGovernanceRoutes(
               const result = listTrash(member, { ...query, offset: 0 });
               buckets.push({ scope: member, total: result.total });
               settingsByScope.push({ scope: member, settings: readTrashSettings(member) });
-              items.push(...result.items.map(({ dir, ...rest }) => rest as unknown as Record<string, unknown>));
+              // groupSnapshot 只在磁盘上有意义：下发前压成 docCount / groupCount（契约形状）
+              items.push(...result.items.map(({ dir, groupSnapshot, ...rest }) => ({
+                ...rest,
+                ...(groupSnapshot
+                  ? { docCount: groupSnapshot.docCount, groupCount: groupSnapshot.groups.length }
+                  : {}),
+              }) as unknown as Record<string, unknown>));
               total += result.total;
             } catch (err) {
               buckets.push({ scope: member, error: (err as Error).message });
@@ -1872,7 +1879,12 @@ export async function handleGovernanceRoutes(
           ok: true,
           scope: targets.requested,
           total: result.total,
-          items: result.items.map(({ dir, ...rest }) => rest),
+          items: result.items.map(({ dir, groupSnapshot, ...rest }) => ({
+            ...rest,
+            ...(groupSnapshot
+              ? { docCount: groupSnapshot.docCount, groupCount: groupSnapshot.groups.length }
+              : {}),
+          })),
           settings: readTrashSettings(scope),
         });
       }
@@ -1885,12 +1897,17 @@ export async function handleGovernanceRoutes(
          * 但直接调 API 仍可能带视图名。视图不是库，一律拒。
          */
         assertNotScopeView(scope, 'trash-restore');
-        const outcome = restoreFromTrash({
+        /*
+         * 必须持 scope 写锁（REQ-20261123-005 · S04）：组恢复要写树 + N 篇 KB + N 份分片，
+         * 与并发写入强冲突；文档恢复一并纳入（行为不变，只是并发时排队）。
+         * 分派在 `restoreAnyFromTrash` 里按条目 kind 走，端点与坐标都不变。
+         */
+        const outcome = await withScopeWriteLock(scope, 'trash-restore', async () => restoreAnyFromTrash({
           scope,
           group: String(b.group ?? ''),
           dirName: String(b.dirName ?? b.dir_name ?? ''),
           ...(str(b.targetLifecycle) ? { targetLifecycle: str(b.targetLifecycle) as 'wiki' | 'temp' } : {}),
-        });
+        }));
         return outcome.ok
           ? sendJson(res, 200, { ...outcome, scope })
           : sendJson(res, httpStatusFor(outcome.code), { ok: false, scope, code: outcome.code, error: outcome.error });
@@ -1968,7 +1985,8 @@ export async function handleGovernanceRoutes(
             for (const i of failures.items) failureItems.push({ ...i, scope: member } as unknown as Record<string, unknown>);
             trashTotal += trash.total;
             scanned += trash.items.length;
-            for (const item of trash.items.filter((i) => i.sizeBytes === 0)) {
+            // 只对 doc 条目判「正文缺失」：空组快照本来就没有正文，否则每次诊断都报假告警
+            for (const item of trash.items.filter((i) => i.kind !== 'group' && i.sizeBytes === 0)) {
               emptyContent.push({ scope: member, group: item.group, name: item.name, dirName: item.dirName, reason: item.reason });
             }
           } catch (err) {
@@ -2005,7 +2023,8 @@ export async function handleGovernanceRoutes(
            * 这里持续暴露，避免它们被误恢复成空文档。
            */
           emptyContent: trash.items
-            .filter((item) => item.sizeBytes === 0)
+            // 组条目排除在外：空组快照本来就没有正文，不该被当成「坏条目」
+            .filter((item) => item.kind !== 'group' && item.sizeBytes === 0)
             .map((item) => ({ group: item.group, name: item.name, dirName: item.dirName, reason: item.reason })),
           /** `emptyContent` 只扫最近 200 条（limit 上限），更老的条目可能未覆盖 */
           scanned: trash.items.length,

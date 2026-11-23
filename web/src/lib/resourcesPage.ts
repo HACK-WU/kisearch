@@ -343,7 +343,7 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
   },
   {
     id: 'deleteDoc', group: 'feature', label: '删除文档', title: '删除文档', kicker: '06 · DELETE',
-    summary: '按 Group + 文档名删一条知识文档，连带清理 KB 原文、wiki 源文件、向量与全文索引 —— 不可恢复，没有回收站。',
+    summary: '按 Group + 文档名删一条知识文档：正文与元数据先移入回收站（可在回收站恢复），索引在恢复时重建；wiki 源文件仍是物理删除。',
     docAnchor: 'delete-relation',
     params: [
       { flag: '--group <g>', desc: '文档所在 Group（与 --relation 一起用，文档级删除）' },

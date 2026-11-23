@@ -44,12 +44,19 @@ import {
 } from '../lib/group-cache.js';
 import type { Relation } from './scoring.js';
 import { callDaemon, shouldUseDaemonClient } from '../lib/daemon-client.js';
+import { moveGroupToTrash } from './trash-service.js';
+import { removeTrashItem, type TrashReason } from './trash-store.js';
 
 export interface GroupDeleteOptions {
   scope?: string;
   path: string;
   /** MCP 空节点删除：仅允许无子组、无 relation、无 KB 文件 */
   requireEmpty?: boolean;
+  /**
+   * 是否入站（REQ-20261123-005 · S03，默认 true）。
+   * 仅用于观测期应急回滚：`false` 或 `KI_TRASH_DISABLED=1` 时走旧行为（物理删，不可恢复）。
+   */
+  trashEnabled?: boolean;
 }
 
 export interface GroupDeleteTargets {
@@ -80,7 +87,9 @@ export type GroupDeleteErrorCode =
   | 'GROUP_NOT_EMPTY'
   | 'DRAFT_IN_PROGRESS'
   | 'SCOPE_OPERATION_BUSY'
-  | 'VECTOR_MIGRATION_PENDING';
+  | 'VECTOR_MIGRATION_PENDING'
+  /** 回收站入站失败：组快照写不出来，整组删除已中止（未删除任何数据） */
+  | 'TRASH_WRITE_FAILED';
 
 export interface GroupDeleteError {
   ok: false;
@@ -119,6 +128,20 @@ export interface GroupDeleteResult {
   warnings: string[];
   error?: string;
   code?: GroupDeleteErrorCode;
+  /**
+   * 入站回执（REQ-20261123-005 · S03）：进站成功才有。
+   * `trashEnabled=false` / `KI_TRASH_DISABLED=1` 时不出现 —— 此时删除不可恢复。
+   */
+  trash?: {
+    dirName: string;
+    reason: TrashReason;
+    expiresAt: number;
+    ttlDays: number;
+    /** 快照里的篇数（取「分片键 ∪ KB 键」并集后的真实数量） */
+    docs: number;
+    /** 被删组连同子组的节点数 */
+    groups: number;
+  };
 }
 
 interface TreeGroups {
@@ -290,6 +313,34 @@ function loadRelations(scope: string, keys: string[]): CacheRelation[] {
   return keys.flatMap((k) => cache.groups?.[k]?.hot_relations ?? []);
 }
 
+/**
+ * 带归属的读取（REQ-20261123-005 · S03）：入站快照要按 group 分目录存，
+ * 而 `loadRelations` flatMap 之后丢了归属，只能重新按 group 读一遍。
+ */
+function loadRelationsWithGroup(
+  scope: string,
+  keys: string[],
+): Array<{ group: string; name: string; relation: CacheRelation }> {
+  const out: Array<{ group: string; name: string; relation: CacheRelation }> = [];
+  if (hasShardedLayout(scope)) {
+    for (const key of keys) {
+      for (const rel of (loadGroupCache(scope, key)?.hot_relations ?? []) as CacheRelation[]) {
+        out.push({ group: key, name: rel.text, relation: rel });
+      }
+    }
+    return out;
+  }
+  const cache = loadCacheShape(scope) as unknown as {
+    groups?: Record<string, { hot_relations?: CacheRelation[] }>;
+  };
+  for (const key of keys) {
+    for (const rel of cache.groups?.[key]?.hot_relations ?? []) {
+      out.push({ group: key, name: rel.text, relation: rel });
+    }
+  }
+  return out;
+}
+
 /** 共享 docId 保护扫描的组数上限：超限时放弃判定（宁可保留辅助向量，也不误删存活组的） */
 const SURVIVOR_SCAN_GROUP_CAP = 5000;
 
@@ -400,6 +451,15 @@ export async function planGroupDelete(
     return errResult(scope, canonical, 'SCOPE_NOT_INITIALIZED', `scope "${scope}" 尚未初始化`);
   }
 
+  /**
+   * 保留段拦截（REQ-20261123-005 · S02/S03）：`.trash` 就在 kbDir 根下，
+   * 若允许删同名组，`fs.rmSync(kbDir/.trash)` 会连整个回收站一起清空。
+   * **必须在 plan 阶段拒**，不能等入站时才拒 —— 那时删除已经在路上。
+   */
+  if (canonical.split('/').includes('.trash')) {
+    return errResult(scope, canonical, 'INVALID_PATH', '组路径不得包含保留段 ".trash"（与回收站根目录同路径）');
+  }
+
   const resolved = resolveExactGroupPath(scope, canonical);
   if (!resolved) {
     return errResult(scope, canonical, 'GROUP_NOT_FOUND', `Group "${canonical}" 不存在（只精确匹配）`, {
@@ -442,7 +502,8 @@ export async function planGroupDelete(
     },
     // 辅助向量（ki-relation / ki-path）按 group 元数据清扫，条数只有执行时才能确定；
     // 且跨组共享的 docId 会被保留，因此实际删除数可能少于预览值
-    hint: '确认无误后追加 --yes 执行（执行时另会按 group 清扫 ki-relation / ki-path 辅助向量；'
+    hint: '确认无误后追加 --yes 执行（删除前会先把整组移入回收站，可在 Web 回收站恢复；'
+      + '执行时另会按 group 清扫 ki-relation / ki-path 辅助向量；'
       + '跨组共享的同名 relation / 同内容向量会保留，实际删除数可能少于预览）',
   };
 }
@@ -670,6 +731,64 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
     result.vectors.sharedKept = kept;
   }
 
+  /**
+   * ── 入站闸门（REQ-20261123-005 · S03）──
+   *
+   * 必须在**删除任何数据之前**成功：快照没写成就不许删 —— 「删了但没备份」不可逆，
+   * 「删不掉」用户还能重试。与文档级同一纪律（delete-relation.ts:219-254）。
+   *
+   * 篇目集合由 `moveGroupToTrash` 取「分片键 ∪ KB 键」并集，因为真正删数据的是
+   * 下面的 `fs.rmSync(kbGroupDir)`，它删的是磁盘上所有文件。
+   *
+   * 应急回滚：`KI_TRASH_DISABLED=1` 或显式 `trashEnabled:false` → 走旧行为（物理删）。
+   */
+  const trashEnabled = opts.trashEnabled !== false && process.env.KI_TRASH_DISABLED !== '1';
+  let trashReceipt: GroupDeleteResult['trash'];
+  if (trashEnabled) {
+    const moved = moveGroupToTrash({
+      scope,
+      group: target,
+      groups: plan.willDelete.groups,
+      reason: 'manual',
+      relations: loadRelationsWithGroup(scope, plan.willDelete.groups).map((entry) => ({
+        group: entry.group,
+        name: entry.name,
+        snapshot: entry.relation as unknown as Relation,
+      })),
+    });
+    if (!moved.ok) {
+      return { ...result, code: 'TRASH_WRITE_FAILED', error: `${moved.code}: ${moved.error}（未删除任何数据）` };
+    }
+    trashReceipt = {
+      dirName: moved.item.dirName,
+      reason: moved.item.reason,
+      expiresAt: moved.item.expiresAt,
+      ttlDays: moved.item.ttlDays,
+      docs: moved.docs,
+      groups: plan.willDelete.groups.length,
+    };
+  }
+
+  /**
+   * 回滚快照 —— **只在「不可回滚区」之前可用**。
+   *
+   * 窗口 1（删 relations 分片）一旦成功，这批文档在列表里已经看不见了；此时再回滚快照，
+   * 用户就既看不到也找不回 —— 那比留一个垃圾条目严重得多。所以窗口 1 之后的任何失败
+   * 一律**保留快照**，并把 dirName 写进 warnings 让人能去恢复或彻底删除。
+   */
+  const rollbackTrash = (why: string): void => {
+    if (!trashReceipt) return;
+    const removed = removeTrashItem(scope, target, trashReceipt.dirName);
+    result.warnings.push(removed
+      ? `回收站快照已回滚（${why}；未删除任何数据）`
+      : `回收站快照回滚失败，残留条目 ${trashReceipt.dirName}，请在回收站彻底删除`);
+  };
+  /** 进入不可回滚区后的失败：快照是唯一副本，必须留着并告知用户 */
+  const keepTrash = (): void => {
+    if (!trashReceipt) return;
+    result.warnings.push(`回收站已保留整组快照（${trashReceipt.dirName}），可在 Web 回收站恢复或彻底删除`);
+  };
+
   // ── 窗口 1：删除 relations 分片（列表先消失） ──
   try {
     getSharedOperationCoordinator().withMetadataCommitSync(scope, () => {
@@ -686,6 +805,8 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
       }
     });
   } catch (err) {
+    // 分片没删成 = 列表仍完整 ⇒ 还在可回滚区，快照回滚是安全的
+    rollbackTrash('relations 元数据删除失败');
     return { ...result, error: `relations 元数据删除失败: ${(err as Error).message}` };
   }
 
@@ -695,6 +816,8 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
     if (fs.existsSync(kbGroupDir)) {
       const rel = path.relative(getKbDir(scope), kbGroupDir);
       if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        // 分片已删（不可回滚区），快照必须留
+        keepTrash();
         return { ...result, error: `KB 路径越界，拒绝递归删除: ${kbGroupDir}` };
       }
       fs.rmSync(kbGroupDir, { recursive: true, force: true });
@@ -703,6 +826,7 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
       result.deleted.kbDir = true;
     }
   } catch (err) {
+    keepTrash();
     return { ...result, error: `KB 目录删除失败（树节点保留，可重跑）: ${(err as Error).message}` };
   }
 
@@ -724,6 +848,7 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
       result.deleted.tree = removed;
     });
   } catch (err) {
+    keepTrash();
     return { ...result, error: `group-index 树节点删除失败: ${(err as Error).message}` };
   }
 
@@ -759,6 +884,8 @@ async function executeLocal(scope: string, opts: GroupDeleteOptions): Promise<Gr
   if (result.degraded) {
     result.warnings.push('部分向量/FTS 未删除，可用 ki doc delete 清理孤儿索引');
   }
+  // 走到这里才是「整组真的删成了」，此时才把入站回执交出去（中途失败不带 trash）
+  if (trashReceipt) result.trash = trashReceipt;
   result.ok = true;
   return result;
 }

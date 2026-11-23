@@ -22,6 +22,7 @@ import { readJson } from './store.js';
 import { activeDrafts } from './relation-edit-draft.js';
 import { resolveWikiRootDir } from './wiki-sync.js';
 import { executeBatchDelete } from '../delete-relation.js';
+import type { TrashReason } from './trash-store.js';
 import { datasourceManagedFile, normalizeGroup, normalizeRelation, reject } from './doc-identity.js';
 
 export interface DocDeleteInput {
@@ -66,6 +67,14 @@ export interface DocDeleteResult {
   wikiRemoved: boolean;
   wikiSkipReason?: string;
   datasourceSource?: string;
+  /**
+   * 回收站回执（REQ-20261123-005 · S01）。
+   *
+   * 缺省 = 本次未进站：应急开关 `KI_TRASH_DISABLED=1`，或数据源 prune 那种
+   * `wikiDelete=false` 的场景。前端据此决定提示"可在回收站恢复"还是"不可恢复"，
+   * **不得**把缺失当失败。
+   */
+  trash?: { dirName: string; reason: TrashReason; expiresAt: number; ttlDays: number };
   /** 用户该知道但不足以判定失败的事实（源文件没删掉的原因、历史数据按文件名删等） */
   warnings: string[];
 }
@@ -251,6 +260,8 @@ export async function deleteDocument(input: DocDeleteInput): Promise<DocDeleteRe
     wikiRemoved: item.wikiRemoved,
     ...(item.wikiSkipReason ? { wikiSkipReason: item.wikiSkipReason } : {}),
     ...(target.datasourceSource ? { datasourceSource: target.datasourceSource } : {}),
+    // 后端一直在算回收站回执（executeDeleteRelation 的 result.trash），此前只是在这里被丢掉
+    ...(item.trash ? { trash: item.trash } : {}),
     warnings,
   };
 }

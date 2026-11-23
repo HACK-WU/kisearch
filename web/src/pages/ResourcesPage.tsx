@@ -125,12 +125,16 @@ const FEATURE_CAUTION: Partial<Record<ResourceTopicId, { tone: 'warn' | 'info'; 
   scope: {
     tone: 'warn',
     title: 'ki scope clear 会清空该 scope 的 KB 与向量',
-    body: '保留目录与配置，但文档内容不可恢复（scope delete 更彻底，会连目录一起删）。执行前建议先 ki backup。',
+    body: '保留目录与配置，但文档内容不可恢复（scope delete 更彻底，会连目录一起删）。'
+      + '⚠ 清库 / 删 scope 是物理删除，**连该库回收站里的条目也一并清掉** —— 想留的先在回收站恢复。执行前建议先 ki backup。',
   },
   deleteDoc: {
     tone: 'warn',
-    title: '删除不可恢复，也没有回收站',
-    body: 'delete-relation 会同时删 relations-cache、本地 KB 原文、wiki 源文件（物理 unlink）、向量与全文索引，删完只能靠备份或重新导入恢复。'
+    title: '删文档可恢复，删库不行',
+    body: '删单篇文档（Web 删除 / ki_delete_relation）会先把正文与元数据移入回收站，保留期内可在 Web 回收站恢复，向量与全文索引在恢复时重建；'
+      + '但 wiki 源文件是物理 unlink，回收站不保留它。'
+      + '删 group 会把整组先整体移入回收站（MCP 只允许删空组，CLI 可删非空组）；'
+      + '清库 / 删 scope 则是直接物理删除，连该库已有的回收站内容也一并清掉。'
       + '⚠ 别用 ki doc delete 删知识文档：它只清向量层，KB 里的 memoryId 会变成悬空引用。执行前建议先 ki backup。',
   },
   scopeOps: {

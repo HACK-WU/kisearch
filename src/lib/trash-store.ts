@@ -1,16 +1,31 @@
 /**
- * 回收站 · 存储层（REQ-20261113-004 · S-04）
+ * 回收站 · 存储层（REQ-20261113-004 · S-04 ／ REQ-20261123-005 · S02）
  *
- * 落点：`{dataDir}/{scope}/.trash/{group}/{dirName}/`
- *   ├─ meta.json    TrashItem（含 relationSnapshot）
- *   ├─ content.md   原文（local KB 的 Markdown）
- *   └─ assets/…     附件（若存在）
+ * 两种条目共存于同一棵树，靠 `TrashItem.kind` 区分：
  *
- * 三条硬约束：
+ *   doc 条目：`{kbDir}/{scope}/.trash/{group}/{dirName}/`
+ *     ├─ meta.json      TrashItem（kind 缺省 = doc，含 relationSnapshot）
+ *     ├─ content.md     原文（local KB 的 Markdown）
+ *     └─ assets/…       附件（若存在；这是 **group 级共享目录** 的整目录副本）
+ *
+ *   group 条目：`{kbDir}/{scope}/.trash/{被删组路径}/__group__<stamp>/`
+ *     ├─ meta.json      TrashItem（kind='group'，含 groupSnapshot 统计）
+ *     ├─ assets.json    `[{ group, dir }]` 附件清单
+ *     ├─ assets/<序号>/  每个有附件的 group 一份。**绝不按文档复制**：getAssetsDir()
+ *     │                 返回的是 group 级共享目录（同组所有文档共用），按篇复制会
+ *     │                 N 倍膨胀，写满盘后 fail-closed 会让**所有删除都失效**。
+ *     └─ docs/NNNN/     `{ doc.json, content.md }`；身份（group / name）写在 doc.json
+ *
+ * 四条硬约束：
  *   1. **必须落在 scope 数据目录内** —— 才能自动进 `ki backup` 快照（Q2 归零）。
  *      绝不能放 `{sourceDir}/.ki/trash/`：那会在用户 wiki 仓库凭空造目录（`archive.md:213` 前例）；
  *   2. **回收站内的文档永不参与检索** —— 入站前已摘四类索引，恢复时必须重建；
- *   3. **同名重复删除不覆盖** —— 目录名加时间戳后缀，两份都留（恢复时按最新优先）。
+ *   3. **同名重复删除不覆盖** —— 目录名加时间戳后缀，两份都留（恢复时按最新优先）；
+ *   4. **条目坐标恒为 `(group, dirName)`** —— list / restore / purge 全靠这一对定位，
+ *      不引入新 ID；`kind` 缺省按 `'doc'` 解释且**不写回**磁盘（存量兼容）。
+ *
+ * list 的 walk 语义：目录含 `meta.json` 即视为条目并**停止递归**。因此 group 条目
+ * 天然不会被误读成 `docs/` 下的文档，也不需要另开一个回收站根目录。
  *
  * 本层只做读写与路径，业务语义（何时入站、期限重算、索引重建）在 `trash-service.ts`。
  */
@@ -24,12 +39,19 @@ import type { Relation } from './scoring.js';
 
 export type TrashReason = 'temp-expired' | 'event-closed' | 'event-expired' | 'manual';
 
+/** 条目类型：文档快照 / 组快照。缺省按 'doc' 解释（存量条目无该字段） */
+export type TrashKind = 'doc' | 'group';
+
 /** 入站时不需要保存的索引字段：恢复必须重建，沿用旧 ID 会与残留索引撞车 */
 type SnapshotOmit = 'memoryIds' | 'memoryId' | 'ftsIds' | 'ftsLocators' | 'ftsIndexComplete';
 
 export interface TrashItem {
+  /** 条目类型；存量条目无该字段，读侧补成 'doc'，**不写回** */
+  kind?: TrashKind;
   scope: string;
+  /** doc：relation 所属 group；group：被删组自身的规范路径 */
   group: string;
+  /** doc：relation 名；group：组路径最后一段 */
   name: string;
   reason: TrashReason;
   deletedAt: number;
@@ -43,9 +65,42 @@ export interface TrashItem {
   /** ttlDays 是回退值（存量条目无该字段）时为 true */
   ttlAssumed: boolean;
   restoreCount: number;
-  /** 目录名（同名重复删除时带 `__yyyyMMddHHmmss` 后缀） */
+  /** 目录名（同名重复删除时带 `__yyyyMMddHHmmss` 后缀；group 条目固定 `__group__` 前缀） */
   dirName: string;
   hasAssets: boolean;
+  sizeBytes: number;
+  /** 仅 doc */
+  relationSnapshot?: Omit<Relation, SnapshotOmit>;
+  /** 仅 group：组快照统计；每篇的明细在 `docs/NNNN/doc.json` */
+  groupSnapshot?: GroupSnapshot;
+}
+
+/** 组条目的组级统计（明细不在此，避免 list 时读大文件） */
+export interface GroupSnapshot {
+  version: 1;
+  /** 被删组规范路径 */
+  path: string;
+  /** 自身 + 全部子组（含空组）—— 恢复时要逐个重建树节点 */
+  groups: string[];
+  /** = docs/ 子目录数（部分恢复后收缩） */
+  docCount: number;
+  /** 附件清单：每个有附件的 group 一条，dir 是 assets/ 下的序号目录 */
+  assets: Array<{ group: string; dir: string }>;
+}
+
+/**
+ * `docs/NNNN/doc.json`。
+ *
+ * `source` 决定恢复能力，三档来自「篇目集合取 relations 分片键 ∪ KB 键并集」这条规则：
+ *   both       —— 分片与 KB 都有，完整恢复
+ *   shard-only —— 只有元数据、读不到正文（残壳），恢复后无正文
+ *   kb-only    —— 只有正文、分片里没有 relation（元数据不一致），恢复为最小元数据
+ */
+export interface GroupSnapshotDoc {
+  group: string;
+  name: string;
+  source: 'both' | 'shard-only' | 'kb-only';
+  /** 正文字节数（无正文为 0） */
   sizeBytes: number;
   relationSnapshot?: Omit<Relation, SnapshotOmit>;
 }
@@ -199,6 +254,191 @@ export function writeTrashItem(args: WriteTrashArgs): TrashItem {
   return item;
 }
 
+// ─── 组条目（REQ-20261123-005 · S02）──────────────────────────────────────
+
+export interface GroupTrashDocInput {
+  group: string;
+  name: string;
+  source: GroupSnapshotDoc['source'];
+  /** 读不到正文时省略（shard-only 残壳：只剩元数据） */
+  content?: string;
+  relationSnapshot?: Relation;
+}
+
+export interface WriteGroupTrashArgs {
+  scope: string;
+  /** 被删组规范路径 */
+  group: string;
+  reason: TrashReason;
+  now: number;
+  /** 自身 + 全部子组（含空组）—— 恢复时逐个重建树节点 */
+  groups: string[];
+  docs: GroupTrashDocInput[];
+  /** 只传真实存在的附件目录，且**每个 group 一份**（附件是 group 级共享目录） */
+  assets: Array<{ group: string; assetsDir: string }>;
+  keepDays: number;
+}
+
+/** 组条目目录名：`__group__` + 毫秒时间戳，与文档条目、历史组条目互不覆盖 */
+function groupDirName(now: number): string {
+  return `__group__${new Date(now).toISOString().replace(/[-:TZ.]/g, '').slice(0, 17)}`;
+}
+
+/** 索引字段不落快照：恢复必须重建，沿用旧 ID 会与残留索引撞车 */
+function stripSnapshot(snapshot: Relation | undefined): Omit<Relation, SnapshotOmit> | undefined {
+  if (!snapshot) return undefined;
+  const { memoryIds: _mi, memoryId: _m, ftsIds: _f, ftsLocators: _fl, ftsIndexComplete: _fc, ...rest } = snapshot;
+  return rest;
+}
+
+/**
+ * 写入组条目（REQ-20261123-005 · S02）。调用方必须已持 scope 写锁。
+ *
+ * 写入顺序**刻意与可观测性绑定**（写反了就是坑）：
+ *   ① 先写 `meta.json` 骨架 —— 之后任何中途失败都留下一个「可见但可能不完整」的条目，
+ *      用户能在回收站里彻底删除它；反过来（先写 docs、最后写 meta）会留下一堆
+ *      `listTrash` 看不见、用户也删不掉的磁盘垃圾。
+ *   ② 逐篇写 `docs/NNNN/`
+ *   ③ 逐 group 复制附件到 `assets/<序号>/` 并写 `assets.json`
+ *   ④ 回填 `docCount` / `sizeBytes`（**累加得到，不做事后递归统计**：文件数是单篇的
+ *      几十上百倍，递归扫描在写锁内执行会拖住该库全部写操作）
+ *
+ * 任一步失败：本函数**自行回滚**（删掉整个组条目目录）并抛出，调用方据此中止删除，
+ * 保证「没备份成功就绝不删数据」。
+ */
+export function writeGroupTrashItem(args: WriteGroupTrashArgs): TrashItem {
+  const { scope, group, reason, now, groups, docs, assets, keepDays } = args;
+  const dirName = groupDirName(now);
+  const target = trashItemDir(scope, group, dirName);
+  const segs = group.split('/').filter(Boolean);
+
+  const item: TrashItem = {
+    kind: 'group',
+    scope,
+    group,
+    name: segs[segs.length - 1] ?? group,
+    reason,
+    deletedAt: now,
+    expiresAt: now + keepDays * 86_400_000,
+    /** 组条目没有「原期限」概念，保留期即其生命周期；标 ttlAssumed 免得恢复侧按文档口径续期 */
+    ttlDays: keepDays,
+    ttlAssumed: true,
+    restoreCount: 0,
+    dirName,
+    hasAssets: false,
+    sizeBytes: 0,
+    groupSnapshot: { version: 1, path: group, groups, docCount: 0, assets: [] },
+  };
+
+  try {
+    fs.mkdirSync(target, { recursive: true });
+    writeJson(path.join(target, 'meta.json'), item as unknown as Record<string, unknown>);
+
+    let sizeBytes = 0;
+    docs.forEach((doc, index) => {
+      const dir = path.join(target, 'docs', String(index + 1).padStart(4, '0'));
+      fs.mkdirSync(dir, { recursive: true });
+      const snapshot = stripSnapshot(doc.relationSnapshot);
+      const record: GroupSnapshotDoc = {
+        group: doc.group,
+        name: doc.name,
+        source: doc.source,
+        sizeBytes: doc.content ? Buffer.byteLength(doc.content, 'utf-8') : 0,
+        ...(snapshot ? { relationSnapshot: snapshot } : {}),
+      };
+      writeJson(path.join(dir, 'doc.json'), record as unknown as Record<string, unknown>);
+      if (doc.content) fs.writeFileSync(path.join(dir, 'content.md'), doc.content, 'utf-8');
+      sizeBytes += record.sizeBytes;
+    });
+
+    const manifest: Array<{ group: string; dir: string }> = [];
+    assets.forEach((entry, index) => {
+      if (!fs.existsSync(entry.assetsDir)) return;
+      const dir = String(index + 1).padStart(4, '0');
+      fs.cpSync(entry.assetsDir, path.join(target, 'assets', dir), { recursive: true });
+      manifest.push({ group: entry.group, dir });
+      // 统计**源**目录一次即可；复制后再递归一遍是白花写锁时间
+      sizeBytes += dirSizeBytes(entry.assetsDir);
+    });
+    if (manifest.length > 0) {
+      fs.writeFileSync(path.join(target, 'assets.json'), JSON.stringify(manifest, null, 2), 'utf-8');
+    }
+
+    const next: TrashItem = {
+      ...item,
+      hasAssets: manifest.length > 0,
+      sizeBytes,
+      groupSnapshot: { ...item.groupSnapshot!, docCount: docs.length, assets: manifest },
+    };
+    writeJson(path.join(target, 'meta.json'), next as unknown as Record<string, unknown>);
+    return next;
+  } catch (err) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+    } catch { /* 回滚失败：调用方会在 warnings 里提示手动彻底删除 */ }
+    throw err;
+  }
+}
+
+export interface GroupSnapshotDocEntry {
+  /** `docs/` 下的目录名（如 `0001`） */
+  dirName: string;
+  dir: string;
+  /** `doc.json` 缺失或损坏时为 null，恢复侧计入 failed 而不是抛错 */
+  doc: GroupSnapshotDoc | null;
+  content: string;
+}
+
+/** 遍历组条目的 `docs/`（不通过 trashItemDir 逐篇寻址，直接扫目录） */
+export function readGroupSnapshotDocs(scope: string, group: string, dirName: string): GroupSnapshotDocEntry[] {
+  const root = path.join(trashItemDir(scope, group, dirName), 'docs');
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: GroupSnapshotDocEntry[] = [];
+  for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!e.isDirectory()) continue;
+    const dir = path.join(root, e.name);
+    let doc: GroupSnapshotDoc | null = null;
+    try {
+      doc = readJson<GroupSnapshotDoc>(path.join(dir, 'doc.json'));
+    } catch {
+      doc = null;
+    }
+    let content = '';
+    try {
+      content = fs.readFileSync(path.join(dir, 'content.md'), 'utf-8');
+    } catch { /* shard-only 残壳没有正文 */ }
+    out.push({ dirName: e.name, dir, doc, content });
+  }
+  return out;
+}
+
+/** 读组条目的附件清单；`assets.json` 缺失或损坏时返回空数组（降级，不抛错） */
+export function readGroupSnapshotAssets(
+  scope: string,
+  group: string,
+  dirName: string,
+): Array<{ group: string; dir: string; absDir: string }> {
+  const base = trashItemDir(scope, group, dirName);
+  const raw = readJson<unknown>(path.join(base, 'assets.json'));
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ group: string; dir: string; absDir: string }> = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const g = (entry as { group?: unknown }).group;
+    const d = (entry as { dir?: unknown }).dir;
+    if (typeof g !== 'string' || typeof d !== 'string') continue;
+    const absDir = path.join(base, 'assets', d);
+    if (!fs.existsSync(absDir)) continue;
+    out.push({ group: g, dir: d, absDir });
+  }
+  return out;
+}
+
 export interface TrashEntry extends TrashItem {
   /** 目录绝对路径（内部用，不下发 API） */
   dir: string;
@@ -226,7 +466,13 @@ export function listTrash(scope: string, opts: { reason?: TrashReason; limit?: n
         try {
           const item = readJson<TrashItem>(path.join(child, 'meta.json'));
           if (item && typeof item.name === 'string') {
-            out.push({ ...item, group: item.group || groupSegs.join('/'), dir: child });
+            // 存量条目无 kind：读侧补成 'doc'（不写回磁盘，见头注释约束 4）
+            out.push({
+              ...item,
+              kind: item.kind === 'group' ? 'group' : 'doc',
+              group: item.group || groupSegs.join('/'),
+              dir: child,
+            });
           }
         } catch (err) {
           console.warn(`[trash] 跳过损坏条目 ${child}: ${(err as Error).message}`);

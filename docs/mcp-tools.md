@@ -43,8 +43,8 @@
 | 工具 | 作用 | 说明 |
 |---|---|---|
 | `ki_group_create` | 创建 Group 节点 | 父级必须已存在；scope 不存在时自动创建并返回 `createdScope` |
-| `ki_group_delete_empty` | 删除空 Group 节点 | 仅限无子组、无 relation、无 KB 文件；非空节点请用 CLI `ki group delete <path> --yes` |
-| `ki_delete_relation` | 删除单条 Relation（cache + KB + wiki + 向量四层） | 有未结束的 `ki_edit_relation` 草稿时会拒绝，需先 cancel/finish |
+| `ki_group_delete_empty` | 删除空 Group 节点；**删前先把该组移入回收站**（可恢复） | 仅限无子组、无 relation、无 KB 文件；非空节点请用 CLI `ki group delete <path> --yes`。返回体带 `trash{dirName, reason, expiresAt, ttlDays, docs, groups}`；该字段缺失表示未进站（`KI_TRASH_DISABLED=1`），此时不可恢复 |
+| `ki_delete_relation` | 删除单条 Relation（cache + KB + wiki + 向量四层）；**删前先把正文与元数据移入回收站**，保留期内可在 Web 回收站恢复 | 有未结束的 `ki_edit_relation` 草稿时会拒绝，需先 cancel/finish。返回体带 `trash{dirName, reason, expiresAt, ttlDays}`；该字段缺失表示本次未进站（应急开关 `KI_TRASH_DISABLED=1`），此时删除不可恢复 |
 
 ## MCP 未提供的能力
 

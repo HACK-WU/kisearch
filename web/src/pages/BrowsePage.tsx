@@ -1396,10 +1396,10 @@ export function BrowsePage(): JSX.Element {
    * 但**必须由页面给**：关掉阅读区之后，只有页头还能承载「刚才发生了什么」。
    * 8 秒自动消失 —— 删除是低频动作，留一条不会自行退场的提示会占着页头。
    */
-  const [deleteNotice, setDeleteNotice] = useState('');
+  const [deleteNotice, setDeleteNotice] = useState<{ text: string; trashed: boolean } | null>(null);
   useEffect(() => {
     if (!deleteNotice) return;
-    const timer = window.setTimeout(() => setDeleteNotice(''), 8000);
+    const timer = window.setTimeout(() => setDeleteNotice(null), 8000);
     return () => window.clearTimeout(timer);
   }, [deleteNotice]);
 
@@ -1416,11 +1416,19 @@ export function BrowsePage(): JSX.Element {
     const groupLabel = result.group === ROOT_GROUP_KEY ? ROOT_GROUP_FIELD_LABEL : result.group;
     // `deleted:false` 是「它已经不在了」（并发删除），不是失败 —— 回执不能写成「已删除」
     const headline = result.deleted ? '已删除' : '文档已不存在';
-    setDeleteNotice(
-      `${headline}：${groupLabel} / ${result.relation}`
-      + (result.wikiRemoved ? '；wiki 源文件已删除' : '')
-      + (result.warnings.length > 0 ? `；${result.warnings[0]}` : ''),
-    );
+    /*
+     * 回收站回执（REQ-20261123-005 · S01）：`trash` 有值才说"可恢复"。
+     * 缺失的两种场景——应急开关 KI_TRASH_DISABLED=1、数据源 prune（wikiDelete=false）——
+     * 确实没进站，此时承诺"可恢复"就是骗人。
+     */
+    const trash = result.deleted ? result.trash : undefined;
+    setDeleteNotice({
+      text: `${headline}：${groupLabel} / ${result.relation}`
+        + (result.wikiRemoved ? '；wiki 源文件已删除' : '')
+        + (trash ? `；已移入回收站，保留 ${trash.ttlDays} 天` : '')
+        + (result.warnings.length > 0 ? `；${result.warnings[0]}` : ''),
+      trashed: trash !== undefined,
+    });
     closeDocument();
   }, [closeDocument, queryClient]);
 
@@ -1585,9 +1593,18 @@ export function BrowsePage(): JSX.Element {
               {deleteNotice ? (
                 <>
                   <span className="ki-page-head__sep">·</span>
-                  <span className="ki-page-head__notice" role="status" aria-live="polite" title={deleteNotice}>
-                    {deleteNotice}
+                  <span
+                    className="ki-page-head__notice"
+                    role="status"
+                    aria-live="polite"
+                    title={deleteNotice.text}
+                  >
+                    {deleteNotice.text}
                   </span>
+                  {/* 链接放在 notice 之外：notice 有 max-width + ellipsis，嵌进去会被省略号吞掉 */}
+                  {deleteNotice.trashed ? (
+                    <Link className="ki-page-head__notice-link" to="/governance/trash">去回收站</Link>
+                  ) : null}
                 </>
               ) : null}
             </p>

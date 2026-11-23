@@ -53,6 +53,7 @@ import { getRelationsCacheIdentity, loadCacheShape, onScopeRelationsInvalidated 
 import { listRegisteredDataSourceRecords } from './lib/datasource.js';
 import { buildMemberMeta } from './lib/view-member-meta.js';
 import { resolveWikiRootDir } from './lib/wiki-sync.js';
+import { listTrash } from './lib/trash-store.js';
 
 // ─── KB 目录辅助 ───
 
@@ -66,6 +67,30 @@ function removeKbDir(scope: string): boolean {
   if (!fs.existsSync(dir)) return false;
   fs.rmSync(dir, { recursive: true, force: true });
   return true;
+}
+
+/**
+ * 清库 / 删库的回收站预告（REQ-20261123-005 · S05）。
+ *
+ * 这两条命令是物理删除，**连该库的 `.trash` 一起清掉**（`clearKbDir` 遍历删所有条目、
+ * `removeKbDir` 整目录删）。用户以为"清库不动回收站"就会在这里丢掉本想恢复的文档，
+ * 所以执行前必须把条数与体积说出来。读不到回收站时返回空串（不阻断操作）。
+ */
+function trashHint(scope: string): string {
+  try {
+    const { items } = listTrash(scope);
+    if (items.length === 0) return '';
+    let groups = 0;
+    let bytes = 0;
+    for (const item of items) {
+      if (item.kind === 'group') groups += 1;
+      bytes += item.sizeBytes ?? 0;
+    }
+    const mb = (bytes / (1024 * 1024)).toFixed(1);
+    return ` + 回收站 ${items.length} 条${groups > 0 ? `（含 ${groups} 个分组）` : ''}，约 ${mb} MB —— **一并清除且不可恢复**`;
+  } catch {
+    return '';
+  }
 }
 
 /** 清空 KB 目录内容但保留目录本身（scope clear 用） */
@@ -644,7 +669,7 @@ async function executeScopeDeleteLocal(params: { scope: string; yes: boolean; fo
     if (!params.yes) {
       return {
         ok: false,
-        error: `破坏性操作需 --yes 确认：将删除向量 ${vectorCount} 条${kbExists ? ' + KB 目录' : ''}${registered ? ' + 配置条目' : ''}${managedCloneDir ? ` + 托管 clone ${managedCloneDir}` : ''}`,
+        error: `破坏性操作需 --yes 确认：将删除向量 ${vectorCount} 条${kbExists ? ' + KB 目录' : ''}${registered ? ' + 配置条目' : ''}${managedCloneDir ? ` + 托管 clone ${managedCloneDir}` : ''}${kbExists ? trashHint(params.scope) : ''}`,
         requireConfirm: true,
         willDelete: {
           vectorCount, kbExists, registered,
@@ -774,7 +799,7 @@ async function executeScopeClearLocal(params: { scope: string; tags?: string[]; 
       const vectorCount = await vectorCountScope({ scope: params.scope, tags: params.tags });
       return {
         ok: false,
-        error: `破坏性操作需 --yes 确认：将清除向量 ${vectorCount} 条${kbWillClear ? ' + KB 目录内容' : ''}`,
+        error: `破坏性操作需 --yes 确认：将清除向量 ${vectorCount} 条${kbWillClear ? ' + KB 目录内容' : ''}${kbWillClear ? trashHint(params.scope) : ''}`,
         requireConfirm: true,
         willDelete: { vectorCount, kbWillClear },
       };

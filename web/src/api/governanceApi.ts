@@ -395,6 +395,8 @@ export function reopenEvent(scope: string, event: string): Promise<{ ok: true; h
 // ─── 回收站 ───────────────────────────────────────────
 
 export interface TrashItemView {
+  /** 条目类型（后端恒下发；存量条目补成 doc） */
+  kind: 'doc' | 'group';
   scope: string;
   group: string;
   name: string;
@@ -407,6 +409,10 @@ export interface TrashItemView {
   dirName: string;
   hasAssets: boolean;
   sizeBytes: number;
+  /** 仅 kind='group'：组内剩余篇数 */
+  docCount?: number;
+  /** 仅 kind='group'：被删组连同子组的节点数 */
+  groupCount?: number;
 }
 
 export interface TrashSettingsView {
@@ -453,10 +459,43 @@ export function listTrash(
   return req(`/api/governance/trash?${params.toString()}`);
 }
 
+/** 文档恢复结果（形状与既有实现一致，`kind` 缺省即文档） */
+export interface TrashRestoreDocResult {
+  ok: true;
+  kind?: undefined;
+  restored: { group: string; name: string };
+  lifecycle: LifecycleKind;
+  expiresAt?: number;
+  ttlDays?: number;
+  expiresAtChanged: boolean;
+  rebuild: 'pending' | 'done' | 'failed';
+  restoreCount: number;
+  hint?: string;
+}
+
+/** 组恢复结果（REQ-20261123-005 · S04）：部分失败时条目仍留在回收站可重试 */
+export interface TrashRestoreGroupResult {
+  ok: true;
+  kind: 'group';
+  scope: string;
+  restored: { group: string; groups: string[]; docs: number };
+  failed: Array<{
+    group: string;
+    name: string;
+    code: 'RESTORE_NAME_CONFLICT' | 'TRASH_CORRUPTED';
+    error: string;
+  }>;
+  rebuild: 'pending' | 'done' | 'failed';
+  restoreCount: number;
+  hint?: string;
+}
+
+export type TrashRestoreResult = TrashRestoreDocResult | TrashRestoreGroupResult;
+
 export function restoreTrash(
   scope: string,
   args: { group: string; dirName: string; targetLifecycle?: 'wiki' | 'temp' },
-): Promise<{ ok: true; lifecycle: LifecycleKind; expiresAtChanged: boolean; rebuild: string; hint?: string }> {
+): Promise<TrashRestoreResult> {
   return req('/api/governance/trash/restore', {
     method: 'POST',
     body: JSON.stringify({ scope, ...args }),

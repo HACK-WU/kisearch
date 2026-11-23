@@ -18,6 +18,7 @@ Layer 3  kb/<scope>/<group>/       本地 KB（index.json + assets）
 ```
 
 删除 Group 只作用于以上三层，外加向量与 FTS；**不触碰** `source.dir` / wiki 源目录。
+删除前会先把整组移入回收站（可恢复），wiki 源文件不在此列 —— 它们仍是物理删除、不进回收站。
 
 ---
 
@@ -91,12 +92,16 @@ ki group delete <path> [--yes] [--scope <s>]
 
 带 `--yes` 执行后：
 
+- **先入站**：删除任何数据之前，先把整组（组树节点 + 各篇正文与元数据 + 附件）写进回收站
+  `<kb>/.trash/<组路径>/__group__<时间戳>/`。快照写不出来就**中止删除**（`TRASH_WRITE_FAILED`，
+  未删除任何数据）。因此删组是**可恢复**的 —— Web「回收站」页可整组恢复。
+  应急回滚：设 `KI_TRASH_DISABLED=1` 走旧的物理删除行为（不可恢复）。
 - 删除 relations 分片（含子组）、`kb/<scope>/<group>/`（含 assets）、group-index 树节点。
 - 删除 dense 向量与 FTS；失败不阻断元数据删除，结果以 `degraded` + `orphanIds` 表示。
 - **辅助向量清扫**：按写入时落在向量文档上的 `group` 标量字段枚举 `ki-relation` / `ki-path` 并删除，
   解决「删组后 `ki search` 仍命中关系名」。跨组共享的确定性 docId 会被保护：
   同名 relation 或同内容仍被存活组引用时保留（`sharedKept` / `sharedContentKept` 计数）。
-- **不移动、不删除、不进回收站**任何 `source.dir` / wiki 文件；不存在 `.ki/trash`。
+- **不移动、不删除**任何 `source.dir` / wiki 文件 —— 它们**不进回收站**，回收站只保留知识库副本。
 
 ```json
 {
@@ -107,6 +112,10 @@ ki group delete <path> [--yes] [--scope <s>]
     "auxFound": 12, "sharedKept": 0, "sharedContentKept": 0
   },
   "fts": { "deleted": 3, "failed": 0, "orphanIds": [] },
+  "trash": {
+    "dirName": "__group__20261123153000123", "reason": "manual",
+    "expiresAt": 1765180800000, "ttlDays": 7, "docs": 12, "groups": 1
+  },
   "degraded": false,
   "warnings": []
 }

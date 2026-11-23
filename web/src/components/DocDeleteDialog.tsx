@@ -150,7 +150,7 @@ export function DocDeleteDialog({
         <header className="ki-dialog__head">
           <div>
             <h3 className="ki-dialog__title" id="ki-doc-del-title">删除文档</h3>
-            <p className="ki-doc-del__sub">删除后无法恢复，请确认</p>
+            <p className="ki-doc-del__sub">删除后可在回收站恢复，请确认</p>
           </div>
           <button type="button" className="ki-dialog__close" aria-label="关闭删除弹窗" disabled={busy} onClick={onClose}>✕</button>
         </header>
@@ -170,7 +170,9 @@ export function DocDeleteDialog({
           {precheck && !loading ? (
             <>
               <ul className="ki-doc-del__notes">
-                <li>知识库里的正文、元数据，以及这篇文档的向量与全文索引会一并删除。</li>
+                {/* REQ-20261123-005 · S01：正文与元数据其实早就进回收站了（executeDeleteRelation
+                    的入站闸门），旧文案却写「一并删除 / 无法恢复」，与真实行为相反 */}
+                <li>正文与元数据会移入回收站，可恢复；向量与全文索引在恢复时重建（数秒）。</li>
                 <li>正文里指向它的链接、AI 对话里的引用会失效。</li>
                 {/* 勾选框只在「真的删得掉」时出现：删不掉却摆一个勾选框，
                     勾着却什么都不做，与"安全不会删除"的说明互相矛盾（用户会以为它还是会删） */}
@@ -188,6 +190,11 @@ export function DocDeleteDialog({
                         <code className="ki-doc-del__path">{wikiRelPath}</code>
                       </span>
                     </label>
+                    {/* 源文件是物理删除（delete-relation 的硬删分支），回收站只保知识库副本。
+                        必须贴着勾选框说 —— 用户勾选的那一刻才是决策点。 */}
+                    <span className="ki-doc-del__hint" style={{ display: 'block', marginTop: 4 }}>
+                      ⚠ 源文件为物理删除，回收站只保留知识库副本，源文件不会随恢复回来
+                    </span>
                   </li>
                 ) : null}
                 {visibleWiki && !precheck.wikiWillDelete ? (

@@ -39,7 +39,9 @@ export function registerGroupTools(server: McpServer): void {
 
   server.tool(
     'ki_group_delete_empty',
-    '删除空 Group 节点（仅限无子组、无 relation、无 KB 文件）；非空节点请用 CLI: ki group delete <path> --yes',
+    '删除空 Group 节点（仅限无子组、无 relation、无 KB 文件）；非空节点请用 CLI: ki group delete <path> --yes。'
+    + '删除前会先把该组移入**回收站**（返回体 trash 字段给出 dirName / expiresAt / ttlDays），'
+    + '所以是可恢复的；用户问起时请告知可以到 Web 的回收站页恢复。',
     {
       scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),
       path: z.string().describe('组路径，如 "工具库/Redis"（不提供 parent/name 参数）'),
