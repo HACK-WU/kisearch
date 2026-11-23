@@ -186,17 +186,31 @@ export const MCP_TOOL_NAMES: readonly string[] = MCP_TOOL_GROUPS.flatMap((g) => 
 // 仅保留 `analysis-runner` 内硬编码的 90s 总超时作为防挂死兜底 —— 不可配、不进设置页。
 
 export interface AnalysisToolGroup {
-  key: 'code-read' | 'kb-read';
+  key: 'code-read' | 'kb-read' | 'kb-write';
   label: string;
   names: readonly string[];
   descs: Readonly<Record<string, string>>;
+  /**
+   * 危险组：**默认关闭**，开启需在设置页二次确认（REQ-20261123-004）。
+   *
+   * 缺省（undefined）= 只读组，默认开启。与对话侧 `MCP_TOOL_GROUPS.danger` 同义，
+   * 前端据此渲染危险色与「危险 · 默认关」。
+   */
+  danger?: boolean;
 }
 
 /**
- * 「AI 分析」专属工具分组（全部只读、默认全开、不含任何写/删工具）。
+ * 「AI 分析」专属工具分组。
  *
  * 🔴 `fs_*` 工具**仅限事件 AI 分析内部使用**，严禁登记进 `MCP_TOOL_GROUPS` / `CHAT_MCP_TOOLS`
  *    或 `/mcp`（Q2 拍板：不做通用代码问答，也不破坏 `/mcp` scope 鉴权模型）。
+ *
+ * ⚠️ `kb-write` 是**危险组**（REQ-20261123-004，2026-11-23 拍板）：默认关闭、开启需确认。
+ *    默认值由 `danger` 决定（见 `analysisToolDefaultOn`），前端与两个 runner 都按
+ *    「缺键 ⇒ 组默认」判定 —— **改任何一处都会让存量配置静默获得/丢失写权限**。
+ *    刻意**不登记** `ki_delete_relation` / `ki_group_delete_empty`（分析任务无删除闭环）、
+ *    `ki_bulk_store`（入参为任意本地路径，需先加白名单）、`ki_edit_relation`
+ *    （finish 异步需轮询，易改坏长文档），理由见 REQ-20261123-004 §4。
  */
 export const ANALYSIS_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
   {
@@ -221,15 +235,47 @@ export const ANALYSIS_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
       ki_tag_list: '查看知识库标签',
     },
   },
+  {
+    key: 'kb-write',
+    label: '写入（改动事件所在知识库）',
+    danger: true,
+    names: ['ki_store', 'ki_sync_relation', 'ki_bulk_sync_relation', 'ki_group_create'],
+    descs: {
+      ki_store: '写入向量索引（仅索引，不生成文档）',
+      ki_sync_relation: '写入 / 更新文档与索引',
+      ki_bulk_sync_relation: '批量写入多条文档',
+      ki_group_create: '在 Group 树中新建节点',
+    },
+  },
 ];
 
 export const ANALYSIS_TOOL_NAMES: readonly string[] = ANALYSIS_TOOL_GROUPS.flatMap((g) => [...g.names]);
 
+/** 分析域的危险（写入）工具名 —— 执行层据此打步骤标记，前端据此渲染危险组 */
+export const ANALYSIS_WRITE_TOOL_NAMES: readonly string[] = (
+  ANALYSIS_TOOL_GROUPS.find((g) => g.key === 'kb-write')?.names ?? []
+);
+
+/**
+ * 某工具在分析域的**默认开关**：危险组默认关，其余默认开。
+ *
+ * ★ 这是「缺键」语义的唯一来源：`normalizeAnalysisSection` 用它做基线，执行层在
+ *   `tools` 缺键时也按它判定。历史上这里是「遍历全部工具名置 true」，新增写工具时
+ *   会让**存量配置在升级后静默获得写权限** —— 改这里等于改所有旧配置的默认行为，
+ *   必须配 `test/chat/prompt-config.test.ts` 的「旧配置升级后写工具为关」用例。
+ */
+export function analysisToolDefaultOn(name: string): boolean {
+  const group = ANALYSIS_TOOL_GROUPS.find((g) => g.names.includes(name));
+  return group ? group.danger !== true : false;
+}
+
 function defaultAnalysisTools(): Record<string, boolean> {
   const out: Record<string, boolean> = {};
-  for (const name of ANALYSIS_TOOL_NAMES) out[name] = true;
+  for (const name of ANALYSIS_TOOL_NAMES) out[name] = analysisToolDefaultOn(name);
   return out;
 }
+
+
 
 // ─── AI 查找专属工具分组（REQ-20261116-005）──────────────
 //

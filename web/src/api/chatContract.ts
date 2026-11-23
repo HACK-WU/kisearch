@@ -505,12 +505,18 @@ export interface AnalysisConfig {
   reasoningEffort?: string;
 }
 
-/** AI 分析工具分组（只读，默认全开） */
+/** AI 分析工具分组（只读默认开；`danger` 组默认关、开启需二次确认） */
 export interface AnalysisToolGroup {
-  key: 'code-read' | 'kb-read';
+  key: 'code-read' | 'kb-read' | 'kb-write';
   label: string;
   names: string[];
   descs?: Record<string, string>;
+  /**
+   * 危险组：默认关闭、开启需确认（REQ-20261123-004）。
+   *
+   * 可选 —— 旧版 daemon 不返回该字段，此时按只读组（默认开）处理。
+   */
+  danger?: boolean;
 }
 
 /** 能力级提示词载体（与后端 `CapabilityPrompt` 同形状） */

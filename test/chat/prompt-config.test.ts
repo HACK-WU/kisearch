@@ -634,7 +634,7 @@ describe('能力级提示词（analysisPrompt / findPrompt）', () => {
 });
 
 describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
-  it('默认配置带独立 analysis 域：8 个只读工具全开、含 builtin-code-locate skill', () => {
+  it('默认配置带独立 analysis 域：8 个只读工具全开、写入组默认关、含 builtin-code-locate skill', () => {
     const base = defaultPromptConfig();
     assert.ok(base.analysis, '应包含 analysis 域');
     assert.equal(base.analysis!.skills.length, 1);
@@ -644,7 +644,32 @@ describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
     for (const tool of ['fs_read', 'fs_grep', 'fs_find', 'fs_ls', 'ki_get_module_info', 'ki_search', 'ki_group_list', 'ki_tag_list']) {
       assert.equal(base.analysis!.tools[tool], true, `${tool} 默认应开启`);
     }
+    // REQ-20261123-004：写入是危险组，默认必须关 —— 防「新增工具即默认授权」
+    for (const tool of ['ki_store', 'ki_sync_relation', 'ki_bulk_sync_relation', 'ki_group_create']) {
+      assert.equal(base.analysis!.tools[tool], false, `${tool} 默认必须关闭（危险组）`);
+    }
+    // 刻意不纳入分析面的四个工具：连开关都不该出现
+    for (const tool of ['ki_delete_relation', 'ki_group_delete_empty', 'ki_bulk_store', 'ki_edit_relation']) {
+      assert.equal(base.analysis!.tools[tool], undefined, `${tool} 不应登记进分析工具面`);
+    }
     assert.equal(base.tools['fs_read'], undefined, '对话 tools 不得混入 fs_read');
+  });
+
+  it('旧配置（analysis.tools 无写入键）升级后写工具为关 —— 缺键不得视作开启', () => {
+    // 模拟升级前落盘的配置：只有 8 个只读工具键
+    fs.writeFileSync(promptConfigPath(cfg), JSON.stringify({
+      analysis: {
+        tools: {
+          fs_read: true, fs_grep: true, fs_find: true, fs_ls: true,
+          ki_get_module_info: true, ki_search: true, ki_group_list: true, ki_tag_list: true,
+        },
+      },
+    }), 'utf-8');
+    const r = readPromptConfig(cfg);
+    assert.equal(r.issue, null);
+    for (const tool of ['ki_store', 'ki_sync_relation', 'ki_bulk_sync_relation', 'ki_group_create']) {
+      assert.equal(r.config.analysis!.tools[tool], false, `${tool} 缺键必须回落为关`);
+    }
   });
 
   it('内置 code-locate 带「先查知识库」纪律（不再把检索写成可选步骤）', () => {
@@ -660,6 +685,15 @@ describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
     assert.ok(content.includes('limit: 5'), '检索口径要写死（limit），避免模型随手放大');
     assert.ok(content.includes('unconfirmed'), '0 命中要留痕到 unconfirmed，不能静默跳过');
     assert.equal(content.includes('至少检索 2 次'), false, '硬限制已撤回：改由程序预取保证确定性');
+    // REQ-20261123-004：写入工具默认关，靠正文约束「什么时候才写」
+    assert.ok(content.includes('写入知识库的纪律'), '必须含写入章节');
+    assert.ok(content.includes('写前必读'), '写前必须读同名文档，避免覆盖人工内容');
+    assert.ok(content.includes('最多写 3 篇'), '写入要有上限，避免模型批量刷库');
+    // 四个写工具的分工与落点（2026-11-23 补齐）：没有这些，模型只知道「可以写」而不知道「写哪 / 何时批量 / 何时建组」
+    assert.ok(content.includes('**落点**'), '必须说明写到哪个 group');
+    assert.ok(content.includes('批量判据'), '必须给出 sync / bulk 的选用判据');
+    assert.ok(content.includes('不要先调 `ki_group_create`'), 'sync 会自动补建 Group，避免多建空组');
+    assert.ok(content.includes('不要复制整篇源码'), '写入内容口径：结论 + 证据，不搬源码');
   });
 
   it('targetDirs 支持 defaultDir + byScope 映射，拒绝相对路径与系统敏感路径', () => {

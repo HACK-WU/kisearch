@@ -28,18 +28,22 @@ import {
   type ToolDef,
 } from '../chat/llm-client.js';
 import {
+  ANALYSIS_WRITE_TOOL_NAMES,
+  analysisToolDefaultOn,
   defaultPromptConfig,
   readPromptConfig,
   resolveAnalysisTargetDir,
   type AnalysisConfig,
   type PromptSkill,
 } from '../chat/prompt-config.js';
+import { getChatTool, type ChatToolDescribe } from '../chat/mcp-tool-registry.js';
 import { serializeToolResponse } from '../chat/retrieval/tool-response.js';
 import { renderSkillLoadedBlock, USE_SKILL_TOOL_NAME } from '../chat/retrieval/tool-loop.js';
 import { getSharedOperationCoordinator } from '../operation-coordinator.js';
 import { listRegisteredDataSourceRecords } from '../datasource.js';
 import { listTaskRecords } from '../task-registry.js';
 import { withScopeWriteLock } from '../scope-write-lock.js';
+import { isScopeReadonlySafe } from '../scope-policy.js';
 import { GovernanceError } from '../governance-errors.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch, PAGE_MIN_CHARS } from '../../get-module-info.js';
 import { executeSearch } from '../../search.js';
@@ -540,7 +544,11 @@ async function runRecallPrefetch(args: {
  * 为什么单独注入而不写进用户模板：目录是配置项、工具是可开关的，写死进模板必然与现实漂移
  * （历史提示词把 fs_find/fs_grep/fs_ls/fs_read 写死过）；且用户改模板时不该有机会把它删掉。
  */
-function buildRuntimeEnv(targetDir: string, toolNames: readonly string[]): string {
+function buildRuntimeEnv(
+  targetDir: string,
+  toolNames: readonly string[],
+  warnings: readonly string[] = [],
+): string {
   /*
    * 只给**目录名**，不给绝对路径：这段文本随请求发往上游模型，绝对路径等于把用户名与
    * 服务器目录结构外发；而模型实际需要的信息只是「有一个根、工具返回的路径相对它」。
@@ -553,7 +561,21 @@ function buildRuntimeEnv(targetDir: string, toolNames: readonly string[]): strin
       : '代码根目录：未配置（读不到代码；需先在事件页设置目标目录后重试）',
     `本次可用工具：${toolNames.length > 0 ? toolNames.join(' / ') : '（无，无法读取代码）'}`,
     '只使用上面列出的工具；不要调用未列出的工具。',
+    ...warnings,
   ].join('\n');
+}
+
+/**
+ * 写入相关的运行期提示（R5）：写入组已开启但当前库只读时**提前**告知模型。
+ *
+ * 为什么要提示：`SCOPE_READONLY` 会兜底拒绝，但模型看不到库属性，会反复重试注定失败的
+ * 写操作，把轮次耗在不可能成功的调用上。
+ */
+function buildWriteWarnings(scope: string, analysisCfg: AnalysisConfig, cfg: KiConfig): string[] {
+  const writeOn = ANALYSIS_WRITE_TOOL_NAMES.filter((n) => isAnalysisToolEnabled(analysisCfg, n));
+  if (writeOn.length === 0) return [];
+  if (!isScopeReadonlySafe(scope, cfg)) return [];
+  return [`注意：当前知识库「${scope}」为只读，写入工具（${writeOn.join(' / ')}）会因 SCOPE_READONLY 失败；不要尝试写入。`];
 }
 
 function buildAnalysisSkillCatalog(skills: readonly PromptSkill[]): string | null {
@@ -793,6 +815,75 @@ export function buildKbReadToolEntries(
   ];
 }
 
+/** 写工具的步骤标签（过程区展示；`describe` 只能拿到 chat 侧的 query/args） */
+const WRITE_TOOL_LABELS: Readonly<Record<string, string>> = {
+  ki_store: '写入向量',
+  ki_sync_relation: '写入文档',
+  ki_bulk_sync_relation: '批量写入文档',
+  ki_group_create: '新建 Group',
+};
+
+/** chat 侧展示摘要 → 分析侧 `{ label, summary }`（分析只认这两个字段） */
+function summarizeChatDesc(d: ChatToolDescribe): string {
+  if (typeof d.query === 'string' && d.query) return d.query.slice(0, 80);
+  const entries = Object.entries(d.args ?? {});
+  return entries.map(([k, v]) => `${k}=${String(v)}`).join(' ').slice(0, 80);
+}
+
+/** 统一工具返回形状：`AnalysisToolEntry.run` 声明返回对象，避免数组/标量让序列化变形 */
+function toRecordResult(value: unknown): Record<string, unknown> {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return { result: value };
+}
+
+/**
+ * 分析域「写入」工具装配（REQ-20261123-004）。
+ *
+ * 实现**复用对话侧 `CHAT_MCP_TOOLS` 的同一份条目**（工具定义 / 入参解析 / 执行），
+ * 不另写一套 `execute*` 调用 —— 排队车道（OperationCoordinator 的 `write` 串行）、
+ * 工具超时、配置快照、只读库门禁（`SCOPE_READONLY`）都由它继承，避免两处漂移。
+ *
+ * ⚠️ 与只读工具的两点差异（有意）：
+ * ① `submitScoped` 用**执行时**的磁盘配置（而非分析启动时的快照）—— 写操作应按最新配置执行；
+ * ② 失败以 `{ error }` 返回、由调用方记 error 步骤，**不中断分析**（需求 H7）。
+ */
+export function buildKbWriteToolEntries(scope: string): readonly AnalysisToolEntry[] {
+  return ANALYSIS_WRITE_TOOL_NAMES.flatMap((name) => {
+    const chat = getChatTool(name);
+    // 名称登记在 `ANALYSIS_TOOL_GROUPS.kb-write` 却没在对话注册表实现 ⇒ 装配期直接抛，
+    // 否则表现为「开关打开了但模型永远调不到」，排查成本极高（fail-loud）
+    if (!chat) throw new Error(`分析写入工具 ${name} 未在 CHAT_MCP_TOOLS 注册，无法装配`);
+    const label = WRITE_TOOL_LABELS[name] ?? name;
+    return [{
+      name,
+      def: chat.def,
+      describe: (args) => {
+        try {
+          return { label, summary: summarizeChatDesc(chat.describe(chat.parse(JSON.stringify(args ?? {})))) };
+        } catch {
+          // 入参非法时不要连过程区一起炸：标签保留、摘要留空，真实错误由 run 抛出
+          return { label, summary: '' };
+        }
+      },
+      // 落点不设 group 级白名单（2026-11-23 用户拍板）：scope 由程序注入、模型无法指定其他库，
+      // "只能写事件所在库"已是硬边界；更细的 Group 约束不做，避免两套口径互相打脸
+      run: async (args) => toRecordResult(await chat.run(scope, chat.parse(JSON.stringify(args ?? {})))),
+    }];
+  });
+}
+
+/**
+ * 某工具本轮是否启用：**显式值优先，缺键回落到组默认**。
+ *
+ * 与旧写法 `tools[name] !== false` 的区别只在缺键时：危险组缺键必须视为关。
+ * `normalizeAnalysisSection` 正常会补全整张表，这里是防御性兜底（旧配置 / 手工改文件）。
+ */
+export function isAnalysisToolEnabled(cfg: AnalysisConfig, name: string): boolean {
+  return cfg.tools[name] ?? analysisToolDefaultOn(name);
+}
+
 function probeGitShortCommit(realRoot: string): Promise<string | null> {
   return new Promise((resolve) => {
     if (!fs.existsSync(path.join(realRoot, '.git'))) {
@@ -998,7 +1089,7 @@ export async function startEventAnalysis(
   const realRoot = dirCheck.realRoot;
 
   // 工具全关检查（至少 1 个 fs_* 开启）
-  const hasFsTool = ['fs_read', 'fs_grep', 'fs_find', 'fs_ls'].some((t) => analysisCfg.tools[t] !== false);
+  const hasFsTool = ['fs_read', 'fs_grep', 'fs_find', 'fs_ls'].some((t) => isAnalysisToolEnabled(analysisCfg, t));
   if (!hasFsTool) {
     throw new GovernanceError(
       'ANALYSIS_TOOLS_ALL_DISABLED',
@@ -1159,8 +1250,9 @@ async function executeAnalysisBackground(input: {
   const allEntries = [
     ...createFsToolEntries(fsCtx),
     ...buildKbReadToolEntries(scope, cfg, deps),
+    ...buildKbWriteToolEntries(scope),
   ];
-  const enabledEntries = allEntries.filter((e) => analysisCfg.tools[e.name] !== false);
+  const enabledEntries = allEntries.filter((e) => isAnalysisToolEnabled(analysisCfg, e.name));
   const entryMap = new Map(enabledEntries.map((e) => [e.name, e] as const));
 
   const callableSkills = analysisCfg.skills.filter((s) => s.enabled);
@@ -1181,11 +1273,15 @@ async function executeAnalysisBackground(input: {
     analysisCfg.prompt.content.trim(),
     ...inlineSkills.map((s) => `【已加载 Skill：${s.name}】\n${s.content.trim()}`),
     skillCatalog ?? '',
-    buildRuntimeEnv(realRoot, [
-      ...enabledEntries.map((e) => e.name),
-      // use_skill 不在 enabledEntries 里（它是按需加载器，不是数据工具），但不列出来模型会不敢用
-      ...(onDemandSkills.length > 0 ? ['use_skill'] : []),
-    ]),
+    buildRuntimeEnv(
+      realRoot,
+      [
+        ...enabledEntries.map((e) => e.name),
+        // use_skill 不在 enabledEntries 里（它是按需加载器，不是数据工具），但不列出来模型会不敢用
+        ...(onDemandSkills.length > 0 ? ['use_skill'] : []),
+      ],
+      buildWriteWarnings(scope, analysisCfg, cfg),
+    ),
     buildOutputTail(inferAnalysisView(event.typeId)),
   ].filter(Boolean);
   if (resume) {
@@ -1468,7 +1564,13 @@ async function executeAnalysisBackground(input: {
         let callErr: string | undefined;
         try {
           resultObj = await entry.run(parsedArgs);
+          /*
+           * 失败判定必须同时看 `ok === false`：批量写（ki_bulk_sync_relation）部分失败时
+           * 返回的是 `{ ok:false, results:[…] }` 而**没有** error 字段 —— 只看 error 会把
+           * 部分失败记成"写入成功"（假成功，过程区与 unconfirmed 都不会提醒）。
+           */
           if (typeof resultObj.error === 'string') callErr = resultObj.error;
+          else if (resultObj.ok === false) callErr = '工具返回 ok:false（细节见返回体）';
         } catch (err) {
           callErr = (err as Error).message;
           resultObj = { error: callErr };
@@ -1486,7 +1588,12 @@ async function executeAnalysisBackground(input: {
           break;
         }
 
-        const tagWrap = entry.name.startsWith('fs_') ? 'source_code' : 'kb_doc';
+        // 写工具与「读知识库」分开包裹：模型能一眼看出这是写入结果，而不是又读了一篇文档（R7）
+        const tagWrap = entry.name.startsWith('fs_')
+          ? 'source_code'
+          : ANALYSIS_WRITE_TOOL_NAMES.includes(entry.name)
+            ? 'kb_write_result'
+            : 'kb_doc';
         const serialized = serializeToolResponse(resultObj, ANALYSIS_TOOL_RESPONSE_CHARS);
         messages.push({
           role: 'tool',

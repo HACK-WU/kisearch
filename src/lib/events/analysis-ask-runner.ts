@@ -25,6 +25,7 @@ import {
 import { createAskLimiter } from '../chat/ask/ask-limiter.js';
 import { ASK_TOOL_MAX_ROUNDS, ASK_QUESTION_MAX_CHARS } from '../chat/ask/ask-contract.js';
 import {
+  ANALYSIS_WRITE_TOOL_NAMES,
   defaultPromptConfig,
   readPromptConfig,
   resolveAnalysisTargetDir,
@@ -38,6 +39,8 @@ import {
   isAnalysisActive,
   readNormalizedAnalysisDoc,
   buildKbReadToolEntries,
+  buildKbWriteToolEntries,
+  isAnalysisToolEnabled,
   ANALYSIS_TOOL_RESPONSE_CHARS,
   DSML_FORCE_ANSWER_SYSTEM,
 } from './analysis-runner.js';
@@ -250,8 +253,10 @@ function buildAskToolEntries(
     }
   }
   const kbEntries = buildKbReadToolEntries(scope, cfg, deps?.kbExecutor ? { kbExecutor: deps.kbExecutor } : undefined);
-  const entries = [...fsEntries, ...kbEntries].filter(
-    (e) => analysisCfg.tools[e.name as keyof AnalysisConfig['tools']] !== false,
+  // 写入组与分析共用同一份 `analysis.tools`（REQ-20261123-004 H4；与 REQ-20261123-002 REQ-06 一致）
+  const writeEntries = buildKbWriteToolEntries(scope);
+  const entries = [...fsEntries, ...kbEntries, ...writeEntries].filter(
+    (e) => isAnalysisToolEnabled(analysisCfg, e.name),
   );
   return { entries, targetDir };
 }
@@ -512,13 +517,20 @@ export async function askEventAnalysis(
         }
         const serialized = serializeToolResponse(resultObj, ANALYSIS_TOOL_RESPONSE_CHARS);
         const stepId = `r${round}-tool-${call.id}`;
+        // 写入类工具的结果不是"读到的内容"：摘要与包裹标签都要与读取区分（R7，追问侧同口径）
+        const isWriteTool = ANALYSIS_WRITE_TOOL_NAMES.includes(call.name);
+        // `ok === false` 也要算失败：批量写部分失败时只有 ok:false、没有 error 字段
         const resultSummary = typeof resultObj.error === 'string'
           ? `失败：${resultObj.error}`
-          : call.name.startsWith('fs_')
-            ? '已读取源码片段'
-            : '已读取知识库内容';
+          : resultObj.ok === false
+            ? '失败：工具返回 ok:false'
+            : call.name.startsWith('fs_')
+              ? '已读取源码片段'
+              : isWriteTool
+                ? '已写入知识库'
+                : '已读取知识库内容';
         emitStep(stepId, 'tool', `第 ${round + 1} 轮 · ${call.name}`, resultSummary);
-        const tagWrap = call.name.startsWith('fs_') ? 'source_code' : 'kb_doc';
+        const tagWrap = call.name.startsWith('fs_') ? 'source_code' : isWriteTool ? 'kb_write_result' : 'kb_doc';
         messages.push({
           role: 'tool',
           tool_call_id: call.id,

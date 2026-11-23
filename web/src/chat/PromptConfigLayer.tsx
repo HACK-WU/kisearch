@@ -1076,7 +1076,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   const toggleAnalysisSkill = (id: string, anchor?: HTMLElement): void => {
     const target = analysisCfg.skills.find((s) => s.id === id);
     const need = ANALYSIS_SKILL_REQUIRED_TOOLS[id];
-    if (target && !target.enabled && need && analysisCfg.tools[need] !== true) {
+    if (target && !target.enabled && need && !analysisToolOn(need)) {
       setConfirm({
         title: `需先启用 ${need} 工具`,
         text: '请先开启这个只读工具，再回来启用该 skill。',
@@ -1094,8 +1094,26 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   };
 
   const analysisGroups = data?.analysisToolGroups ?? [];
+  /**
+   * 某工具当前是否启用（**缺键按所属组默认**：危险组关、只读组开）。
+   *
+   * skill ↔ 工具依赖判断也走这里：旧写法 `analysisCfg.tools[need] !== true` 会把
+   * 「缺键的只读工具」误判成关闭，从而误报「需先启用 fs_read」。
+   */
+  const analysisToolOn = (name: string): boolean => (
+    analysisCfg.tools[name] ?? (analysisGroups.find((g) => g.names.includes(name))?.danger !== true)
+  );
+  /**
+   * 危险组默认关 —— **缺键时按所属组的 `danger` 判定**，不能一律视作开启。
+   *
+   * ⚠️ 与对话面板的 `draft?.tools[n] === true`（缺键=关）语义相反：分析侧历史上是
+   * 「缺键=开」（只读组默认全开）。新增写入组若沿用旧写法，旧配置会渲染成全开。
+   */
   const analysisToolEntries = useMemo(
-    () => analysisGroups.map((g) => ({ ...g, rows: g.names.map((n) => ({ name: n, on: analysisCfg.tools[n] !== false })) })),
+    () => analysisGroups.map((g) => ({
+      ...g,
+      rows: g.names.map((n) => ({ name: n, on: analysisCfg.tools[n] ?? g.danger !== true })),
+    })),
     [analysisGroups, analysisCfg.tools],
   );
   /**
@@ -1744,7 +1762,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                       isDefault={isDefaultAnalysisSkill(s)}
                       stale={isStaleBuiltin(s, data?.defaults.analysis?.skills.find((d) => d.id === s.id)?.content)}
                       disabled={!s.enabled}
-                      {...(need && analysisCfg.tools[need] !== true ? { note: `需先启用 ${need} 工具` } : {})}
+                      {...(need && !analysisToolOn(need) ? { note: `需先启用 ${need} 工具` } : {})}
                       {...(need ? { onNoteClick: () => revealTool(need) } : {})}
                       onToggleEnabled={(e) => toggleAnalysisSkill(s.id, e.currentTarget)}
                       onClick={() => setModal({ kind: 'analysis-skill', id: s.id })}
@@ -1827,18 +1845,22 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               </div>
             </div>
 
-            {/* 5. 工具与权限（全部只读 · 默认全开） */}
+            {/* 5. 工具与权限（只读默认开；写入为危险组，默认关且开启需确认） */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">工具与权限</span>
               <p className="ki-chat-cfg__hint">
-                全部为只读工具且默认全开；源码只读工具（fs_*）仅限事件「AI 分析」使用，其他场景不可见。
+                只读工具默认全开；写入为<b>危险工具</b>，默认关闭 —— 开启即授权 AI 在分析过程中直接改动
+                「事件所在知识库」（全局生效，对所有库的所有分析），且分析在后台运行、执行时不会有逐次确认。
+                源码只读工具（fs_*）仅限事件「AI 分析」使用，其他场景不可见。
               </p>
               {analysisToolEntries.map((g) => (
                 <div key={g.key}>
-                  <p className="ki-chat-cfg__group">
+                  <p className={`ki-chat-cfg__group${g.danger ? ' ki-chat-cfg__group--danger' : ''}`}>
                     <span className="ki-chat-cfg__group-dot" aria-hidden="true" />
                     {g.label}
-                    <span className="ki-chat-cfg__group-n">{g.rows.length} 个 · 默认开</span>
+                    <span className="ki-chat-cfg__group-n">
+                      {g.rows.length} 个{g.danger ? ' · 危险 · 默认关' : ' · 默认开'}
+                    </span>
                   </p>
                   {g.rows.map((r) => (
                     <div className="ki-chat-cfg__tool" key={r.name} data-tool={r.name}>
@@ -1853,7 +1875,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                         aria-checked={r.on}
                         aria-label={r.name}
                         disabled={readOnly}
-                        className="ki-chat-cfg__sw"
+                        className={`ki-chat-cfg__sw${g.danger ? ' ki-chat-cfg__sw--danger' : ''}`}
                         onClick={(e) => {
                           const next = !r.on;
                           const dependents = analysisCfg.skills.filter(
@@ -1869,6 +1891,20 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                                 skills: a.skills.map((s) => (
                                   ANALYSIS_SKILL_REQUIRED_TOOLS[s.id] === r.name ? { ...s, enabled: false } : s
                                 )),
+                              })),
+                              anchor: e.currentTarget,
+                            });
+                            return;
+                          }
+                          // 危险组开启需确认（关闭不需）：分析在后台跑，开启后 AI 无人值守写库
+                          if (next && g.danger) {
+                            setConfirm({
+                              title: '开启危险工具',
+                              text: `${r.name} 会写入「事件所在知识库」（全局生效，对所有库的所有分析）。`
+                                + '分析在后台运行，AI 执行时不会有逐次确认，写入后也不提供回滚。',
+                              onYes: () => mutateAnalysis((a) => ({
+                                ...a,
+                                tools: { ...a.tools, [r.name]: true },
                               })),
                               anchor: e.currentTarget,
                             });
