@@ -279,8 +279,8 @@ export function EventRefUploadModal(props: EventRefUploadModalProps): JSX.Elemen
   );
 
   return (
-    <div className="gov-modal-mask" onClick={close}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) close(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>上传文件并加入参考文档</div>
           <div className="gov-hint">

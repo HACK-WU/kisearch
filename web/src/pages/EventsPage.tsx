@@ -1990,8 +1990,8 @@ function AddStageModal(args: {
   const becomesTerminal = true; // 追加阶段总在末尾
 
   return (
-    <div className="gov-modal-mask" onClick={args.onClose}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) args.onClose(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>追加阶段</div>
           <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>
@@ -2082,8 +2082,8 @@ function TransitionModal(args: {
   const same = target === args.currentKey;
 
   return (
-    <div className="gov-modal-mask" onClick={args.onClose}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) args.onClose(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>流转事件</div>
           <div className="gov-hint">#{args.event.shortId} {args.event.title} · 当前「{args.stages[curIdx]?.name ?? '未知'}」</div>
@@ -2201,8 +2201,8 @@ function NewEventModal(args: {
   const VIS_TEXT: Record<Visibility, string> = { full: '语义+全文', 'fts-only': '仅全文', hidden: '不可检索' };
 
   return (
-    <div className="gov-modal-mask" onClick={args.onClose}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) args.onClose(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>新建事件</div>
           <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>
@@ -2417,8 +2417,8 @@ function NewTypeModal(args: {
   const canSubmit = name.trim().length > 0 && stages.length >= 2;
 
   return (
-    <div className="gov-modal-mask" onClick={args.onClose}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) args.onClose(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>新建事件类型</div>
           <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>先建两条骨架阶段，创建后可逐个追加</div>

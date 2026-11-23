@@ -466,8 +466,8 @@ export function TrashPage(): JSX.Element {
       ) : null}
 
       {settingsOpen ? (
-        <div className="gov-modal-mask" onClick={() => setSettingsOpen(false)}>
-          <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
+          <div className="gov-modal">
             <div className="gov-modal__head gov-modal__head--stack">
               <div>回收站设置</div>
               <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>作用于当前知识库</div>

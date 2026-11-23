@@ -598,8 +598,8 @@ export function LifecyclePage(): JSX.Element {
       </div>
 
       {editing ? (
-        <div className="gov-modal-mask" onClick={() => setEditing(null)}>
-          <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) setEditing(null); }}>
+          <div className="gov-modal">
             <div className="gov-modal__head">
               <span>编辑分类 · {editing.name}</span>
               <button className="gov-btn gov-btn--ghost gov-btn--sm" onClick={() => setEditing(null)}>✕</button>
@@ -732,8 +732,8 @@ function PresetModal(args: { scope: string; onClose: () => void; onSaved: (text:
   };
 
   return (
-    <div className="gov-modal-mask" onClick={args.onClose}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) args.onClose(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>新建分类</div>
           <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>

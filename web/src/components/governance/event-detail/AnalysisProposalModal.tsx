@@ -36,8 +36,8 @@ export function AnalysisProposalModal(props: AnalysisProposalModalProps): JSX.El
   const canConfirm = proposal.valid && canWrite && !saving;
 
   return (
-    <div className="gov-modal-mask" onClick={() => { if (!saving) onCancel(); }}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget && !saving) onCancel(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head">AI 建议更新分析结论</div>
         <div className="gov-modal__body">
           {proposal.valid ? (

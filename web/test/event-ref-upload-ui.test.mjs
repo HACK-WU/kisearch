@@ -189,14 +189,17 @@ describe('⑩ 顺序约束（先校验后落盘）', () => {
 describe('⑪ 弹窗内「点外部关闭」必须可达（2026-11-23 修复）', () => {
   const picker = read('src/components/GroupPathSelect.tsx');
 
-  it('弹窗内容区仍用 stopPropagation 阻止遮罩关闭（这条前提不能悄悄变）', () => {
-    assert.match(modal, /className="gov-modal" onClick=\{\(e\) => e\.stopPropagation\(\)\}/);
+  it('弹窗只在「遮罩自身被点」时关闭，内容区不再阻断冒泡', () => {
+    // 2026-11-23 技术债改造（#85）：原来是 mask onClick + 内容区 stopPropagation，
+    // 那会在 #root 处截断原生 click，把 document/window 冒泡阶段的全局监听一起废掉。
+    assert.match(modal, /className="gov-modal-mask" onClick=\{\(e\) => \{ if \(e\.target === e\.currentTarget\) close\(\); \}\}/);
+    assert.match(modal, /className="gov-modal">/);
   });
 
-  it('GroupPathSelect 的「点外部关闭」挂捕获阶段（冒泡会被上面的 stopPropagation 截断）', () => {
-    // React 18 的事件委托在 #root 上，内容区那次 stopPropagation 调用的是原生
-    // stopPropagation()，原生 click 被截在 root，到不了 document 的**冒泡**监听 ——
-    // 表现为弹窗里展开「落点 Group」后点其它区域收不起来（实测 document 冒泡计数 0 / 捕获 1）。
+  it('GroupPathSelect 的「点外部关闭」挂捕获阶段（任何祖先阻断冒泡都不再影响它）', () => {
+    // 组件把「点外部」挂到 document 捕获阶段：document 是传播链顶端，祖先再调
+    // stopPropagation 也拦不住（历史成因：弹窗内容区曾用 stopPropagation 截断冒泡，
+    // 实测 document 冒泡计数 0 / 捕获 1）。这条断言防它退化回冒泡阶段。
     assert.match(picker, /addEventListener\('click', onDocClick, true\)/);
     assert.match(picker, /removeEventListener\('click', onDocClick, true\)/);
   });

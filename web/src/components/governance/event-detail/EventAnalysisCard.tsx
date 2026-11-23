@@ -349,8 +349,8 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
        * `.gov-modal-mask` / `.gov-modal`（与上传、选文档同款），不引入新样式域。
        */}
       {resetConfirm ? (
-        <div className="gov-modal-mask" onClick={() => setResetConfirm(false)}>
-          <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) setResetConfirm(false); }}>
+          <div className="gov-modal">
             <div className="gov-modal__head">重置 AI 分析</div>
             <div className="gov-modal__body">
               <p className="gov-error">

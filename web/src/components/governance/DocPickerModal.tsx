@@ -109,8 +109,8 @@ export function DocPickerModal(args: {
     .map((h) => ({ group: h.group, name: h.name }));
 
   return (
-    <div className="gov-modal-mask" onClick={args.onClose}>
-      <div className="gov-modal" onClick={(e) => e.stopPropagation()}>
+    <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) args.onClose(); }}>
+      <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>{title}</div>
           <div className="gov-hint">{subtitle}</div>

@@ -361,7 +361,10 @@ describe('S-05d · 重置分析：清空结论与已确认位置（2026-11-23）
     assert.ok(analysisCardSrc.includes('gov-modal-mask'), '弹框遮罩');
     assert.ok(analysisCardSrc.includes('gov-modal__head'), '弹框标题区');
     assert.ok(analysisCardSrc.includes('gov-modal__foot'), '弹框底部动作区');
-    assert.ok(analysisCardSrc.includes('e.stopPropagation()'), '点弹框内部不应关闭（只有遮罩点击才关）');
+    assert.ok(
+      analysisCardSrc.includes('if (e.target === e.currentTarget) setResetConfirm(false)'),
+      '点弹框内部不应关闭（只有遮罩自身被点才关，且不阻断冒泡 —— #85 改造）',
+    );
     assert.match(analysisCardSrc, /e\.key === 'Escape'/, 'Esc = 取消（危险动作的默认出口必须安全）');
     assert.ok(analysisCardSrc.includes('重置会清空本次分析的全部产物'), '必须写明清空什么');
     assert.ok(analysisCardSrc.includes('且不可恢复'), '必须写明不可恢复');
