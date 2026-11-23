@@ -18,6 +18,7 @@ const {
   findGroupNode,
   firstGroupWithDocuments,
   isGroupSelectable,
+  openGroupPath,
   revealGroupPath,
   toggleNodeOpen,
   withAllOpen,
@@ -135,6 +136,30 @@ describe('group tree state operations are pure', () => {
     assert.equal(stages.open, true);
     assert.equal(stages.children[0].open, false, '目标自身不展开');
     assert.equal(revealGroupPath(revealed, lessonsPath), revealed, '已可见时返回原引用（幂等）');
+  });
+
+  it('opens the target group together with its ancestors (deep link target)', () => {
+    const tree = withDefaultOpen(buildGroupTree(groups));
+    const opened = openGroupPath(tree, lessonsPath);
+
+    const root = opened[0];
+    const nested = root.children[0];
+    const stages = nested.children[0];
+    const target = stages.children[0];
+    assert.equal(root.open, true);
+    assert.equal(nested.open, true);
+    assert.equal(stages.open, true);
+    assert.equal(target.open, true, '目标组自身也要展开（深链接要一眼看到组内文档）');
+    assert.equal(findGroupNode(tree, lessonsPath)?.open, false, '入参树不得被改写');
+    assert.equal(openGroupPath(opened, lessonsPath), opened, '已展开时返回原引用（幂等）');
+  });
+
+  it('leaves the tree untouched when the target is absent', () => {
+    const tree = withDefaultOpen(buildGroupTree(groups));
+    // 冷启动首帧 / 链接指向已被清空的组：返回原引用，调用方据此知道"还轮不到我处理"
+    assert.equal(openGroupPath(tree, 'missing/group'), tree);
+    const empty = [];
+    assert.equal(openGroupPath(empty, lessonsPath), empty);
   });
 
   it('counts a group with its subgroups and finds nodes by path', () => {

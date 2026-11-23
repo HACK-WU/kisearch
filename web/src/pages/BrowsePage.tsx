@@ -73,7 +73,7 @@ import {
   findGroupNode,
   firstGroupWithDocuments,
   isGroupSelectable,
-  revealGroupPath,
+  openGroupPath,
   splitRootGroup,
   toggleNodeOpen,
   withAllOpen,
@@ -182,6 +182,15 @@ export function BrowsePage(): JSX.Element {
   const savedActiveGroupRef = useRef(initialTreeStateRef.current.activeGroup);
   /** 最近一次「因选中项变化而展开目录」的 Group；刷新恢复时初始化为恢复值，避免把持久化的折叠态抢回展开 */
   const revealedActiveGroupRef = useRef<string | null>(initialTreeStateRef.current.activeGroup || null);
+  /**
+   * 外部深链接要求「把目录定位到该 Group」时的待办：把它展开（含自身）。
+   *
+   * 为什么需要挂起：冷启动打开深链接时 `/api/doc/list` 还没回来，`tree` 是空数组 ——
+   * 此时任何 `setTree(reveal…)` 都无处施加，而「选中项变化 → 展开」那条 effect 的闸门
+   * 已被 `revealedActiveGroupRef` 置位，数据到达后不会再补做（表现为「文档打开了，
+   * 左栏目录却停在折叠态」）。故记下目标，等树建好再消费一次。
+   */
+  const pendingRevealGroupRef = useRef<string | null>(null);
   const [activeGroup, setActiveGroup] = useState(initialTreeStateRef.current.activeGroup);
   const [viewing, setViewing] = useState<ScopedDocumentView | null>(null);
   // Scope 切换的清理在 effect 中执行，首帧仍可能持有旧 viewing；渲染守卫必须同步生效，
@@ -321,6 +330,15 @@ export function BrowsePage(): JSX.Element {
       if (!isBrowseUrlSelfWritten(directTarget)) {
         setTreeCollapsed(false);
         setActiveGroup(group);
+        // 树已建好 → 立刻展开目标组；还没建好（冷启动）→ 挂起，等 groups 到达后由下面的 effect 消费。
+        // 只在这两种情况下展开：用户随后手动折叠该组不会被抢回（挂起一次性消费）。
+        if (findGroupNode(tree, group)) {
+          pendingRevealGroupRef.current = null;
+          setTree((prev) => openGroupPath(prev, group));
+        } else {
+          pendingRevealGroupRef.current = group;
+        }
+        revealedActiveGroupRef.current = group;
       }
       dispatchBrowseView({ type: 'open-inline' });
       setMobileReaderOpen(true);
@@ -350,6 +368,14 @@ export function BrowsePage(): JSX.Element {
       if (group) {
         setTreeCollapsed(false);
         setActiveGroup(group);
+        // 与文档深链接同一口径：把目录定位到 URL 指定的组（冷启动同样要等树建好）
+        if (findGroupNode(tree, group)) {
+          pendingRevealGroupRef.current = null;
+          setTree((prev) => openGroupPath(prev, group));
+        } else {
+          pendingRevealGroupRef.current = group;
+        }
+        revealedActiveGroupRef.current = group;
       } else if (data?.scope === targetScope) {
         const base = withDefaultOpen(buildGroupTree(data.groups ?? []));
         setActiveGroup(firstGroupWithDocuments(base) || (base.length > 0 ? base[0].path : ''));
@@ -358,8 +384,12 @@ export function BrowsePage(): JSX.Element {
       setSearchQ('');
       setFilters(EMPTY_FILTERS);
     }
+    // 这个地址已被页面消费：刷新要按本地记忆恢复目录布局，而不是再当成「外部深链接」重放一遍
+    // —— 否则用户折叠过的目录会在刷新时被抢回展开。与 writeBrowseUrl 写回时同口径。
+    markBrowseUrlSelfWritten(directTarget);
     appliedDirectTarget.current = directTargetKey;
-  }, [directTarget, directTargetKey, scope, setScope, data?.scope, data?.groups]);
+    // `tree` 参与依赖：判断「树里是否已有目标组」必须看当前树，否则冷启动首帧会误判已就绪
+  }, [directTarget, directTargetKey, scope, setScope, data?.scope, data?.groups, tree]);
 
   // 可用 tag 列表由 TagSelect 自行从 /api/doc/list 的 tags 字段读取（KB 层 relation.tags 去重，
   // 而非 /api/tags 的向量库 tag）；react-query 同 key 缓存，不会产生额外请求
@@ -449,6 +479,17 @@ export function BrowsePage(): JSX.Element {
     });
   }, [data?.groups]); // ← 仅依赖 groups，不依赖 activeGroup
 
+  // 深链接挂起的「展开目标组」：树建好后消费一次（冷启动时树还是空的，只能等数据到达）。
+  // 一次性语义 —— 消费后立即清空，用户随后手动折叠该组不会被数据刷新抢回展开。
+  useEffect(() => {
+    const pending = pendingRevealGroupRef.current;
+    if (!pending || tree.length === 0) return;
+    pendingRevealGroupRef.current = null;
+    // 组不在树里（链接已失效 / 该组文档被清空）→ 放弃，不无限挂着
+    if (!findGroupNode(tree, pending)) return;
+    setTree((prev) => openGroupPath(prev, pending));
+  }, [tree]);
+
   // 左树状态（展开 / 选中 / 左列收起）变化即写回 localStorage —— 刷新后目录保持原样。
   // 只在数据属于当前 scope 时写入：切 scope 的过渡渲染里 tree 仍挂着上一个 scope 的树，
   // 此时写入会把旧 scope 的布局记到新 scope 名下。
@@ -464,11 +505,7 @@ export function BrowsePage(): JSX.Element {
     if (!activeGroup) return;
     if (revealedActiveGroupRef.current === activeGroup) return;
     revealedActiveGroupRef.current = activeGroup;
-    setTree((prev) => {
-      const revealed = revealGroupPath(prev, activeGroup);
-      const target = findGroupNode(revealed, activeGroup);
-      return target && !target.open ? toggleNodeOpen(revealed, activeGroup) : revealed;
-    });
+    setTree((prev) => openGroupPath(prev, activeGroup));
   }, [activeGroup, currentViewing?.group, currentViewing?.module, data?.groups, readerFullscreen]);
 
   // Wait for ancestor expansion and document loading, then reveal once per navigation.
@@ -587,11 +624,7 @@ export function BrowsePage(): JSX.Element {
     if (!group) return;
     setTreeCollapsed(false);
     setActiveGroup(group);
-    setTree((prev) => {
-      const revealed = revealGroupPath(prev, group);
-      const target = findGroupNode(revealed, group);
-      return target && !target.open ? toggleNodeOpen(revealed, group) : revealed;
-    });
+    setTree((prev) => openGroupPath(prev, group));
     // 已由上面的 setTree 完成展开，effect 不必再跑一次；但仍保持"选中项已揭示"的语义。
     revealedActiveGroupRef.current = group;
     revealedDirectoryTarget.current = '';

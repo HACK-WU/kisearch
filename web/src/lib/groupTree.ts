@@ -165,6 +165,19 @@ export function revealGroupPath(nodes: GroupTreeNode[], path: string): GroupTree
   });
 }
 
+/**
+ * 展开目标 Group 的祖先链**并展开目标自身**（新树），用于「把目录定位到某个组」。
+ *
+ * 与 `revealGroupPath` 的差别：那个只保证目标**可见**（祖先展开、自身不动），本函数连自身一起展开，
+ * 便于一眼看到组内文档。目标不在树中（数据未到 / 链接里的组已不存在）时返回原引用，
+ * 调用方可据此判断「还轮不到我处理」。
+ */
+export function openGroupPath(nodes: GroupTreeNode[], path: string): GroupTreeNode[] {
+  const revealed = revealGroupPath(nodes, path);
+  const target = findGroupNode(revealed, path);
+  return target && !target.open ? toggleNodeOpen(revealed, path) : revealed;
+}
+
 /** 收集树中所有「已展开」节点的路径（先根后子，同层保持树序）—— 供目录展开态持久化。 */
 export function collectOpenPaths(nodes: GroupTreeNode[]): string[] {
   const paths: string[] = [];
