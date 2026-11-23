@@ -1726,6 +1726,14 @@
 .gov-dcard__hint { font-size: 11px; color: var(--ki-color-text-subtle); }
 .gov-dcard__actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 .gov-dcard__body { padding: var(--ki-space-3); display: flex; flex-direction: column; gap: 10px; }
+/* 来源行（REQ-20261123-009）：说明结论来自 MCP 上传还是 AI 在线分析，附时间；比正文弱一档 */
+.gov-dcard__source {
+  padding: 4px var(--ki-space-3) 0;
+  font-size: 11px;
+  color: var(--ki-color-text-subtle);
+}
+/* 已确认位置里的「来自上一版结论」补充说明：不改颜色，只弱化，避免抢「N 处」的主信息 */
+.gov-confirmed__note { margin-left: 6px; font-weight: 400; color: var(--ki-color-text-subtle); }
 
 /* 区域色相（只染图标与运行态描边，不染正文） */
 .gov-dcard--summary  { --gov-tone: var(--ki-color-primary); }
@@ -1750,6 +1758,8 @@
 .gov-dchip--ok   { color: var(--ki-color-success); background: color-mix(in srgb, var(--ki-color-success) 13%, transparent); }
 .gov-dchip--warn { color: var(--ki-color-warning); background: var(--ki-color-warning-soft); }
 .gov-dchip--err  { color: var(--ki-color-danger);  background: var(--ki-color-danger-soft); }
+/* 外部上传（REQ-20261123-009）：走信息色，不抢 AI 紫，也不与成功 / 警告色混淆 */
+.gov-dchip--ext  { color: var(--ki-color-info); background: color-mix(in srgb, var(--ki-color-info) 12%, transparent); }
 
 /* ── 内嵌 AI 面板（替代弹窗）：靠底色分层，不再叠一层描边阴影 ── */
 .gov-ai-embed {
@@ -1867,6 +1877,8 @@
 .gov-doclist .gov-docline {
   /* 末列 auto 而非 22px：行尾按钮在二次确认时从「×」变成「确认」（两个字），
      固定 22px 会让文字溢出/换行把行高顶起来。auto + 按钮不换行 ⇒ 只挤左列，行高不变 */
+  /* 仍是 4 列（图标 / 名称+路径 / 可见性 / ×）：2026-11-23 的「最近更新」不放独立列，
+     而是跟名称同行（见 .gov-docline__time）—— 独立列会被 1fr 推到卡片最右侧 */
   grid-template-columns: 18px minmax(0, 1fr) auto auto;
   gap: var(--ki-space-2);
   padding: 9px var(--ki-space-2);
@@ -1886,8 +1898,20 @@
   text-underline-offset: 3px;
   text-decoration-thickness: 1px;
 }
-.gov-doclist .gov-docline__name { font-weight: 500; }
+/* 名称改行内：让「最近更新」跟它同行、只隔一点点（2026-11-23 用户拍板）。
+   路径仍是 block，自然换到第二行 */
+.gov-doclist .gov-docline__name { display: inline; font-weight: 500; }
 .gov-doclist .gov-docline__meta { margin-top: 1px; color: var(--ki-color-text-subtle); }
+
+/* 行内「最近更新」（2026-11-23）：紧跟名称、弱化到与路径同色，不与名称争焦；
+   tabular-nums 让「3 小时前 / 12 小时前」右缘不抖；nowrap 保证二次确认时不被折行 */
+.gov-docline__time {
+  margin-left: 6px;
+  white-space: nowrap;
+  font-size: var(--ki-font-size-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ki-color-text-subtle);
+}
 
 /* 可见性小胶囊：形状（点）+ 文字双编码，比原来裸文字更好扫 */
 .gov-vis--pill {

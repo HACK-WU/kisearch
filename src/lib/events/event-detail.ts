@@ -18,7 +18,7 @@
 import { isEventClosed, mustFindEvent } from './store.js';
 import { getType } from './type-service.js';
 import { collectMembers, type MemberDoc } from './members.js';
-import { listRefs, type ListRefsResult } from './refs-service.js';
+import { docTimes, listRefs, type ListRefsResult } from './refs-service.js';
 import { readRefs } from './refs-store.js';
 import { readStageLogs } from './stage-log.js';
 import { readAnalysisDocRaw, normalizeAnalysisDocForRead } from './analysis-store.js';
@@ -54,6 +54,10 @@ export interface DocRefItem {
 
 export interface MemberItemView extends DocRefItem {
   isImported: boolean;
+  /** 文档正文最近一次变更（ms）；老数据缺失 —— 不得兜底成 0 / now */
+  updatedAt?: number;
+  /** 文档首次进入本库（ms）；老数据缺失 */
+  createdAt?: number;
 }
 
 export interface RefItemView extends DocRefItem {
@@ -62,6 +66,10 @@ export interface RefItemView extends DocRefItem {
   stale: boolean;
   staleReason?: 'doc-deleted' | 'scope-missing';
   visibility: string;
+  /** 文档正文最近一次变更（ms）；stale / 老数据缺失 */
+  updatedAt?: number;
+  /** 文档首次进入本库（ms）；stale / 老数据缺失 */
+  createdAt?: number;
 }
 
 export interface ConfirmedLocationView {
@@ -209,6 +217,7 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
     group: m.group,
     name: m.name,
     isImported: m.relation?.isImported === true,
+    ...docTimes(m.relation),
   }));
 
   // 参考文档：跨库引用必须给 sourceScope 解析后的实际库，否则取不到正文
@@ -222,6 +231,8 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
     stale: r.stale,
     ...(r.staleReason ? { staleReason: r.staleReason } : {}),
     visibility: r.visibility,
+    // 文档被删 / 源库不存在时 listRefs 不返回这两个字段（没有 relation 可读）
+    ...docTimes(r),
   }));
 
   // 阶段日志：文件是写入顺序（时间正序），取末尾 N 条即为"最近 N 条"
@@ -318,6 +329,13 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
           updatedAt: draft.updatedAt,
           // 人工修订标记（2026-11-23 · R-13）：MCP 读出口据此声明"结论是人改的"
           ...(draft.editedAt !== undefined ? { editedAt: draft.editedAt } : {}),
+          /*
+           * 来源（2026-11-23 · REQ-20261123-009）：外部上传的结论与 AI 跑批产出在数据层
+           * 只差这三个字段。不透出来的话，AI 会把外部判断当成"我上一轮的分析结果"接着推理。
+           */
+          ...(draft.source ? { source: draft.source } : {}),
+          ...(draft.importedAt !== undefined ? { importedAt: draft.importedAt } : {}),
+          ...(draft.sourceClient ? { sourceClient: draft.sourceClient } : {}),
           ...(draft.errorCode ? { errorCode: draft.errorCode } : {}),
           ...(draft.errorMessage ? { errorMessage: draft.errorMessage } : {}),
         }

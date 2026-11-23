@@ -32,6 +32,8 @@ export function EventDocsCard(props: EventDocsCardProps) {
                 name={row.name}
                 /* 展示走 meta（可含「来源库 · …」），点击一律用真实的 group / sourceScope */
                 meta={row.meta ?? row.group}
+                /* 最近更新时间（页面按 updatedAt ?? createdAt 算好；缺省不渲染该列） */
+                time={row.time}
                 vis={row.vis}
                 canRemove={canWrite && !busy && !row.lockedReason}
                 removeTitle={row.lockedReason ?? (isMember ? '从事件移除（解绑，文档保留）' : '移除该参考文档')}

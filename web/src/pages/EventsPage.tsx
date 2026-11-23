@@ -16,6 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
+import { docLatestTime } from '@/lib/browseFilters';
 import {
   govFailedMembers, govFailedNotice, govFailedTitle, govLoadedNotice, govMergeFailed, VIEW_WRITE_HINT,
   type GovFailedMember,
@@ -35,7 +36,7 @@ import { getDocContent } from '@/api/httpApi';
 import { pickInitialEventId, readLastEventId, rememberLastEventId } from '@/lib/eventsSelection';
 import {
   addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
-  listEventTypes, listEvents, listRefs, listRunningAnalyses, removeConfirmedCodeLocation, removeMember, removeRef,
+  getEventAnalysis, listEventTypes, listEvents, listRefs, listRunningAnalyses, removeConfirmedCodeLocation, removeMember, removeRef,
   reopenEvent, resetEventAnalysis, setEventPinned, setEventStage, updateEvent, updateEventType,
   REF_LIMIT,
   GovernanceApiError,
@@ -110,6 +111,12 @@ function relTime(ms?: number | null): string {
   return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+/*
+ * 文档行的「最近更新」时间直接复用浏览页的 `docLatestTime`（`max(createdAt, updatedAt)`）：
+ * 同一个概念在两页必须一套口径，否则数据异常（createdAt > updatedAt）时两页显示不同时间。
+ * 缺失 → `undefined` → 行内不渲染，**不兜底成 now**（会把历史文档标成"刚刚更新"）。
+ */
+
 export function EventsPage(): JSX.Element {
   // 跟顶部 scope 选择器走：治理数据本身按 scope 隔离，写死 'default' 会让页头徽标撒谎、
   // 也让「添加参考文档」去错库里搜（同一台机器上事件与文档可能不在同一 scope）
@@ -175,6 +182,12 @@ export function EventsPage(): JSX.Element {
    * 其错误消息还会覆盖掉成功提示。ref 在这里同步写，闭包读它才是「此刻」的选中。
    */
   const activeIdRef = useRef<string | null>(null);
+  /**
+   * 详情新鲜度基线（走查 #1）：外部上传（MCP）不经过站内 running 标记，
+   * 4s 轮询只拉标记、不拉详情，页面会一直停在旧结论上。这里记「上次看到的 runId」，
+   * 变了才整条刷新（`undefined` 表示还没建立基线，首轮只记录不刷新）。
+   */
+  const draftRunIdRef = useRef<string | null | undefined>(undefined);
   /**
    * AI 分析编辑态是否有未保存修改（2026-11-23 · 人工校正 Q2）。
    *
@@ -692,6 +705,52 @@ export function EventsPage(): JSX.Element {
     else { setDetail(null); setRefs([]); }
   }, [activeId, loadDetail]);
 
+  /**
+   * 详情新鲜度轮询（走查 #1）。
+   *
+   * 为什么不能复用上面那个 4s 轮询：它只拉 `events/running`（进程内标记），
+   * 而**外部上传结论（MCP `ki_event_edit`）根本不经过站内分析器**，标记永远不变，
+   * 于是"AI 已经传了结论、人盯着页面却什么也没发生"—— 再传一次还会覆盖（`overwritten=true`）。
+   *
+   * 做法：每 8s 拉一次**只读、极轻**的 `getEventAnalysis`（读一个 JSON 文件），
+   * 只在 `draft.runId` 变化时整条刷新详情（runId 变了 = 换了一版结论）。
+   * 首轮只建立基线不刷新，避免进页面就多打一条详情请求；隐藏标签页跳过。
+   */
+  useEffect(() => {
+    if (!activeId) {
+      draftRunIdRef.current = undefined;
+      return undefined;
+    }
+    let alive = true;
+    const check = async (): Promise<void> => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const latest = await getEventAnalysis(scope, activeId);
+        if (!alive) return;
+        const nextRun = latest?.draft?.runId ?? null;
+        if (draftRunIdRef.current === undefined) {
+          draftRunIdRef.current = nextRun;
+          return;
+        }
+        if (nextRun !== draftRunIdRef.current) {
+          draftRunIdRef.current = nextRun;
+          await loadDetail(activeId);
+        }
+      } catch {
+        // 轮询失败不打扰用户：下一轮会重试
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => { void check(); }, 8000);
+    const onVisible = (): void => { if (!document.hidden) void check(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [scope, activeId, loadDetail]);
+
   /*
    * 切事件后右栏回到顶部（2026-11-19）：`--noscroll` 下右栏是独立滚动容器，
    * 不回顶就会停在上一条的滚动位置，看着像「点了没反应」。
@@ -1058,14 +1117,24 @@ export function EventsPage(): JSX.Element {
           const seen = seenAnalysis[event.id] === done.runId;
           if (done.status === 'ready' || done.status === 'partial') {
             if (seen) return null;
+            /*
+             * 外部上传的结论（2026-11-23 · 走查 #2）：后端补的是同一条 finished 标记，
+             * 来源用 `ext_` runId 前缀区分（与 `run_` / `manual_` 并列）。
+             * 文案必须与「分析完成」区分，否则会让人以为站内又跑了一次分析。
+             */
+            const external = done.runId.startsWith('ext_');
             return (
               <span
                 className="gov-ev__running gov-ev__running--done"
-                title={done.status === 'partial' ? '分析已完成（有未定位到的部分），结果未查看' : '分析已完成，结果未查看'}
+                title={external
+                  ? '外部上传的结论（MCP），尚未查看'
+                  : done.status === 'partial'
+                    ? '分析已完成（有未定位到的部分），结果未查看'
+                    : '分析已完成，结果未查看'}
               >
                 <span className="gov-ev__running-dot" aria-hidden="true" />
                 {/* 行内用 4 字以内，完整语义放 title：浮标压在标题右侧，文案越长标题让位越多 */}
-                {done.status === 'partial' ? '部分完成' : '分析完成'}
+                {external ? '外部结论' : done.status === 'partial' ? '部分完成' : '分析完成'}
               </span>
             );
           }
@@ -1657,6 +1726,8 @@ export function EventsPage(): JSX.Element {
                     key: m.group + "/" + m.name,
                     name: m.name,
                     group: m.group,
+                    /* 行内「最近更新」：让用户一眼看出这篇文档是不是在结论之后又改过 */
+                    time: docLatestTime(m),
                     vis: { tone: (VIS_CLASS[stageVis] ?? "hidden") as VisTone, text: VIS_TEXT[stageVis] },
                   }))}
                   canWrite={canWrite}
@@ -1702,6 +1773,12 @@ export function EventsPage(): JSX.Element {
                       ref.stale ? (ref.staleReason === "scope-missing" ? " · 源库已不存在" : " · 文档已不存在") : "",
                     ].join(""),
                     ...(ref.sourceScope ? { sourceScope: ref.sourceScope } : {}),
+                    /*
+                     * 行内「最近更新」：是**文档自身**的变更时间，不是 `addedAt`（加入事件时间）——
+                     * 后者语义完全不同，混用会让人把"刚挂进来"当成"文档刚改过"。
+                     * 引用失效（stale）时后端不返回时间 → 整列不渲染。
+                     */
+                    time: docLatestTime(ref),
                     vis: { tone: (VIS_CLASS[ref.visibility] ?? "hidden") as VisTone, text: VIS_TEXT[ref.visibility] },
                   }))}
                   canWrite={canWrite}

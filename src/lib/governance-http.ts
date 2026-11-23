@@ -1063,7 +1063,17 @@ export async function handleGovernanceRoutes(
           scope,
           ...(targets.view ? { view: targets.view, viewMembers: targets.members } : {}),
           event: detail.event,
-          members: detail.members.map((m) => ({ group: m.group, name: m.name })),
+          /*
+           * 文档行的「最近更新」（2026-11-23）：详情页关联文档卡按行展示时间，
+           * 数据取自 `Relation.updatedAt`（正文变更才刷新，元数据变更不刷）。
+           * 老数据缺字段 → 不写键，前端据此不显示（不得兜底成 now）。
+           */
+          members: detail.members.map((m) => ({
+            group: m.group,
+            name: m.name,
+            ...(typeof m.relation.updatedAt === 'number' ? { updatedAt: m.relation.updatedAt } : {}),
+            ...(typeof m.relation.createdAt === 'number' ? { createdAt: m.relation.createdAt } : {}),
+          })),
           logs: detail.logs,
           analysis: {
             draft: detail.analysis.draft,

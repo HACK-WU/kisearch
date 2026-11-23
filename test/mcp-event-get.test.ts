@@ -21,15 +21,17 @@ import { getAnalysisPath } from '../src/lib/events/analysis-store.js';
 import { isReadOnlyTool } from '../src/lib/mcp-tools/tool-access.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerEventCreateTool } from '../src/lib/mcp-tools/event-create.js';
-import { registerEventDocsTool } from '../src/lib/mcp-tools/event-docs.js';
+import { registerEventEditTool } from '../src/lib/mcp-tools/event-edit.js';
 import { registerEventGetTool } from '../src/lib/mcp-tools/event-get.js';
-import { registerEventRefsTool } from '../src/lib/mcp-tools/event-refs.js';
 import type { Relation } from '../src/lib/scoring.js';
 
 const scope = `mcp-event-get-${Date.now()}`;
 const GROUP = '专题记忆/事件详情测试';
 
-function seedDoc(name: string): Relation {
+function seedDoc(
+  name: string,
+  times: { createdAt?: number; updatedAt?: number } = {},
+): Relation {
   const rel: Relation = {
     id: `rel_${name.replace(/\W/g, '')}`,
     text: name,
@@ -37,6 +39,8 @@ function seedDoc(name: string): Relation {
     useCount: 0,
     lastUsedTime: null,
     isImported: false,
+    ...(times.createdAt !== undefined ? { createdAt: times.createdAt } : {}),
+    ...(times.updatedAt !== undefined ? { updatedAt: times.updatedAt } : {}),
   };
   const doc = loadGroupCache(scope, GROUP) ?? { version: 1, scope, hot_relations: [], keywords: [], updatedAt: null };
   doc.hot_relations = doc.hot_relations.filter((r) => r.text !== name);
@@ -56,8 +60,7 @@ interface ToolResult { isError?: boolean; content: Array<{ type: string; text: s
 const server = new McpServer({ name: 'ki-event-get-test', version: '0.0.0' });
 registerEventCreateTool(server);
 registerEventGetTool(server);
-registerEventDocsTool(server);
-registerEventRefsTool(server);
+registerEventEditTool(server);
 
 function tools(): Record<string, { handler: (args: unknown, extra: unknown) => Promise<ToolResult> }> {
   return (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<ToolResult> }> })
@@ -337,5 +340,42 @@ describe('⑤ loadEventDetail 的 analysisActive', () => {
 
     const alive = loadEventDetail(scope, event, { now, analysisActive: true });
     assert.equal(alive.analysis.draft?.status, 'running');
+  });
+});
+
+describe('⑥ 文档时间戳透出（事件详情页「最近更新」）', () => {
+  it('members / refs 都带 updatedAt 与 createdAt（取自 Relation，不是加入事件的时间）', async () => {
+    const t0 = Date.UTC(2026, 10, 20, 8, 0);
+    const doc = seedDoc('时间成员', { createdAt: t0, updatedAt: t0 + 3_600_000 });
+    const ref = seedDoc('时间引用', { createdAt: t0 + 60_000, updatedAt: t0 + 7_200_000 });
+
+    const created = parse(await call('ki_event_create', {
+      scope,
+      title: '文档时间透出',
+      type: 'et_1',
+      docs: [{ group: GROUP, name: doc.text }],
+      refs: [{ group: GROUP, name: ref.text }],
+    }));
+    const body = parse(await call('ki_event_get', { scope, event: created.event.id }));
+
+    assert.equal(body.members.items[0].updatedAt, t0 + 3_600_000);
+    assert.equal(body.members.items[0].createdAt, t0);
+    assert.equal(body.refs.items[0].updatedAt, t0 + 7_200_000);
+    assert.equal(body.refs.items[0].createdAt, t0 + 60_000);
+    assert.notEqual(body.refs.items[0].updatedAt, body.refs.items[0].addedAt, '不得拿 addedAt 冒充更新时间');
+  });
+
+  it('老数据没有时间 → 键不存在（不兜底成 0 / now）', async () => {
+    const doc = seedDoc('无时间成员');
+    const created = parse(await call('ki_event_create', {
+      scope,
+      title: '无时间文档',
+      type: 'et_1',
+      docs: [{ group: GROUP, name: doc.text }],
+    }));
+    const body = parse(await call('ki_event_get', { scope, event: created.event.id }));
+    const item = body.members.items[0] as Record<string, unknown>;
+    assert.equal('updatedAt' in item, false);
+    assert.equal('createdAt' in item, false);
   });
 });

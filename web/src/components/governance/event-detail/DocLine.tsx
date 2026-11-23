@@ -12,17 +12,51 @@ const ICON_CODE = (
 );
 
 /**
+ * 相对时间，与事件列表 `relTime` 同口径（超过 30 天退成 `M-D`，避免「1100 天前」）。
+ *
+ * 未来时间 / 时钟偏差：`min < 1` 落「刚刚」，不出现负数。
+ */
+function relTime(ms: number, now = Date.now()): string {
+  const min = Math.floor((now - ms) / 60_000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min} 分钟前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour} 小时前`;
+  const day = Math.floor(hour / 24);
+  if (day < 30) return `${day} 天前`;
+  const d = new Date(ms);
+  return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 精确时刻（`title` 悬停用）：相对时间看不出具体哪天，必须给可核对的绝对值 */
+function exactTime(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
  * 文档行（关联文档 / 参考文档 / 已确认位置共用外观）。
- * 检查点：I-01~I-09。点击热区**只有名称**；× 默认淡化，hover 才提亮。
+ * 检查点：I-01~I-09。点击热区是**名称行（名称 + 紧跟的更新时间）**；× 默认淡化，hover 才提亮。
  * 行内二次确认由父级给 `confirmRemove`（同一时刻只允许一行确认）。
+ *
+ * `time`（2026-11-23）：行内「最近更新」列。**未知就不渲染**（老数据 / 引用失效），
+ * 不显示占位符、不兜底成 now —— 空着比撒谎好。
  */
 export function DocLine(props: DocLineProps) {
-  const { kind, name, meta, vis, canRemove, removeTitle, confirmRemove, onConfirm, onCancelConfirm, onOpen, onRemove } = props;
+  const { kind, name, meta, time, vis, canRemove, removeTitle, confirmRemove, onConfirm, onCancelConfirm, onOpen, onRemove } = props;
   return (
     <div className="gov-docline">
       <span className="gov-docline__icon" aria-hidden="true">{kind === 'code' ? ICON_CODE : ICON_DOC}</span>
       <button type="button" className="gov-docline__main" onClick={onOpen} title={onOpen ? `查看「${name}」` : undefined} disabled={!onOpen}>
         <span className="gov-docline__name">{name}</span>
+        {/*
+         * 时间必须跟**名称同一行盒**（2026-11-23 用户拍板）：放进独立栅格列会被 1fr 推到
+         * 卡片最右侧、和可见性胶囊挤在一起，看着像另一列数据；这里紧跟名称、留一点点间距。
+         */}
+        {typeof time === 'number' && Number.isFinite(time) ? (
+          <span className="gov-docline__time" title={`最近更新 ${exactTime(time)}`}>{relTime(time)}</span>
+        ) : null}
         {meta ? <span className="gov-docline__meta">{meta}</span> : null}
       </button>
       {vis ? (

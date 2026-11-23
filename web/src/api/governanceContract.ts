@@ -520,6 +520,12 @@ export interface AnalysisDraftDto {
   updatedAt: number;
   /** 人工修订时间戳（2026-11-23）：存在即表示三块产物被人工改过；重跑后消失 */
   editedAt?: number;
+  /** 结论来源（2026-11-23）：缺省 = 'ai'；'external' 表示由 MCP 上传（无分析过程） */
+  source?: 'ai' | 'external';
+  /** 外部上传时间戳（ms）；仅 source === 'external' */
+  importedAt?: number;
+  /** 外部来源标识；仅 source === 'external' */
+  sourceClient?: string;
 }
 
 export interface ConfirmedCodeLocationDto {
@@ -751,6 +757,15 @@ export interface EventDetailStageDto {
 export interface MemberItemDto extends DocRefDto {
   /** 是否由本事件导入（false = 原本就在库里、被引用） */
   isImported: boolean;
+  /**
+   * 文档正文最近一次变更（ms）。**元数据变更不刷新**（分类 / 事件绑定 / 置顶）。
+   *
+   * 老数据可能缺失：调用方不得兜底成 0 / now（会把历史文档显示成"刚刚更新"），
+   * 要展示「最近变动」时用 `createdAt` 回退，两者都没有就不显示。
+   */
+  updatedAt?: number;
+  /** 文档首次进入本库（ms）；老数据可能缺失 */
+  createdAt?: number;
 }
 
 /** 详情 refs 块里的参考文档 */
@@ -761,6 +776,10 @@ export interface RefItemDto extends DocRefDto {
   stale: boolean;
   staleReason?: 'doc-deleted' | 'scope-missing';
   visibility: string;
+  /** 文档正文最近一次变更（ms）；stale / 老数据时缺失，口径同 `MemberItemDto` */
+  updatedAt?: number;
+  /** 文档首次进入本库（ms）；stale / 老数据时缺失 */
+  createdAt?: number;
 }
 
 /** 详情 analysis.confirmed 里的已确认代码位置 */

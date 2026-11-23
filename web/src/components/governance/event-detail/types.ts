@@ -29,6 +29,12 @@ export interface DocRow {
   meta?: string;
   /** 文档实际所在库（视图模式下的跨库引用）；缺省 = 事件所属库 */
   sourceScope?: string;
+  /**
+   * 行内「最近更新」时间戳（ms），由页面按 `updatedAt ?? createdAt` 算好传入。
+   *
+   * undefined = 未知（老数据 / 引用已失效）→ **整列不渲染**，不放占位符、不兜底成 now。
+   */
+  time?: number;
   vis?: { tone: VisTone; text: string };
   /** 不可操作原因（如文档已进回收站） */
   lockedReason?: string;
@@ -89,6 +95,8 @@ export interface DocLineProps {
   kind: 'doc' | 'code';
   name: string;
   meta?: string;
+  /** 最近更新时间戳（ms）；缺省不渲染该列 */
+  time?: number;
   vis?: { tone: VisTone; text: string };
   canRemove: boolean;
   removeTitle?: string;

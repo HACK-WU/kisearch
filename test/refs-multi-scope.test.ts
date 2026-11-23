@@ -31,7 +31,12 @@ const scopeA = `refs-multi-a-${stamp}`;
 const scopeB = `refs-multi-b-${stamp}`;
 const GROUP = '部署运维';
 
-function seed(target: string, group: string, name: string): void {
+function seed(
+  target: string,
+  group: string,
+  name: string,
+  times: { createdAt?: number; updatedAt?: number } = {},
+): Relation {
   const rel: Relation = {
     id: `rel_${group.length}_${name.replace(/\W/g, '')}`,
     text: name,
@@ -39,6 +44,8 @@ function seed(target: string, group: string, name: string): void {
     useCount: 0,
     lastUsedTime: null,
     isImported: false,
+    ...(times.createdAt !== undefined ? { createdAt: times.createdAt } : {}),
+    ...(times.updatedAt !== undefined ? { updatedAt: times.updatedAt } : {}),
   };
   const doc = loadGroupCache(target, group) ?? { version: 1, scope: target, hot_relations: [], keywords: [], updatedAt: null };
   doc.hot_relations = doc.hot_relations.filter((r) => r.text !== name);
@@ -224,6 +231,41 @@ describe('② 跨库引用', () => {
       /不存在/,
     );
     assert.equal(listRefs(scopeA, event.id).refs.length, 0, '校验失败不得落盘');
+  });
+
+  it('列出引用时透出**文档自身**的时间；跨库取源库、失效后不带时间', async () => {
+    const t0 = Date.UTC(2026, 10, 20, 8, 0);
+    seed(scopeA, GROUP, '时间手册A', { createdAt: t0, updatedAt: t0 + 86_400_000 });
+    seed(scopeB, GROUP, '时间手册B', { createdAt: t0 + 3_600_000, updatedAt: t0 + 7_200_000 });
+
+    const event = await createEvent(scopeA, { title: '时间透出验证', typeId: 'et_1' });
+    addRefs(scopeA, event.id, {
+      docs: [
+        { group: GROUP, name: '时间手册A' },
+        { sourceScope: scopeB, group: GROUP, name: '时间手册B' },
+      ],
+      addedBy: 'manual',
+      tokenScopes: [scopeA, scopeB],
+    });
+
+    const listed = listRefs(scopeA, event.id).refs;
+    const a = listed.find((r) => r.name === '时间手册A')!;
+    assert.equal(a.updatedAt, t0 + 86_400_000, '更新时间必须取自正文 relation');
+    assert.equal(a.createdAt, t0);
+    assert.notEqual(a.updatedAt, a.addedAt, '不得拿「加入事件的时间」冒充更新时间');
+
+    const b = listed.find((r) => r.name === '时间手册B')!;
+    assert.equal(b.updatedAt, t0 + 7_200_000, '跨库引用必须取**源库**文档的时间');
+
+    // 文档被删 → stale 且没有 relation 可读 ⇒ 不透出时间键（留着过期时间会误导成「最近更新」）
+    const cache = loadGroupCache(scopeB, GROUP)!;
+    cache.hot_relations = cache.hot_relations.filter((r) => r.text !== '时间手册B');
+    writeGroupCache(scopeB, GROUP, cache);
+
+    const after = listRefs(scopeA, event.id).refs.find((r) => r.name === '时间手册B')!;
+    assert.equal(after.stale, true);
+    assert.equal('updatedAt' in after, false, '失效引用不得留下时间字段');
+    assert.equal('createdAt' in after, false);
   });
 });
 

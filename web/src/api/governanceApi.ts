@@ -82,6 +82,19 @@ async function req<T>(path: string, init?: RequestInit & { timeoutMs?: number })
       );
     }
     return payload as T;
+  } catch (err) {
+    /*
+     * 网络层失败别把浏览器黑话直接甩给用户（2026-11-23 真机：daemon 重启期间页面显示
+     * `Failed to fetch`，用户完全不知道该怎么办）。`req` 原本没有 catch，`TypeError`
+     * 会一路抛到 `setMessage` 原样展示。
+     */
+    if (err instanceof GovernanceApiError) throw err;
+    const name = (err as { name?: string })?.name;
+    if (name === 'AbortError') throw err; // 主动取消：调用方自行静默处理
+    if (name === 'TimeoutError') {
+      throw new GovernanceApiError('请求超时（服务可能在忙或正在重启），请稍后重试', 0);
+    }
+    throw new GovernanceApiError('连接不上服务（可能正在重启或网络中断），请稍后重试', 0);
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -717,7 +730,13 @@ export interface EventDetail {
   view?: string;
   viewMembers?: string[];
   event: EventView & { typeName?: string };
-  members: Array<{ group: string; name: string }>;
+  /**
+   * 关联文档行数据。`updatedAt` = 正文最近一次变更（ms），`createdAt` = 首次入库。
+   *
+   * 老数据两者都可能缺失：行内「最近更新」按 `updatedAt ?? createdAt` 取，
+   * **都没有就不显示**（不得兜底成 now —— 会把历史文档标成"刚刚更新"）。
+   */
+  members: Array<{ group: string; name: string; updatedAt?: number; createdAt?: number }>;
   logs: Array<{ fromKey: string | null; toKey: string; at: number; by: string; note?: string }>;
   analysis?: EventAnalysisDto;
 }
@@ -1063,6 +1082,10 @@ export interface RefItem {
   /** stale 的原因：doc-deleted = 文档被删；scope-missing = 源库已不存在或无权限 */
   staleReason?: 'doc-deleted' | 'scope-missing';
   visibility: Visibility;
+  /** 文档正文最近一次变更（ms）；stale / 老数据缺失（此时行内不显示时间） */
+  updatedAt?: number;
+  /** 文档首次进入本库（ms）；stale / 老数据缺失 */
+  createdAt?: number;
 }
 
 export function listRefs(scope: string, eventId: string): Promise<{ ok: true; refs: RefItem[] }> {

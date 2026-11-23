@@ -191,7 +191,39 @@ function countAllDocs(caches: ReturnType<typeof readAllGroupCaches>): number {
 }
 
 export interface ListRefsResult {
-  refs: Array<EventRefDoc & { stale: boolean; staleReason?: 'doc-deleted' | 'scope-missing'; visibility: Visibility }>;
+  refs: Array<EventRefDoc & {
+    stale: boolean;
+    staleReason?: 'doc-deleted' | 'scope-missing';
+    visibility: Visibility;
+    /** 文档正文最近一次变更（ms）；stale 或老数据时缺失 —— 不得兜底成 0 / now */
+    updatedAt?: number;
+    /** 文档首次进入本库（ms）；stale 或老数据时缺失 */
+    createdAt?: number;
+  }>;
+}
+
+/**
+ * 透出文档的两个时间戳（缺失时不写键，与 doc list 同口径）。
+ *
+ * ★ **唯一出口**：`listRefs`（→ HTTP refs）、`getEventDetail`（→ MCP members/refs）都走它。
+ *   这三处原先各写一份同构判断，改口径时必然漏改一处而 tsc / 契约测试都不报错
+ *   （字段全可选）—— 2026-11-23 二次审查（challenger C-1）后收敛到这里。
+ *
+ * ★ 参数用**结构类型**而非 `Relation`：`listRefs` 的返回项是从 refs.json 读出来再补时间的
+ *   中间形状，不是 `Relation` 实例；放宽成 `{ updatedAt?, createdAt? }` 两处才能共用。
+ *
+ * ★ 只读已有字段，不产生额外 I/O：`listRefs` 为了解析可见性**已经**查到 relation。
+ *   文档被删 / 源库不存在时压根没有 relation，调用方据此不显示时间
+ *   （而不是拿 `addedAt`（加入事件的时间）冒充更新时间 —— 语义完全不同）。
+ */
+export function docTimes(
+  src: { updatedAt?: number; createdAt?: number } | undefined,
+): { updatedAt?: number; createdAt?: number } {
+  if (!src) return {};
+  return {
+    ...(typeof src.updatedAt === 'number' ? { updatedAt: src.updatedAt } : {}),
+    ...(typeof src.createdAt === 'number' ? { createdAt: src.createdAt } : {}),
+  };
 }
 
 /**
@@ -233,7 +265,7 @@ export function listRefs(scope: string, eventRef: string): ListRefsResult {
         return { ...ref, stale: true, staleReason: 'doc-deleted' as const, visibility: 'full' as Visibility };
       }
       const resolved = resolveVisibilityOfRelation(src, rel);
-      return { ...ref, stale: false, visibility: resolved.mode };
+      return { ...ref, stale: false, visibility: resolved.mode, ...docTimes(rel) };
     }),
   };
 }

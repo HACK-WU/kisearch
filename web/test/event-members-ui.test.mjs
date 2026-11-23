@@ -116,3 +116,58 @@ describe('⑤ API 契约', () => {
     assert.match(createBlock.slice(0, 600), /refs\?:/);
   });
 });
+
+/**
+ * ⑥ 行内「最近更新」（2026-11-23）
+ *
+ * 钉住三条口径：① 时间未知就不渲染（老数据 / 失效引用，不兜底成 now）；
+ * ② 相对时间必须配 `title` 绝对时刻（"3 小时前"看不出哪天）；
+ * ③ 取的是**文档自身**的变更时间，不是 `addedAt`（加入事件的时间）。
+ */
+describe('⑥ 行内「最近更新」', () => {
+  const css = read('src/styles/governance.css');
+
+  it('DocLine 渲染时间列，且时间未知时不渲染', () => {
+    assert.match(docLine, /gov-docline__time/);
+    assert.match(docLine, /typeof time === 'number' && Number\.isFinite\(time\)/);
+  });
+
+  it('相对时间配 title 绝对时刻，未来时间/时钟偏差落「刚刚」不出现负数', () => {
+    assert.match(docLine, /title=\{`最近更新 \$\{exactTime\(time\)\}`\}/);
+    assert.match(docLine, /if \(min < 1\) return '刚刚';/);
+  });
+
+  it('文档卡把 row.time 透传给行', () => {
+    assert.match(docsCard, /time=\{row\.time\}/);
+  });
+
+  it('页面口径复用浏览页 docLatestTime（同一概念一套口径），两张卡都传', () => {
+    assert.match(page, /import \{ docLatestTime \} from '@\/lib\/browseFilters';/);
+    // 关联文档 + 参考文档两张卡都要传（漏一处就是半截功能）
+    assert.equal((page.match(/time: docLatestTime\(/g) ?? []).length, 2);
+    // 不得再自带一套「最近变动」算法：两套口径在 createdAt > updatedAt 时给出不同时间
+    assert.doesNotMatch(page, /function docLatestOf/);
+  });
+
+  it('参考文档不得拿 addedAt（加入事件时间）冒充更新时间', () => {
+    assert.doesNotMatch(page, /time: ref\.addedAt/);
+  });
+
+  it('接口类型声明带 updatedAt / createdAt（否则页面根本读不到）', () => {
+    assert.match(api, /members: Array<\{ group: string; name: string; updatedAt\?: number; createdAt\?: number \}>/);
+    const refBlock = api.slice(api.indexOf('export interface RefItem {'));
+    assert.match(refBlock.slice(0, 900), /updatedAt\?: number;/);
+    assert.match(refBlock.slice(0, 900), /createdAt\?: number;/);
+  });
+
+  it('时间紧跟名称（同一行盒），不占独立栅格列', () => {
+    // 名称与时间在同一个 button 内、name 之后 meta 之前：时间跟着名字，不被 1fr 推到行尾
+    assert.match(docLine, /gov-docline__name[\s\S]{0,400}?gov-docline__time[\s\S]{0,400}?gov-docline__meta/);
+    // 栅格仍是 4 列（图标 / 名称+路径 / 可见性 / ×）
+    assert.match(css, /grid-template-columns: 18px minmax\(0, 1fr\) auto auto;/);
+    assert.doesNotMatch(css, /18px minmax\(0, 1fr\) auto auto auto;/);
+    // 名称是行内元素才能与时间同行
+    assert.match(css, /\.gov-doclist \.gov-docline__name \{ display: inline;/);
+    assert.match(css, /\.gov-docline__time \{[\s\S]{0,200}?white-space: nowrap;/);
+  });
+});
