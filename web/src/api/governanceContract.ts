@@ -572,12 +572,33 @@ export interface AnalysisAskTurnDto {
   proposalAccepted?: boolean;
 }
 
+/**
+ * 进行中追问的运行态（2026-11-23 · #82）。
+ *
+ * 追问是一条 SSE 流，进行中的那一轮原先只活在前端内存，切页 / 刷新即消失。
+ * 服务端把运行态落盘后由 GET 一并下发：前端回来先按它渲染（问题 + 半截答案 + 过程），
+ * 再轮询到 `running: null`（= 已落库）换成正式 turn。
+ */
+export interface AnalysisAskRunningDto {
+  question: string;
+  /** 该轮依据的分析 runId；与当前草稿不一致说明分析被重跑过 */
+  runId: string | null;
+  startedAt: number;
+  updatedAt: number;
+  /** 已生成的回答正文（节流快照，可能落后于真实进度） */
+  answer: string;
+  /** 已产出的过程步骤（与 SSE step 同形，按 id upsert） */
+  steps: Array<{ id: string; kind: 'thinking' | 'tool' | 'answer'; label: string; text: string; at: number }>;
+}
+
 export interface EventAnalysisAskDto {
   turns: AnalysisAskTurnDto[];
   total: number;
   /** 记录是否曾因字节/条数上限被裁剪 */
   truncated: boolean;
   activeRunId: string | null;
+  /** 进行中的那一轮；null = 没有在跑的追问 */
+  running: AnalysisAskRunningDto | null;
 }
 
 export interface CodeLocationPreviewDto {

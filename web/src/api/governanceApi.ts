@@ -10,6 +10,7 @@
  */
 
 import type {
+  AnalysisAskRunningDto,
   AnalysisAskTurnDto,
   AnalysisDraftDto,
   ConclusionNodeDto,
@@ -985,12 +986,26 @@ export async function askEventAnalysisStream(
   return { turn: doneTurn };
 }
 
-/** 读追问记录（可按 runId 过滤） */
+/**
+ * 读追问记录（可按 runId 过滤）。
+ *
+ * `running` 是「正在进行中的那一轮」（#82）：追问是 SSE 流，切页 / 刷新会断，
+ * 回来先按它渲染再轮询到落库；`null` = 没有在跑的追问。
+ */
 export function listEventAnalysisAsk(
   scope: string,
   eventId: string,
   runId?: string,
-): Promise<{ ok: true; scope: string; eventId: string; turns: AnalysisAskTurn[]; total: number; truncated: boolean; activeRunId: string | null }> {
+): Promise<{
+  ok: true;
+  scope: string;
+  eventId: string;
+  turns: AnalysisAskTurn[];
+  total: number;
+  truncated: boolean;
+  activeRunId: string | null;
+  running: AnalysisAskRunningDto | null;
+}> {
   const qs = new URLSearchParams({ scope, ...(runId ? { runId } : {}) });
   return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/ask?${qs}`);
 }

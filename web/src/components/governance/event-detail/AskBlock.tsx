@@ -12,9 +12,31 @@ import {
   type AskStep,
   type ConfirmedCodeLocation,
 } from '@/api/governanceApi';
+import type { AnalysisAskRunningDto } from '@/api/governanceContract';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ThinkingBlock } from '../ToolCallRow';
 import { AnalysisProposalModal } from './AnalysisProposalModal';
+
+/**
+ * 运行中追问的轮询间隔（#82）。
+ *
+ * 追问是一条 SSE 流，切页 / 刷新会断开连接，而服务端**不会**因此中止（它不监听 close），
+ * 仍会跑完并落库。2s 一次读运行态：既能及时显示半截答案，也不至于把 GET 打成高频请求。
+ */
+const REMOTE_POLL_MS = 2000;
+
+/**
+ * 是否该「接续」服务端那一轮：`runId` 不一致说明分析被重跑过，
+ * 拿它的半截答案接着展示会让人以为是新结论的回答（口径同 REVISION_CONFLICT）。
+ */
+function shouldResume(
+  running: AnalysisAskRunningDto | null,
+  activeRunId: string | null,
+): AnalysisAskRunningDto | null {
+  if (!running) return null;
+  if (running.runId && activeRunId && running.runId !== activeRunId) return null;
+  return running;
+}
 
 /**
  * 追问这次分析（2026-11-17 · 批 6 / B2 前端，真机走查后补：流式输出）。
@@ -50,6 +72,11 @@ export interface AskBlockProps {
 export function AskBlock(props: AskBlockProps): JSX.Element {
   const { scope, eventId, canAsk, canWrite, activeRunId, onAnalysisUpdated } = props;
   const [turns, setTurns] = useState<AnalysisAskTurn[]>([]);
+  /**
+   * 服务端认为「还在跑」的那一轮（#82）：
+   * 切页 / 刷新回来后按它先把问题、半截答案与过程渲染出来，再轮询到落库。
+   */
+  const [remote, setRemote] = useState<AnalysisAskRunningDto | null>(null);
   /** 正在流式输出的这一轮（先上屏问题，再逐段填答案） */
   const [pending, setPending] = useState<{ question: string; answer: string } | null>(null);
   /** 本轮过程步骤（按 id upsert，累积展示，像 AI 分析过程区那样实时增长） */
@@ -70,16 +97,41 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
   const seqRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const load = useCallback(async (): Promise<void> => {
+  /**
+   * 读记录请求的序号（与流式的 `seqRef` 分开：那个管「哪一轮追问」，这个管「哪一次读记录」）。
+   *
+   * 首屏与 2s 轮询打的是同一个接口，网络慢时晚到的旧响应会盖掉新数据
+   * （turns 少一条，或把已结束的运行态又写回来）。只认最后一次请求的结果。
+   */
+  const loadSeqRef = useRef(0);
+  const refresh = useCallback(async (): Promise<void> => {
+    const seq = ++loadSeqRef.current;
     try {
       const res = await listEventAnalysisAsk(scope, eventId);
+      if (seq !== loadSeqRef.current) return;
       setTurns(res.turns);
+      // 运行态只在「确实是我这版结论的追问」时才接续（分析被重跑则丢弃）
+      setRemote(shouldResume(res.running ?? null, activeRunId));
     } catch {
-      // 读不到就按空列表展示，不阻塞卡片
+      // 读不到则保持现状：首屏是空列表；轮询中保留占位，让下一轮再试
     }
-  }, [scope, eventId]);
+  }, [scope, eventId, activeRunId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  /**
+   * 运行中追问的续接轮询（2026-11-23 · #82）。
+   *
+   * 场景：追问回答到一半切走 / 刷新 → SSE 断开、组件内存态没了，但服务端仍在跑。
+   * 回来时首屏已拿到运行态，这里每 2s 再读一次：`running` 变 `null` 说明那一轮已落库
+   * （turns 同时更新），占位自动换成正式问答；服务短暂不可用时保留占位，下一轮再试。
+   */
+  const pollingRemote = remote !== null;
+  useEffect(() => {
+    if (!pollingRemote) return undefined;
+    const timer = window.setInterval(() => { void refresh(); }, REMOTE_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [pollingRemote, refresh]);
 
   // 新内容到达时贴底（只在已贴底时跟随，避免打断回看）；过程区内部自己贴底（AskProcess）
   useEffect(() => {
@@ -90,7 +142,8 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
 
   const send = async (): Promise<void> => {
     const text = question.trim();
-    if (!text || asking || !canAsk) return;
+    // `remote` 非空 = 上一轮还在服务端跑（切页回来会走这里）：再发会并出两条追问
+    if (!text || asking || !canAsk || remote) return;
     const seq = seqRef.current + 1;
     seqRef.current = seq;
     setAsking(true);
@@ -179,7 +232,7 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       const code = err instanceof GovernanceApiError ? err.code : undefined;
       if (code === 'REVISION_CONFLICT') {
         setError('分析结果已更新，请刷新后重新提问');
-        void load();
+        void refresh();
       } else {
         setError((err as Error).message || '提问失败，请重试');
       }
@@ -189,7 +242,8 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
   };
 
   const clear = async (): Promise<void> => {
-    if (clearing || !canWrite || turns.length === 0) return;
+    // `remote` 兜底：按钮已禁用，但清空正在写的那轮会让服务端落到一半的记录失去对应问答
+    if (clearing || !canWrite || turns.length === 0 || remote) return;
     setClearing(true);
     setError('');
     try {
@@ -252,15 +306,19 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
         <button
           type="button"
           className="gov-ask__clear"
-          disabled={clearing || !canWrite || turns.length === 0}
-          title={canWrite ? '清空本事件的追问记录（不可恢复）' : '需要写权限'}
+          disabled={clearing || !canWrite || turns.length === 0 || Boolean(remote)}
+          title={!canWrite
+            ? '需要写权限'
+            : remote
+              ? '这一轮追问仍在进行，完成后才能清空'
+              : '清空本事件的追问记录（不可恢复）'}
           onClick={() => void clear()}
         >
           {clearing ? '清空中…' : '清空对话'}
         </button>
       </div>
 
-      {turns.length > 0 || pending ? (
+      {turns.length > 0 || pending || remote ? (
         <div className="gov-ask__list" ref={listRef}>
           {turns.map((t) => (
             <div key={t.id} className="gov-ask__thread">
@@ -282,6 +340,21 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
               {pending.answer ? <AskAnswer text={pending.answer} streaming /> : null}
             </div>
           ) : null}
+          {/*
+            接续服务端的运行中那一轮（#82）：切页 / 刷新回来后本地 pending 已不存在，
+            这里用服务端的半截快照顶上，并在轮询到落库后自动换成正式问答。
+            `!pending` 是硬条件：本地流式进行中时服务端也在写运行态，两个都渲染会重复一遍。
+          */}
+          {remote && !pending ? (
+            <div className="gov-ask__thread" data-ask-remote="1">
+              <AskQuestion text={remote.question} />
+              <AskProcess key="remote-proc" steps={remote.steps} running />
+              {remote.answer ? <AskAnswer text={remote.answer} streaming /> : null}
+              <div className="gov-hint">
+                这一轮追问仍在进行（已从服务端接续，离开页面不会丢）；完成后会自动出现在上方记录里
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -291,8 +364,10 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
           type="text"
           value={question}
           maxLength={4000}
-          placeholder={canAsk ? '就这次分析追问一句，回车发送' : '当前账号无提问权限'}
-          disabled={!canAsk || asking}
+          placeholder={remote
+            ? '上一轮仍在回答，完成后可继续追问'
+            : canAsk ? '就这次分析追问一句，回车发送' : '当前账号无提问权限'}
+          disabled={!canAsk || asking || Boolean(remote)}
           title={askTitle}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => {
@@ -304,11 +379,11 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
         <button
           type="button"
           className="gov-btn gov-btn--sm gov-btn--primary"
-          disabled={!canAsk || asking || !question.trim()}
+          disabled={!canAsk || asking || Boolean(remote) || !question.trim()}
           title={askTitle}
           onClick={() => void send()}
         >
-          {asking ? '回答中…' : '发送'}
+          {asking ? '回答中…' : remote ? '追答中…' : '发送'}
         </button>
       </div>
 

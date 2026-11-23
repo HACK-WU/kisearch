@@ -52,9 +52,9 @@ import {
 } from './analysis-fs-tools.js';
 import { collectMembers } from './event-service.js';
 import { readRefs } from './refs-store.js';
-import { appendAskTurn, readAskDoc } from './analysis-ask-store.js';
+import { appendAskTurn, readAskDoc, startAskRunning, type AskRunningTracker } from './analysis-ask-store.js';
 import { diffProposal, extractProposal, validateProposal, type ProposalDiff } from './analysis-ask-patch.js';
-import type { AnalysisAskTurn, AskProposal, EventAnalysisAskDoc } from './types.js';
+import type { AnalysisAskTurn, AskProposal, AskRunningStep, EventAnalysisAskDoc } from './types.js';
 
 /** 单条回答上限（超长截断；模板已不再限制字数，硬上限即此值） */
 export const ASK_ANSWER_MAX_CHARS = 4000;
@@ -330,7 +330,14 @@ export async function askEventAnalysis(
     );
   }
 
+  /*
+   * 运行态（#82）：让「切页 / 刷新」回来的人还能看到这一轮在跑
+   * （问题 + 已生成的半截 + 过程步骤）。首写同步、后续 800ms 节流；
+   * 成功 / 失败 / 异常三条出口统一由 finally 删除。
+   */
+  let running: AskRunningTracker | null = null;
   try {
+    running = startAskRunning(scope, event.id, { question, runId: draftRunId });
     const history = readAskDoc(scope, event.id).turns;
     const attachedDocs = {
       members: collectMembers(scope, event.id).map((m) => ({ group: m.group, name: m.name })),
@@ -389,6 +396,8 @@ export async function askEventAnalysis(
     ];
 
     let answer = '';
+    /** 本轮已生成正文（每轮开头清零；运行态与答案 flush 共用同一口径，见 syncRunning 注释） */
+    let roundContent = '';
     let promptTokens = 0;
     let completionTokens = 0;
     const toolCallNames: string[] = [];
@@ -401,10 +410,28 @@ export async function askEventAnalysis(
      * 也避免增量乱序/丢段导致步骤内容与最终答案对不上。
      */
     const stepText = new Map<string, string>();
+    /** 运行态用的步骤快照：按 id upsert，Map 保留首次插入顺序（与前端渲染一致） */
+    const stepMeta = new Map<string, AskRunningStep>();
+    /**
+     * 把「已落定的 answer + 本轮已生成正文」写进运行态。
+     *
+     * 口径必须**全处统一**：正文既可能在 content 增量里推进，也可能在轮末由 emitStep 推进；
+     * 两处各写各的（一处带 roundContent、一处只写 answer）会互相清零 ——
+     * 真机实测过：正文到 29 字后被同轮的 emitStep 覆盖成空。
+     */
+    const syncRunning = (): void => {
+      running?.update({
+        answer: (answer + roundContent).slice(0, ASK_ANSWER_MAX_CHARS),
+        steps: [...stepMeta.values()],
+      });
+    };
     const emitStep = (id: string, kind: AskStep['kind'], label: string, delta: string): void => {
       const text = (stepText.get(id) ?? '') + delta;
       stepText.set(id, text);
-      args.onEvent?.({ type: 'step', step: { id, kind, label, text, at: now } });
+      const step: AskStep = { id, kind, label, text, at: now };
+      stepMeta.set(id, step);
+      args.onEvent?.({ type: 'step', step });
+      syncRunning();
     };
 
     for (let round = 0; round < ASK_TOOL_MAX_ROUNDS + 1; round += 1) {
@@ -419,7 +446,7 @@ export async function askEventAnalysis(
       }
 
       let pendingCalls: Array<{ id: string; name: string; arguments: string }> = [];
-      let roundContent = '';
+      roundContent = '';
       try {
         const stream = streamFn(messages, {
           tools: forceAnswerNext || toolDefs.length === 0 ? undefined : toolDefs,
@@ -441,6 +468,13 @@ export async function askEventAnalysis(
             //   不是答案。只有确认本轮无 tool_calls（=最终作答轮）才 flush 到 answer/delta。
             //   这与 analysis-runner 的 finalText 口径一致，避免过渡语被当成答案套卡片。
             roundContent += part.text;
+            /*
+             * 运行态必须**逐段**跟（#82）：正文是在这里流式产生的，`answer` 只在轮末才累加，
+             * 不在这里补一手的话，切页回来只能看到「过程步骤」而看不到那半截答案 ——
+             * 那正是用户最想确认的东西。落定的 answer + 本轮已生成 = 当前可见全文。
+             * 代价：中间轮的过渡语也会短暂出现在答案区，最终轮 flush 时被正式正文覆盖。
+             */
+            syncRunning();
           } else if (part.type === 'reasoning') {
             // 思考步骤按轮 upsert、累积文本（前端步骤流实时增长，不再被单行进度覆盖）
             emitStep(`r${round}-think`, 'thinking', `第 ${round + 1} 轮 · 思考`, part.text.slice(0, THINKING_EVENT_MAX));
@@ -458,9 +492,12 @@ export async function askEventAnalysis(
         void err;
         // 异常轮：本轮已缓冲的正文按"最终作答"flush，避免丢内容
         if (roundContent) {
-          answer += roundContent;
-          args.onDelta?.(roundContent);
-          emitStep('answer', 'answer', '作答', roundContent);
+          // 先并入 answer 再清零：运行态口径恒为「answer + roundContent」，不会瞬时写进双倍正文
+          const produced = roundContent;
+          roundContent = '';
+          answer += produced;
+          args.onDelta?.(produced);
+          emitStep('answer', 'answer', '作答', produced);
         }
         break;
       }
@@ -468,9 +505,12 @@ export async function askEventAnalysis(
       if (pendingCalls.length === 0 || forceAnswerNext) {
         // 最终作答轮：flush 本轮正文到答案气泡 + 步骤流（只此一处，不重复）
         if (roundContent) {
-          answer += roundContent;
-          args.onDelta?.(roundContent);
-          emitStep('answer', 'answer', '作答', roundContent);
+          // 先并入 answer 再清零：运行态口径恒为「answer + roundContent」，不会瞬时写进双倍正文
+          const produced = roundContent;
+          roundContent = '';
+          answer += produced;
+          args.onDelta?.(produced);
+          emitStep('answer', 'answer', '作答', produced);
         }
         break;
       }
@@ -604,6 +644,8 @@ export async function askEventAnalysis(
     const saved = await appendAskTurn(scope, event.id, turn);
     return { turn, doc: saved.doc, ...(proposalView ? { proposal: proposalView } : {}) };
   } finally {
+    // 运行态必须删：留着会让「切页回来」的人永远看到「正在追答」（成功 / 失败 / 异常同待遇）
+    running?.stop();
     // 所有出口都必须释放追问限流的并发槽，否则计数泄漏、后续追问全被判 BUSY
     followupLimiter.release();
   }
