@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { Link, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { AppShell } from '@/layouts/AppShell';
 import { DashboardPage } from '@/pages/DashboardPage';
 import { BrowsePage } from '@/pages/BrowsePage';
@@ -46,6 +46,35 @@ function RequireUsersManage({ children }: { children: ReactNode }): JSX.Element 
   const { can } = useAuth();
   if (!can('users.manage')) return <Navigate to="/profile" replace />;
   return <>{children}</>;
+}
+
+/**
+ * 未匹配路由兜底（事件 #70）。
+ *
+ * 此前 `<Routes>` 无匹配项时渲染 `null`：手输错路由（如 `/browseX`），或整站挂在子路径下
+ * 而前缀没被正确处理（URL 是 `/ki/browse`），都会表现为「整页空白 + 控制台无报错」，
+ * 用户拿不到任何线索。这里把**实际访问的路径原样打出来**——前缀配错时一眼能看出问题在
+ * 地址而不是页面崩了。
+ *
+ * 注意：本页在 `<Route path="/" element={<AppShell />}>` 之外渲染，不依赖登录态与侧栏；
+ * 真正的「子路径部署」还需要给 `BrowserRouter` 传 basename，仅靠本兜底页解决不了前缀白屏。
+ */
+function NotFoundPage(): JSX.Element {
+  const location = useLocation();
+  return (
+    <div className="ki-notfound">
+      <p className="ki-notfound__code">404</p>
+      <h1 className="ki-notfound__title">页面不存在</h1>
+      <p className="ki-notfound__path">
+        {location.pathname}
+        {location.search}
+      </p>
+      <p className="ki-notfound__hint">
+        请核对地址是否拼写正确；若服务部署在子路径下，地址前缀必须与部署一致。
+      </p>
+      <Link className="ki-btn ki-btn--primary" to="/">回到总览</Link>
+    </div>
+  );
 }
 
 export function AppRoutes(): JSX.Element {
@@ -122,6 +151,8 @@ export function AppRoutes(): JSX.Element {
           element={<RequireUsersManage><UsersPage /></RequireUsersManage>}
         />
       </Route>
+      {/* 兜底必须放最后且在最外层：嵌套路由里的 `*` 只覆盖 AppShell 内部的未匹配路径 */}
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
