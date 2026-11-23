@@ -142,11 +142,13 @@ export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
     key: 'read',
     label: '只读',
     danger: false,
-    names: ['ki_search', 'ki_group_list', 'ki_get_module_info', 'ki_tag_list', 'ki_scope_list'],
+    names: ['ki_search', 'ki_group_list', 'ki_get_module_info', 'ki_get_image', 'ki_tag_list', 'ki_scope_list'],
     descs: {
       ki_search: '混合 / 字面检索知识库',
       ki_group_list: '查看 Group 树结构',
       ki_get_module_info: '读取指定文档原文',
+      // 2026-11-23（REQ-20261123-008）：读文档后按 images[].ref 取图，让模型真正看到图里的内容
+      ki_get_image: '查看文档中图片的实际内容（按 images 清单取图）',
       ki_tag_list: '列出标签',
       ki_scope_list: '列出 scope 清单（含顶层组与只读标记）',
     },
@@ -227,9 +229,11 @@ export const ANALYSIS_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
   {
     key: 'kb-read',
     label: '知识库只读（按需读取上下文关联 / 参考文档）',
-    names: ['ki_get_module_info', 'ki_search', 'ki_group_list', 'ki_tag_list'],
+    names: ['ki_get_module_info', 'ki_get_image', 'ki_search', 'ki_group_list', 'ki_tag_list'],
     descs: {
       ki_get_module_info: '按 group 与文档名读取知识库正文',
+      // 2026-11-23（REQ-20261123-008）：读文档后按 images[].ref 取图，让分析也能看到图里的内容
+      ki_get_image: '查看文档中图片的实际内容（按 images 清单取图）',
       ki_search: '混合 / 全文检索知识库补充上下文',
       ki_group_list: '查看 Group 树结构与文档清单',
       ki_tag_list: '查看知识库标签',

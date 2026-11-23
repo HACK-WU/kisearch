@@ -75,6 +75,8 @@ import type { Capability } from '../../auth/capabilities.js';
 import { collectReplayItems, withEvidenceBlock, type ReplayItem } from './replay.js';
 import { toSourceRefs } from './projection.js';
 import { serializeToolResponse } from './tool-response.js';
+// 取图结果的分流（REQ-20261123-008 B2）：字节在序列化**之前**抽走，正文只留摘要
+import { isToolImageResult, toImageParts, toToolImageSummary, demoteOlderImages } from './tool-image.js';
 
 export interface ToolLoopInput {
   scope: string;
@@ -547,7 +549,12 @@ export function computeContextChars(
 ): { chars: number; parts: ContextCharsParts } {
   const parts: ContextCharsParts = { system: 0, user: 0, assistant: 0, tool: 0, refs: 0 };
   for (const m of messages) {
-    let n = m.content.length;
+    // ⚠ content 可能是 parts 数组（`ki_get_image` 的工具结果）：数组的 `.length` 是**元素个数**，
+    // 直接当字符数会严重**少算**（一张 150KB 的图会被算成 2）。图片 part 不参与字符统计
+    // （DESIGN §5 / REQ-20261123-006 的 Q-D），只累加 text part。
+    let n = typeof m.content === 'string'
+      ? m.content.length
+      : m.content.reduce((sum, p) => sum + (p.type === 'text' ? p.text.length : 0), 0);
     if (m.tool_calls) {
       for (const c of m.tool_calls) n += c.function.name.length + c.function.arguments.length;
     }
@@ -659,6 +666,15 @@ async function* toolLoopPath(
   messageId: string,
 ): AsyncGenerator<ChatEvent> {
   const messages = buildUpstreamMessages(input, runtime);
+  /**
+   * 本次生成已消耗的图片张数（REQ-20261123-008 · B4）。
+   *
+   * 上游无状态 ⇒ 图片一旦进 messages，后续**每一轮**都会重传（token × 剩余轮数 +
+   * 带宽 × 剩余轮数）。工具 schema 的 maxItems=3 只挡单次，挡不住"多轮各取 3 张"，
+   * 所以这里按"一次生成"设总闸；跨用户轮次自然清零（conv 只存字符串）。
+   */
+  let imagesUsedThisRun = 0;
+  const imageBudget = CHAT_BUDGET.maxImagesPerRun;
   // ★ `/` 点名（2026-11-12）：先把"本轮按用户点名注入了哪些 skill"告知前端（时间线可见），
   //   再开始生成。已在本会话加载过的条目不会出现在这里（本次没重复注入，报了反而误导）。
   // ⚠️ 路由侧据此发事件但**不**并入 `conv.loadedSkillIds`（见 chat-routes 的 forcedSet 注释）。
@@ -922,6 +938,22 @@ async function* toolLoopPath(
         continue;
       }
 
+      // ★ 图片累计闸（REQ-20261123-008 · B4）：同一次生成内最多 `maxImagesPerRun` 张。
+      //   超限**直接拒并说清剩余额度**——不静默裁剪（模型会以为图本来就少），也不排队
+      //   （排队只会让上游超时先触发，更难诊断）。模型可据提示把 refs 减少后重试。
+      if (entry.name === 'ki_get_image') {
+        const rawRefs = (parsed as { refs?: unknown }).refs;
+        const want = Array.isArray(rawRefs) ? rawRefs.length : 1;
+        if (imagesUsedThisRun + want > imageBudget) {
+          const limitMsg = `本次提问已取图 ${imagesUsedThisRun} 张，上限 ${imageBudget} 张；`
+            + `剩余额度 ${Math.max(0, imageBudget - imagesUsedThisRun)} 张，本次要取 ${want} 张，已拒绝`;
+          const response = serializeToolResponse({ ok: false, error: limitMsg }, runtime.budget.responseChars, entry.name);
+          yield { type: 'tool_end', hits: 0, durationMs: 0, error: limitMsg, response };
+          messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
+          continue;
+        }
+      }
+
       const startedAt = Date.now();
       let result: unknown = null;
       let runError: string | null = null;
@@ -951,9 +983,28 @@ async function* toolLoopPath(
       // 页面与模型共用实际返回文本，仅施加总字符预算（上限取自本轮 runtime 的工具预算）。
       // ★ 失败也序列化**原始结果**（ok:false 的 JSON 含 error/code/details，模型可见失败详情；
       //   与旧行为一致），仅当执行抛错（result 为空）时退化为 {error} 摘要。
-      const response = serializeToolResponse(result !== null ? result : { error: runError ?? '工具执行失败' }, runtime.budget.responseChars, entry.name);
+      // ★ 图片结果分流（REQ-20261123-008 B2）：必须在**序列化之前**把字节抽走 ——
+      //   base64 走 JSON.stringify 会瞬间撞穿字符预算，且被二分截断后不可解码（模型拿到坏图）。
+      //   判别用精确比较 `kind === 'images'`（见 tool-image.ts 头注释的 kind 冲突说明）。
+      const imageResult = isToolImageResult(result) ? result : null;
+      const serializable = imageResult
+        ? toToolImageSummary(imageResult)
+        : (result !== null ? result : { error: runError ?? '工具执行失败' });
+      const response = serializeToolResponse(serializable, runtime.budget.responseChars, entry.name);
       yield { type: 'tool_end', hits, durationMs, ...(runError ? { error: runError } : {}), response };
-      messages.push({ role: 'tool', tool_call_id: call.id, content: response.text });
+      if (imageResult) {
+        // 先降级**更早**的图（保证任何时刻最多一条消息带图），再累加本次用量。
+        // 顺序反了会让最新这张也被降级，模型这轮就看不到图了。
+        demoteOlderImages(messages);
+        imagesUsedThisRun += imageResult.images.length;
+      }
+      messages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        // 图片与摘要并入**同一条** tool 消息：实测上游接受，且模型确实读取其中的图
+        // （回答里会主动说明「来自结果中附带的图片」）。
+        content: imageResult ? toImageParts(imageResult, response.text) : response.text,
+      });
 
       if (runError) {
         // ★ 检索类工具失败：按 N17 **明示**（degraded 至多一次闸门）。

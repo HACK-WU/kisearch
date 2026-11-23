@@ -100,9 +100,11 @@ describe('默认值', () => {
     assert.equal(t.ki_group_delete_empty, false);
   });
 
-  it('工具白名单为 mcp-tools 的 13 个真实注册名（读 5 / 写 6 / 删 2）', () => {
-    assert.equal(MCP_TOOL_NAMES.length, 13);
+  it('工具白名单为 mcp-tools 的 14 个真实注册名（读 6 / 写 6 / 删 2）', () => {
+    // 2026-11-23：新增 ki_get_image（REQ-20261123-008），读 5 → 6
+    assert.equal(MCP_TOOL_NAMES.length, 14);
     assert.ok(MCP_TOOL_NAMES.includes('ki_search'));
+    assert.ok(MCP_TOOL_NAMES.includes('ki_get_image'));
     assert.ok(MCP_TOOL_NAMES.includes('ki_scope_list'));
     assert.ok(MCP_TOOL_NAMES.includes('ki_bulk_sync_relation'));
   });

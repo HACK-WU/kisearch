@@ -503,6 +503,16 @@ export const CHAT_BUDGET = {
   maxHitsPerCallHardMax: 50,
   /** 工具返回总长度的**内置默认**（可被对话配置覆盖；不按字段或单条片段裁剪） */
   maxToolResponseChars: 10000,
+  /**
+   * **同一次生成内**允许取图的总张数（REQ-20261123-008 · D6）。
+   *
+   * 为什么需要这一条：上游 API 无状态，图片一旦进入 messages，就会在**后续每一轮**请求里
+   * 重传（token × 剩余轮数 + 带宽 × 剩余轮数）。工具 schema 的 maxItems=3 只挡单次，
+   * 挡不住"多轮各取 3 张"，所以再加一条**按次生成累计**的闸。
+   *
+   * 跨用户轮次清零：历史轮次的图不会重建（`conv.messages` 只落字符串），天然满足。
+   */
+  maxImagesPerRun: 6,
   /** 工具返回上限的配置边界（服务端强校验）：低于下限几乎必然截断，高于上限无实际意义 */
   toolResponseCharsMin: 1000,
   toolResponseCharsMax: 100_000,

@@ -246,6 +246,37 @@ describe('computeContextChars（纯函数）', () => {
     assert.equal(r.chars, 3 + 2 + 4 + 4);
   });
 
+  /**
+   * REQ-20261123-008 B2：`ki_get_image` 让 tool 消息的 content 变成 parts 数组。
+   * 数组的 `.length` 是**元素个数**，若直接当字符数会严重**少算**（一张 150KB 的图算成 2）。
+   * 口径：只累加 text 分片，图片分片不参与（图片不进字符预算，见 DESIGN §5）。
+   */
+  it('content 为 parts 数组时：只累加 text 分片，图片不计', () => {
+    const r = computeContextChars([
+      { role: 'user', content: 'abcde' }, // 5
+      {
+        role: 'tool',
+        content: [
+          { type: 'text', text: '12345678' }, // 8
+          {
+            type: 'image_url',
+            image_url: { url: `data:image/png;base64,${'A'.repeat(100_000)}` },
+          },
+        ],
+      },
+    ]);
+    assert.equal(r.parts.tool, 8, '图片分片不得计入字符数');
+    assert.equal(r.chars, 13, '数组 content 不能按元素个数（2）累加');
+  });
+
+  it('content 为 parts 数组且只有图片时：该条计 0', () => {
+    const r = computeContextChars([
+      { role: 'tool', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } }] },
+    ]);
+    assert.equal(r.parts.tool, 0);
+    assert.equal(r.chars, 0);
+  });
+
   it('上限缺省 1000K：未配置 llm.contextChars 时回落到 CHAT_BUDGET.defaultContextChars', () => {
     const status = resolveLlmStatus(
       { llm: { baseURL: 'https://example.com/v1', model: 'm', apiKey: 'k' } },

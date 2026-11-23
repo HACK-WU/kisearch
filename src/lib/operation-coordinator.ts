@@ -78,9 +78,14 @@ const READ_OPERATIONS = new Set<string>([
 const READ_MCP_TOOLS = new Set<string>([
   'ki_get_module_info',
   /**
+   * 取图（REQ-20261123-008）：纯本地文件读，无 embedding、零元数据写。
+   * 落 write 串行会让「导入期间看图」排在几十秒之后（与 `ki_get_module_info` 同理）。
+   */
+  'ki_get_image',
+  /**
    * 知识治理的三个枚举（REQ-20261113-004 · S-06）：只读纯查、无 embedding，
    * 与 `ki_group_list` 同性质 —— 落 write 串行会让它们排在导入后面几十秒。
-   * `ki_event_set_stage` **不在此列**：它要摘/建索引，必须走写串行。
+   * `ki_event_edit stage` **不在此列**：它要摘/建索引，必须走写串行。
    */
   'ki_lifecycle_list',
   'ki_event_list',

@@ -81,7 +81,8 @@ describe('capability coverage', () => {
     );
 
     const chatNames = CHAT_MCP_TOOLS.map((t) => t.name);
-    assert.equal(chatNames.length, 13);
+    // 2026-11-23：新增 ki_get_image（REQ-20261123-008），13 → 14
+    assert.equal(chatNames.length, 14);
     for (const name of chatNames) {
       assert.ok(registered.includes(name), `chat 工具未在主通道注册：${name}`);
       assert.ok(TOOL_CAPABILITIES[name], `工具未登记：${name}`);

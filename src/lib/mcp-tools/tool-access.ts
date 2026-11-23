@@ -27,17 +27,19 @@
  */
 
 /**
- * 只读 Token 可见 / 可调的工具名单（**11 个**，均为纯读）。
+ * 只读 Token 可见 / 可调的工具名单（**12 个**，均为纯读）。
  *
  * `ki_ask` 不在其中 —— 对库只读但会产出答案，按模型消耗型准入。
  * `ki_recall` **在**其中（REQ-20261118-004，用户拍板「它本来就是只读」）：
  * 虽然它内部会跑模型，但产出只有文档清单与判断，不写任何数据；
  * 放开后只读 Token 也能触发模型调用与内容外发，该代价已由产品确认。
+ * `ki_get_image`（REQ-20261123-008）：读 KB 里的图片字节，同样不写任何数据。
  */
 export const READ_ONLY_TOOL_NAMES: readonly string[] = [
   'ki_search',
   'ki_recall',
   'ki_get_module_info',
+  'ki_get_image',
   'ki_group_list',
   'ki_scope_list',
   'ki_view_list',

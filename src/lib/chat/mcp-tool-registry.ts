@@ -41,6 +41,8 @@ import { executeBulkStore } from '../../bulk-store.js';
 import { executeSyncRelation, executeBulkSyncRelation } from '../../sync-relation.js';
 import { executeEditRelation } from '../../edit-relation.js';
 import { executeDeleteRelation } from '../../delete-relation.js';
+// 取图（REQ-20261123-008 B2）：返回 { kind:'images' } 判别形状，由 tool-loop 分流
+import { executeGetImage, MAX_IMAGES_PER_CALL } from '../asset-image.js';
 
 /** 模型给的原始参数（JSON 解析 + 白名单取键 + 钳制后的结果） */
 export type ChatToolArgs = Record<string, unknown>;
@@ -507,6 +509,51 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
         'ki_get_module_info',
       );
     }),
+  }),
+  /**
+   * `ki_get_image`（REQ-20261123-008 B2）：按读文档返回的 `images[].ref` 取图。
+   *
+   * ★ schema **刻意不含 scope** —— scope 由 daemon 注入（`run(scope, args)` 首参），
+   *   否则模型可传任意 scope 取图，绕过 N23「禁止跨 scope 检索」。
+   * ★ 返回判别形状 `{ kind:'images', text, images[] }`，由 `tool-loop` 在
+   *   **序列化之前**分流：字节转 `image_url` parts，`tool_end.response` 只留摘要
+   *   （见 `retrieval/tool-image.ts` 与 DESIGN §6.3）。
+   */
+  makeEntry({
+    name: 'ki_get_image',
+    readOnly: true,
+    def: {
+      type: 'function',
+      function: {
+        name: 'ki_get_image',
+        description: '查看知识库文档里图片的**实际内容**（像素）。参数 refs 直接用 ki_get_module_info 返回的 images[].ref（一次 1~3 张，优先取 supported:true 的）。取不到时摘要会逐条说明原因（格式不支持 / 文件缺失 / 超限）。',
+        parameters: {
+          type: 'object',
+          properties: {
+            group: { type: 'string', description: '文档所属 Group（与读该文档时用的 group 一致）' },
+            refs: {
+              type: 'array',
+              items: { type: 'string' },
+              minItems: 1,
+              maxItems: MAX_IMAGES_PER_CALL,
+              description: `images[].ref 原样传回，1~${MAX_IMAGES_PER_CALL} 张`,
+            },
+          },
+          required: ['group', 'refs'],
+        },
+      },
+    },
+    specs: [
+      { key: 'group', type: 'string', required: true },
+      { key: 'refs', type: 'stringArray', required: true, maxItems: MAX_IMAGES_PER_CALL },
+    ],
+    run: (scope, a) => submitScoped('ki_get_image', scope, () =>
+      withTimeout(
+        // allowSvg：SVG 走 worker 栅格化（D9）；READ 档 30s 覆盖"3 张 × 单张 10s"最坏情况
+        executeGetImage({ scope, group: a.group as string, refs: a.refs as string[], allowSvg: true }),
+        TOOL_TIMEOUT.READ,
+        'ki_get_image',
+      )),
   }),
   makeEntry({
     name: 'ki_tag_list',

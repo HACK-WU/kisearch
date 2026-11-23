@@ -10,6 +10,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { registerGroupListTool } from './mcp-tools/group-list.js';
 import { registerGetModuleInfoTool } from './mcp-tools/get-module-info.js';
+import { registerGetImageTool } from './mcp-tools/get-image.js';
 import { registerSyncRelationTool } from './mcp-tools/sync-relation.js';
 import { registerEditRelationTool } from './mcp-tools/edit-relation.js';
 import { registerBulkSyncRelationTool } from './mcp-tools/bulk-sync-relation.js';
@@ -25,11 +26,10 @@ import { registerLifecycleListTool } from './mcp-tools/lifecycle-list.js';
 import { registerEventListTool } from './mcp-tools/event-list.js';
 import { registerEventTypeListTool } from './mcp-tools/event-type-list.js';
 import { registerEventGetTool } from './mcp-tools/event-get.js';
-import { registerEventSetStageTool } from './mcp-tools/event-set-stage.js';
 import { registerEventCreateTool } from './mcp-tools/event-create.js';
 import { registerEventDeleteTool } from './mcp-tools/event-delete.js';
-import { registerEventDocsTool } from './mcp-tools/event-docs.js';
-import { registerEventRefsTool } from './mcp-tools/event-refs.js';
+/** 事件编辑（2026-11-23 · REQ-20261123-009）：docs / refs / set_stage / 上传结论 / 改描述 合并为一个工具 */
+import { registerEventEditTool } from './mcp-tools/event-edit.js';
 import { registerAskTool } from './mcp-tools/ask.js';
 import { registerRecallTool } from './mcp-tools/recall.js';
 import { READ_ONLY_INSTRUCTIONS } from './mcp-tools/tool-access.js';
@@ -60,6 +60,11 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
   //    否则只读 Token 看不见它（方向安全，但功能缺失）。
   registerSearchTool(server);
   registerGetModuleInfoTool(server);
+  /**
+   * `ki_get_image`（REQ-20261123-008）：读文档里图片的**实际内容**。
+   * 只读（不改库），但会把图片字节外发给客户端 —— 已在 product 层确认按只读工具处理。
+   */
+  registerGetImageTool(server);
   registerGroupListTool(server);
   registerScopeListTool(server, authScopes);
   registerViewListTool(server, authScopes);
@@ -81,12 +86,15 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
   // ⚠️ 新增写工具必须放在本块内，否则会暴露给只读 Token；
   //    tools/call 侧另有一道白名单拦截（mcp-http.ts::findReadOnlyViolation）兜住缓存/构造调用。
   if (!readOnly) {
-    registerEventSetStageTool(server);
-    // 事件 CRUD 与两类文档增删（REQ-20261116-004）
+    // 事件 CRUD（REQ-20261116-004）
     registerEventCreateTool(server);
     registerEventDeleteTool(server);
-    registerEventDocsTool(server);
-    registerEventRefsTool(server);
+    /*
+     * 事件编辑（2026-11-23 · REQ-20261123-009）：原 `ki_event_docs` / `ki_event_refs` /
+     * `ki_event_set_stage` 三工具已合并为 `ki_event_edit`（单值 action）。旧名不保留别名——
+     * 双份维护会让模型在旧名与新名之间随机选，排查时更难定位。
+     */
+    registerEventEditTool(server);
     registerSyncRelationTool(server);
     registerEditRelationTool(server);
     registerBulkSyncRelationTool(server);

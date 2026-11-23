@@ -172,10 +172,27 @@ export function toChatConfigOk(status: LlmStatus, configPath: string): ChatConfi
 // 流式调用
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * 上游消息 content 的分片（OpenAI 多模态形态，REQ-20261123-008 B2）。
+ *
+ * 只有两类：常规文本与 `data:` URI 内联图片。
+ *
+ * ★ 数组形态**只出现在工具消息**上（`ki_get_image` 的返回）。
+ *   · system 块、历史消息、本轮 user 仍是 `string`；
+ *   · 历史轮次不重建图片 —— `conv.messages` 只落字符串，所以「历史只带最近 1 次带图结果」
+ *     在跨轮场景**天然成立**；同一生成内的多轮工具循环才需要显式降级（B4 的 `demoteOldImages`）。
+ *
+ * ★ 为什么内联 `data:` 而不是 http URL：图在本机 KB 目录里，`127.0.0.1` 模型侧取不到，
+ *   且把内部地址发给上游也不合适（详见 DESIGN §D4 与实测 C1）。
+ */
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } };
+
 /** 上游消息（**只含 `content`**，不含 reasoning） */
 export interface ChatTurn {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string;
+  content: string | ChatContentPart[];
   /** 仅 assistant 且本轮发起了工具调用时存在 */
   tool_calls?: Array<{ id: string; type: 'function'; function: { name: string; arguments: string } }>;
   /** 仅 role=tool */

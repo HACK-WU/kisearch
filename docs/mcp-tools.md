@@ -1,6 +1,6 @@
 # MCP 工具参考
 
-`ki mcp` 共暴露 **24 个**工具。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
+`ki mcp` 共暴露 **24 个**工具（数量随版本变化，以客户端 `tools/list` 的实际结果为准）。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
 
 > 三个例外：`ki_ask` 的 `scope` **必填**且只接受单个具体知识库（不吃视图名、不吃逗号分隔多库）；`ki_recall` 的 `scope` **同样必填**但接受多个库或知识视图，漏传会直接报错并回可用清单（服务端不设默认库）；`ki_ask` 与全部写工具只在**非只读** Token 会话里注册；`ki_recall` 例外 —— 它虽也会调模型，但产出只有文档清单与判断、不写任何数据，故**只读 Token 也可用**（该取舍由产品确认）。
 
@@ -12,7 +12,8 @@
 |---|---|---|
 | `ki_search` | 语义检索（hybrid / fulltext） | `query`（必填）、`limit`（默认 10，总条数上限）、`tags`（不传=搜全部）、`mode`、`threshold`、`timeout`、`include_original` |
 | `ki_group_list` | Group 树 + Relations，支持 hot/warm/cold/emerging/full 分区与向量兜底 | `groups`（单数别名 `group`）、`subtree`、`mode`（默认 hot）、`hot_count`、`depth`、`auto_fallback` |
-| `ki_get_module_info` | 读取本地 KB 原文；同 Group 批量 ≤10 条；超长文档可分段读取 | `group`（必填）、`relation` 或 `relations[]`（二选一）、`start_line` / `start_char` / `max_chars`（可选，分段读取；不传 = 全文） |
+| `ki_get_module_info` | 读取本地 KB 原文；同 Group 批量 ≤10 条；超长文档可分段读取。**返回体带 `images[]` 清单**（正文引用了哪些图、各自能不能取），配合 `ki_get_image` 看图 | `group`（必填）、`relation` 或 `relations[]`（二选一）、`start_line` / `start_char` / `max_chars`（可选，分段读取；不传 = 全文） |
+| `ki_get_image` | 读取文档里图片的**实际内容**（像素），返回图片本身。一次 1~3 张；不支持的在返回摘要里逐条说明原因 | `group`（必填，与读文档时一致）、`refs[]`（1~3 个，原样传 `images[].ref`） |
 | `ki_scope_list` | 列出所有 scope 及 KB/向量状态；精确读整篇走「本工具 → `ki_group_list` → `ki_get_module_info`」，只有模糊描述时用 `ki_search`。每条含 `wikiSync { enabled, writableDir, writableFrom, rejectReason? }`（`enabled:true` + `writableDir:null` = 配了但写不进去，如未配置 `wikiSync.sourceDir`）。视图定义读取失败时响应带 `viewsWarning`（此时 `views` 缺省 ≠ 没有视图） | — |
 | `ki_view_list` | 列出知识视图（多个知识库的只读聚合）。默认每条含 `view` / `id` / `members` / `availableCount` / `missing` / **`usableCount`**（真能参与语义检索的成员数）；有成员不可用时给 **`degradedReason`**（如「3 个向量维度不一致（语义检索会跳过）」），维度不一致的库名另列 `dimensionMismatch`。`verbose` 展开 `memberMeta` 与审计字段（健康摘要同样保留）。没有视图、被授权过滤光、视图文件损坏三种"空"分别给 `hint` / `warning` | `verbose` |
 | `ki_tag_list` | 列出 scope 下的 tag 及文档数（只读） | `scope` |
@@ -32,11 +33,9 @@
 | `ki_store` | 只写向量层单条文本 | `text`、`tags` |
 | `ki_bulk_store` | 只写向量层批量文本 | `input`（批量 JSON 文件路径） |
 | `ki_edit_relation` | 对大 Relation 多轮按行编辑；`finish` 后一次性更新索引 | `action`（edit/view/finish/cancel）、`scope`、`group`、`relation` |
-| `ki_event_set_stage` | 把事件流转到指定阶段；到终态阶段会按类型设定的收口动作处理关联文档 | `scope`、`event`（`evt_…` 或 `#shortId`）、`stage`（key 或名称）、`note`（可选） |
 | `ki_event_create` | 创建事件，可同时挂关联文档与参考文档；`type` / `stage` 都接受 id/key 或名称 | `title`、`type`（id 或名称）、`stage`（可选）、`docs[]`（≤50）、`refs[]`（≤50） |
-| `ki_event_delete` | 删除事件；必须指定关联文档去向。**未收口默认拒绝**（先 `ki_event_set_stage` 到终态） | `event`、`doc_action`（`wiki` 保留 / `trash` 进回收站，必填无默认）、`force`（可选，只对**无关联文档**的事件生效）、`confirm_title`（`force` 时必填，须与标题逐字一致） |
-| `ki_event_docs` | 事件关联文档增删：`add` 挂上（可见性随阶段）/ `remove` 解绑（文档回长期保留，不删除） | `event`、`action`、`docs[]`（≤50） |
-| `ki_event_refs` | 事件参考文档增删：只建引用，不改被引文档的分类与可见性 | `event`、`action`、`docs[]`（≤50） |
+| `ki_event_delete` | 删除事件；必须指定关联文档去向。**未收口默认拒绝**（先用 `ki_event_edit` 的 `action=stage` 流转到终态） | `event`、`doc_action`（`wiki` 保留 / `trash` 进回收站，必填无默认）、`force`（可选，只对**无关联文档**的事件生效）、`confirm_title`（`force` 时必填，须与标题逐字一致） |
+| `ki_event_edit` | 事件编辑的唯一写工具，一次只做一类：改描述 / 上传结论 / 关联文档增删 / 参考文档增删 / 阶段流转。要点：关联文档 `remove` 是**解绑**（文档回长期保留、仍可检索，不删除）；阶段到终态会按类型设定的收口动作处理关联文档，`trash` 会移入回收站（可恢复，但不会自动撤销） | `event`、`action`（`description` / `analysis` / `members` / `references` / `stage`）、`description`、`conclusion`、`chain[]`、`candidates[]`（`analysis` 必带）、`unconfirmed[]`、`docRefs[]` + `docAction`（≤50）、`stage` + `note` |
 
 ## 组织与删除
 
@@ -48,7 +47,7 @@
 
 ## MCP 未提供的能力
 
-MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需要级联或强制操作时使用 CLI（见 [cli.md](./cli.md)）。**唯一例外**是 `ki_event_delete` 的 `force`——它只对**无关联文档**的事件生效，且必须带 `confirm_title` 与标题逐字一致，用途是清理测试 / 废弃事件；有成员文档时仍要求先收口（或先 `ki_event_docs remove` 解绑），因为那会牵连文档可见性与索引。
+MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需要级联或强制操作时使用 CLI（见 [cli.md](./cli.md)）。**唯一例外**是 `ki_event_delete` 的 `force`——它只对**无关联文档**的事件生效，且必须带 `confirm_title` 与标题逐字一致，用途是清理测试 / 废弃事件；有成员文档时仍要求先收口（或先用 `ki_event_edit` 的 `action=members` + `docAction=remove` 解绑），因为那会牵连文档可见性与索引。
 
 事件相关**不提供**：事件类型的增删改（阶段链、每阶段可见性、收口动作）、事件 AI 源码分析、参考文档的 AI 候选查找（`refs/search` 只有 Web 页面在用）。这些都在 Web「知识治理 → 事件」操作 —— 事件类型是全局元配置，改错会连带所有事件；参考文档候选要人逐个确认，不适合代理自动采纳。
 
@@ -97,3 +96,26 @@ MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需�
 - 规则：Token 必须同时拥有该视图**及其全部成员库**的权限；缺任一个都读不到这个视图（不会只给一部分）。
 - 授权时会自动带上当时的全部成员；之后给视图**新增**成员不会自动授权，需要再授权一次，否则该视图对这个 Token 不可用。`ki view add` 会列出受影响的 Token，`ki view audit-grants` 可随时复查。
 - MCP 工具与 Web 页面使用同一套授权规则：一处能访问，另一处也能访问。
+---
+
+## 图片：文档里的截图与示意图
+
+知识库文档正文里的图片（`![](assets/x.png)` 这类）以前只以路径字符串出现，AI 看不到画面内容。现在分两步：
+
+1. **读文档时给清单**：`ki_get_module_info` 的返回体多一个 `images` 数组，每张图带 `ref`（取图时原样传回）、格式、字节数、`supported`（能否取）。
+2. **需要时取图**：调 `ki_get_image`，一次 1~3 张，返回图片本身，模型据此描述或判断。
+
+**能返回的**：
+
+- PNG / JPEG / WebP 直接返回。
+- **SVG 由服务端栅格化成 PNG 后返回**。知识库里的插图大量是 SVG，而上游会直接拒绝 SVG，不转换等于看不见。
+- 单张上限 4MB。
+
+**不会返回的**（清单里标 `supported: false` 并给原因，不会静默消失）：外链图片（`https://…` 之类）、`../` 越出文档所在目录的引用、文件缺失、超限的单图、GIF / BMP / ICO / AVIF。
+
+**两点使用提示**：
+
+- `ki_event_get` 只给成员/参考文档的 `group + 名称`，不返回图片清单 —— 要看图先读那篇文档拿 `ref`。
+- 同一轮对话里看过的图只保留最近一次，更早的会变成「[图片×N（已省略）]」，需要重看时再取一次即可（不是丢了，是不会每轮重复上传）。
+
+**成本提醒**：图片不计入上下文的字符预算，但每轮都要重新上传一次。一张约 1024×1024 的图大致相当于同一轮里多 650 字中文的开销，且**只跟像素尺寸有关**，把图压小体积并不省 —— 真要省只能降分辨率。

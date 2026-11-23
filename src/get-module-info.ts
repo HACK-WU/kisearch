@@ -25,6 +25,8 @@ import { hasShardedLayout, listGroupPaths, loadGroupCache, loadPartitionConfig, 
 // S-04 I2 补口（2026-10-10）：本文件是**读详情**路径，但会回写评分（元数据）→ 必须入提交窗口
 import { getSharedOperationCoordinator } from './lib/operation-coordinator.js';
 import { searchPath } from './lib/path-search.js';
+// 图片清单（REQ-20261123-008 B1）：正文里引用了哪些图、能不能取
+import { buildImageList, type ToolImageRef } from './lib/asset-image.js';
 import { closeEngine } from './lib/vector-client.js';
 import { loadConfig, resolveScope } from './lib/config.js';
 import { resolveScopeTargets, getViewMembers, isViewRequest } from './lib/scope-view.js';
@@ -208,6 +210,11 @@ export type GetModuleInfoResult =
     eventId?: string;
     /** 存储态与 kind 不一致时的可读原因（不静默修正） */
     lifecycleWarning?: string;
+    /**
+     * 正文引用的图片清单（REQ-20261123-008 B1）：模型据此判断「这篇有图、要不要取」。
+     * 缺省不出现（无图的文档不新增字段）；条目形状见 `ToolImageRef`。
+     */
+    images?: ToolImageRef[];
   }
   | { ok: false; error: string; hint?: string };
 
@@ -446,6 +453,15 @@ export async function executeGetModuleInfoLocal(
     const lifecycleInfo = resolveLifecycle(rel);
     const nowMs = Date.now();
 
+    // 图片清单（REQ-20261123-008 B1）：按**整篇**正文生成（分页读取时清单保持稳定）。
+    // 清单是附加信息 —— 生成失败降级为空，绝不能让"读文档"本身失败。
+    let images: ToolImageRef[] = [];
+    try {
+      images = await buildImageList(scope, resolvedGroup, markdown);
+    } catch {
+      images = [];
+    }
+
     return {
       ok: true,
       scope,
@@ -463,6 +479,8 @@ export async function executeGetModuleInfoLocal(
       ...(hints.length > 0 ? { hint: hints.join('\n') } : {}),
       // 落点来源留痕（REQ-20261021-001）：只在兜底时下发
       ...(rel.groupSource ? { groupSource: rel.groupSource } : {}),
+      // 图片清单（REQ-20261123-008）：无图不出现该字段（老返回体形状对旧消费方零变化）
+      ...(images.length > 0 ? { images } : {}),
       ...(slice
         ? {
           startLine: slice.startLine,
@@ -505,6 +523,8 @@ export interface BatchRelationResult {
   totalLines?: number;
   truncated?: boolean;
   nextStart?: { line: number; char: number };
+  /** 该条的图片清单（REQ-20261123-008）：无图不出现 */
+  images?: ToolImageRef[];
 }
 
 export type GetModuleInfoBatchResult =
@@ -697,10 +717,20 @@ async function executeGetModuleInfoBatchLocal(params: BatchGetModuleInfoParams):
         .filter((h): h is string => Boolean(h))
         .join('\n');
 
+      // 图片清单（REQ-20261123-008）：批量同样要给 —— 否则「批量读」的文档会被误判成"没有图"。
+      // 失败降级为空，不影响该条正文。
+      let itemImages: ToolImageRef[] = [];
+      try {
+        itemImages = await buildImageList(scope, resolvedGroup, markdown);
+      } catch {
+        itemImages = [];
+      }
+
       results.push({
         relation,
         ...(fuzzyHint ? { matchedRelation: rel.text } : {}),
         ...(itemHint ? { hint: itemHint } : {}),
+        ...(itemImages.length > 0 ? { images: itemImages } : {}),
         ok: true,
         content: slice ? slice.content : markdown,
         ...(slice
