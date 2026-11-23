@@ -185,3 +185,19 @@ describe('⑩ 顺序约束（先校验后落盘）', () => {
     assert.match(governanceHttp, /wikiWriteback: false/);
   });
 });
+
+describe('⑪ 弹窗内「点外部关闭」必须可达（2026-11-23 修复）', () => {
+  const picker = read('src/components/GroupPathSelect.tsx');
+
+  it('弹窗内容区仍用 stopPropagation 阻止遮罩关闭（这条前提不能悄悄变）', () => {
+    assert.match(modal, /className="gov-modal" onClick=\{\(e\) => e\.stopPropagation\(\)\}/);
+  });
+
+  it('GroupPathSelect 的「点外部关闭」挂捕获阶段（冒泡会被上面的 stopPropagation 截断）', () => {
+    // React 18 的事件委托在 #root 上，内容区那次 stopPropagation 调用的是原生
+    // stopPropagation()，原生 click 被截在 root，到不了 document 的**冒泡**监听 ——
+    // 表现为弹窗里展开「落点 Group」后点其它区域收不起来（实测 document 冒泡计数 0 / 捕获 1）。
+    assert.match(picker, /addEventListener\('click', onDocClick, true\)/);
+    assert.match(picker, /removeEventListener\('click', onDocClick, true\)/);
+  });
+});

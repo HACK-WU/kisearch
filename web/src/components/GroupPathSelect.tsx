@@ -165,7 +165,16 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
     setTree(withDefaultOpen(buildGroupTree(docData?.groups ?? [])));
   }, [docData]);
 
-  // 点击外部关闭（同时清空搜索词，收起态输入框回到当前 Group）
+  /**
+   * 点击外部关闭（同时清空搜索词，收起态输入框回到当前 Group）。
+   *
+   * ★ 必须监听**捕获阶段**：弹窗（`.gov-modal` 家族）为了「点内容区不关窗」，内容 div 上写了
+   *   `onClick={(e) => e.stopPropagation()}`。React 18 的事件委托挂在 `#root` 上，那次
+   *   stopPropagation 调的是原生 stopPropagation()，click 被截在 root，永远到不了 document 的
+   *   **冒泡**监听 —— 于是下拉在弹窗里点外面不收起（事件参考文档上传弹窗实测：document 捕获计数 1、
+   *   冒泡计数 0）。捕获阶段在事件下行的第一时间执行（document 在链上最顶层），祖先再怎么
+   *   stopPropagation 也拦不住它。
+   */
   useEffect(() => {
     const onDocClick = (e: MouseEvent): void => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
@@ -173,8 +182,8 @@ export function GroupPathSelect({ scope, value, onChange, placeholder, hint, err
         setFilter('');
       }
     };
-    document.addEventListener('click', onDocClick);
-    return () => document.removeEventListener('click', onDocClick);
+    document.addEventListener('click', onDocClick, true);
+    return () => document.removeEventListener('click', onDocClick, true);
   }, []);
 
   // 外部清空值时重置确认态
