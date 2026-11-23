@@ -20,7 +20,11 @@ import { initScope } from '../../src/lib/store.js';
 import { getKbDir } from '../../src/lib/scope.js';
 import { createEvent } from '../../src/lib/events/event-service.js';
 import { writeDraftStart } from '../../src/lib/events/analysis-store.js';
-import { askEventAnalysis } from '../../src/lib/events/analysis-ask-runner.js';
+import {
+  askEventAnalysis,
+  listActiveAskIds,
+  listFinishedAsks,
+} from '../../src/lib/events/analysis-ask-runner.js';
 import {
   ASK_RUNNING_FLUSH_MS,
   ASK_RUNNING_MAX_STEPS,
@@ -256,7 +260,56 @@ describe('运行态：追问生命周期', () => {
     tracker.stop();
   });
 
-  it('⑧ 并发两轮：先结束的那轮不误删后写的运行态', async () => {
+  it('⑧ 列表标记：追问期间在 activeAsks，成功后转 finishedAsks（ok + turnId）', async () => {
+    const ev = await createEvent(scope, { title: '列表标记成功', typeId: 'et_1' });
+    await seedDraft(ev.id);
+
+    let duringActive: string[] = [];
+    async function* fakeStream(): AsyncGenerator<{ type: string; text?: string }> {
+      duringActive = listActiveAskIds(scope);
+      yield { type: 'content', text: '答。' };
+    }
+    const res = await askEventAnalysis(scope, { id: ev.id, title: ev.title }, {
+      question: '列表标记',
+      deps: {
+        loadConfigFn: () => cfg,
+        resolveLlmStatusFn: () => okLlm,
+        streamChatFn: fakeStream as never,
+      },
+    });
+
+    assert.ok(duringActive.includes(ev.id), '追问期间列表必须能拿到「追问中」');
+    assert.equal(listActiveAskIds(scope).includes(ev.id), false, '结束后必须撤掉「追问中」');
+    const done = listFinishedAsks(scope).find((f) => f.eventId === ev.id);
+    assert.equal(done?.status, 'ok', '成功要记 ok');
+    assert.equal(done?.turnId, res.turn.id, 'turnId 用于「是否已看过」判定');
+  });
+
+  it('⑨ 列表标记：失败出口记 failed（无 turnId），且不残留「追问中」', async () => {
+    const ev = await createEvent(scope, { title: '列表标记失败', typeId: 'et_1' });
+    await seedDraft(ev.id);
+
+    async function* hang(signal?: AbortSignal): AsyncGenerator<never> {
+      void signal;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      throw new Error('upstream down');
+    }
+    await assert.rejects(() => askEventAnalysis(scope, { id: ev.id, title: ev.title }, {
+      question: '失败标记',
+      deps: {
+        loadConfigFn: () => cfg,
+        resolveLlmStatusFn: () => okLlm,
+        streamChatFn: hang as never,
+      },
+    }));
+
+    assert.equal(listActiveAskIds(scope).includes(ev.id), false);
+    const done = listFinishedAsks(scope).find((f) => f.eventId === ev.id);
+    assert.equal(done?.status, 'failed');
+    assert.equal(done?.turnId, null, '失败没有 turnId，前端用结束时间当已读键');
+  });
+
+  it('⑩ 并发两轮：先结束的那轮不误删后写的运行态', async () => {
     const ev = await createEvent(scope, { title: '并发', typeId: 'et_1' });
     // 直接驱动 tracker：runner 内部顺序无法从外部编排
     const a = startAskRunning(scope, ev.id, { question: 'A 轮' });

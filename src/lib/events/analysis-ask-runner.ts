@@ -83,6 +83,69 @@ const ANALYSIS_REQUEST_TIMEOUT_MS = 300_000;
  */
 const followupLimiter = createAskLimiter({ rateMax: 6, concurrentMax: 2 });
 
+// ─── 列表页标记用的进程内状态（2026-11-23 · 事件列表「追问中 / 追问完成」）───
+
+/**
+ * 正在追问的事件（内存 Map，**不碰磁盘**）。
+ *
+ * 与 `activeRuns`（分析）同构：`GET /governance/events/running` 4s 轮询读它，
+ * 前端在列表行上打「追问中」浮标。之所以不扫磁盘的 `.ask.running.json`：
+ * 那是给「切页回来接续」用的单事件快照，扫全库要 readdir + 逐文件读，
+ * 而这里只需要一个 id 列表，内存即可、且与分析的标记同生命周期（重启即清）。
+ */
+const activeAsks = new Map<string, { startedAt: number }>();
+
+/** 最近结束的追问（列表行「追问完成 / 追问失败」；上限裁剪，重启即清） */
+export interface FinishedAsk {
+  eventId: string;
+  /** 成功时才有的那一轮 id —— 前端据此判断「是否已看过这条结果」 */
+  turnId: string | null;
+  status: 'ok' | 'failed';
+  at: number;
+}
+
+const finishedAsks = new Map<string, FinishedAsk>();
+const FINISHED_ASKS_MAX = 200;
+
+function askKey(scope: string, eventId: string): string {
+  return `${scope}\u0000${eventId}`;
+}
+
+/** 该 scope 下正在追问的事件 id 清单（供列表「追问中」标记） */
+export function listActiveAskIds(scope: string): string[] {
+  const prefix = `${scope}\u0000`;
+  const ids: string[] = [];
+  for (const key of activeAsks.keys()) {
+    if (key.startsWith(prefix)) ids.push(key.slice(prefix.length));
+  }
+  return ids;
+}
+
+/** 该 scope 下最近结束的追问（供列表「追问完成 / 追问失败」徽标） */
+export function listFinishedAsks(scope: string): FinishedAsk[] {
+  const prefix = `${scope}\u0000`;
+  const out: FinishedAsk[] = [];
+  for (const key of finishedAsks.keys()) {
+    if (key.startsWith(prefix)) out.push(finishedAsks.get(key)!);
+  }
+  return out;
+}
+
+/** 记一条结束态；超上限丢最早插入的（Map 迭代顺序 = 插入顺序） */
+function rememberFinishedAsk(key: string, ask: FinishedAsk): void {
+  finishedAsks.set(key, ask);
+  while (finishedAsks.size > FINISHED_ASKS_MAX) {
+    const oldest = finishedAsks.keys().next().value;
+    if (oldest === undefined) break;
+    finishedAsks.delete(oldest);
+  }
+}
+
+/** 新一轮开跑：上一轮的「完成」徽标立刻作废（列表该显示「追问中」） */
+function forgetFinishedAsk(key: string): void {
+  finishedAsks.delete(key);
+}
+
 /** 供治理层传进来的最小事件形状 */
 export interface AskTargetEvent {
   id: string;
@@ -336,8 +399,14 @@ export async function askEventAnalysis(
    * 成功 / 失败 / 异常三条出口统一由 finally 删除。
    */
   let running: AskRunningTracker | null = null;
+  const thisAskKey = askKey(scope, event.id);
+  /** 本轮落库的 turn id（null = 没成功，finally 据此记「追问失败」） */
+  let askTurnId: string | null = null;
   try {
     running = startAskRunning(scope, event.id, { question, runId: draftRunId });
+    // 列表标记：这一轮开始 → 显示「追问中」，上一轮的「完成」徽标作废
+    activeAsks.set(thisAskKey, { startedAt: now });
+    forgetFinishedAsk(thisAskKey);
     const history = readAskDoc(scope, event.id).turns;
     const attachedDocs = {
       members: collectMembers(scope, event.id).map((m) => ({ group: m.group, name: m.name })),
@@ -642,10 +711,23 @@ export async function askEventAnalysis(
         : {}),
     };
     const saved = await appendAskTurn(scope, event.id, turn);
+    askTurnId = turn.id;
     return { turn, doc: saved.doc, ...(proposalView ? { proposal: proposalView } : {}) };
   } finally {
-    // 运行态必须删：留着会让「切页回来」的人永远看到「正在追答」（成功 / 失败 / 异常同待遇）
+    // 运行态必须删：留着会让「切页回来」的人永远看到「正在追问」（成功 / 失败 / 异常同待遇）
     running?.stop();
+    /*
+     * 列表标记收口：撤掉「追问中」，记一条结束态。
+     * `askTurnId` 为空 = 这一轮没落库（超时 / 上游异常 / 闸门内报错）→ 记 failed，
+     * 让列表行能提示「追问失败」，而不是静默消失。
+     */
+    activeAsks.delete(thisAskKey);
+    rememberFinishedAsk(thisAskKey, {
+      eventId: event.id,
+      turnId: askTurnId,
+      status: askTurnId ? 'ok' : 'failed',
+      at: Date.now(),
+    });
     // 所有出口都必须释放追问限流的并发槽，否则计数泄漏、后续追问全被判 BUSY
     followupLimiter.release();
   }

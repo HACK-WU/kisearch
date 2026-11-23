@@ -35,15 +35,45 @@ describe('事件列表「分析中」标记', () => {
 
   it('标记绝对定位在标题行右侧，不挤 meta 行', () => {
     assert.ok(css.includes('.gov-ev--running { position: relative; }'), '需要给行建立定位上下文');
-    assert.ok(css.includes('.gov-ev--running .gov-ev__name { padding-right: 62px; }'), '标题要让位，否则被浮标压字');
+    // 让位宽度与实现同步（浮标文案 4 字时为 76px；改实现记得同步这里）
+    assert.ok(css.includes('.gov-ev--running .gov-ev__name { padding-right: 76px; }'), '标题要让位，否则被浮标压字');
     const rule = css.slice(css.indexOf('.gov-ev__running {'), css.indexOf('.gov-ev__running {') + 260);
     assert.ok(rule.includes('position: absolute'), '浮标必须脱离文档流：进 meta 会把阶段挤到第二行');
   });
 
-  it('只对正在跑的行加类，避免其它行布局变化', () => {
+  it('只对正在跑 / 刚结束的行加类，避免其它行布局变化', () => {
     assert.ok(
-      page.includes("${runningIds.has(event.id) ? ' gov-ev--running' : ''}"),
-      '行类必须按 runningIds 条件添加',
+      page.includes("runningIds.has(event.id) || askingIds.has(event.id) || finishedRuns[event.id] || finishedAsks[event.id] ? ' gov-ev--running' : ''"),
+      '行类必须按 runningIds / askingIds / finished* 条件添加',
     );
+  });
+});
+
+describe('事件列表「追问中 / 追问完成」标记（2026-11-23）', () => {
+  it('与「分析中」共用一次 /events/running 轮询（asking / finishedAsks）', () => {
+    assert.ok(page.includes('res.asking'), '追问中清单来自同一次轮询');
+    assert.ok(page.includes('res.finishedAsks'), '追问结束态来自同一次轮询');
+    assert.ok(api.includes('asking?: string[]'), '接口类型要声明 asking');
+    assert.ok(api.includes('finishedAsks?: FinishedAskView[]'), '接口类型要声明 finishedAsks');
+  });
+
+  it('浮标同槽位互斥：追问中 先于 分析中 判定', () => {
+    assert.ok(
+      page.indexOf('askingIds.has(event.id) ? (') >= 0
+        && page.indexOf('askingIds.has(event.id) ? (') < page.indexOf('runningIds.has(event.id) ? ('),
+      '同一行只会有一个「进行中」浮标，追问中必须先判',
+    );
+  });
+
+  it('文案：追问中 / 追问完成 / 追问失败', () => {
+    assert.ok(page.includes('追问中'));
+    assert.ok(page.includes('追问完成'));
+    assert.ok(page.includes('追问失败'));
+  });
+
+  it('已读按 turnId 记，且与分析已读分开存（同 eventId 不互相覆盖）', () => {
+    assert.ok(page.includes("const SEEN_ASK_KEY = 'ki-web:events:seen-ask';"));
+    assert.ok(page.includes('activeAskSeenKey'), '点开事件即记为已读');
+    assert.ok(page.includes("`failed:${activeAskDone.at}`"), '失败没有 turnId，用结束时间当已读键');
   });
 });

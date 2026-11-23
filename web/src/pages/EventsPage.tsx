@@ -66,6 +66,13 @@ const SORT_LABEL: Record<SortKey, string> = {
  * 放后端要改契约与 DTO，代价远大于收益。重新分析会产生新 runId → 提示自动回来。
  */
 const SEEN_ANALYSIS_KEY = 'ki-web:analysis-seen';
+/**
+ * 「这条事件的追问结果我看过了」（eventId → turnId）；失败态用 `failed:<at>` 当键。
+ *
+ * 与分析已读分开存：两者的「已读键」不同（runId vs turnId），混在一个 Map 里
+ * 会互相覆盖（同一个 eventId 只能存一个值）。
+ */
+const SEEN_ASK_KEY = 'ki-web:events:seen-ask';
 
 function isPinnedEvent(e: Pick<EventView, 'pinnedAt'>): boolean {
   return typeof e.pinnedAt === 'number' && e.pinnedAt > 0;
@@ -252,12 +259,33 @@ export function EventsPage(): JSX.Element {
    */
   const [finishedRuns, setFinishedRuns] = useState<Record<string, { status: string; runId: string }>>({});
   /**
+   * 正在追问的事件 id（2026-11-23 用户要求：列表行要能看出哪条在追问）。
+   * 与 `runningIds` 同一个 4s 轮询、同源（后端进程内 Map，无磁盘 I/O）。
+   */
+  const [askingIds, setAskingIds] = useState<Set<string>>(() => new Set());
+  /**
+   * 刚结束的追问：`eventId → { turnId, status, at }`。
+   * 与 `finishedRuns` 同款（进程内，重启即空）—— 只是少一个提示，不会显示错状态。
+   */
+  const [finishedAsks, setFinishedAsks] = useState<
+    Record<string, { turnId: string | null; status: string; at: number }>
+  >({});
+  /**
    * 用户已经「看过」的分析结果：`eventId → runId`，存 localStorage。
    * 只有 `runId` 相同才算看过 —— 重新分析会产生新 runId，提示自动回来。
    */
   const [seenAnalysis, setSeenAnalysis] = useState<Record<string, string>>(() => {
     try {
       const raw = localStorage.getItem(SEEN_ANALYSIS_KEY);
+      return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+    } catch {
+      return {};
+    }
+  });
+  /** 用户已经「看过」的追问结果：`eventId → turnId`（见 SEEN_ASK_KEY 注释） */
+  const [seenAsk, setSeenAsk] = useState<Record<string, string>>(() => {
+    try {
+      const raw = localStorage.getItem(SEEN_ASK_KEY);
       return raw ? (JSON.parse(raw) as Record<string, string>) : {};
     } catch {
       return {};
@@ -274,6 +302,11 @@ export function EventsPage(): JSX.Element {
         const next: Record<string, { status: string; runId: string }> = {};
         for (const f of res.finished ?? []) next[f.eventId] = { status: f.status, runId: f.runId };
         setFinishedRuns(next);
+        // 追问的两个标记（2026-11-23）：同一次轮询里取回，避免再加一条请求
+        setAskingIds(new Set(res.asking ?? []));
+        const nextAsk: Record<string, { turnId: string | null; status: string; at: number }> = {};
+        for (const f of res.finishedAsks ?? []) nextAsk[f.eventId] = { turnId: f.turnId, status: f.status, at: f.at };
+        setFinishedAsks(nextAsk);
       } catch {
         // 轮询失败不打扰用户：下一轮会重试（刚重启 daemon 时这里会短暂为空）
       }
@@ -715,6 +748,28 @@ export function EventsPage(): JSX.Element {
       return next;
     });
   }, [active?.id, activeAnalysisRunId]);
+
+  /**
+   * 追问结果已读（2026-11-23）：点开事件即记为看过，行上「追问完成」随即消失。
+   * 只认 `turnId`（再追问一次是新的 turn，徽标会重新出现）；失败没有 turn，
+   * 用 `failed:<at>` 当键 —— 否则失败徽标永远消不掉。
+   */
+  const activeAskDone = active?.id ? finishedAsks[active.id] : undefined;
+  const activeAskSeenKey = activeAskDone ? (activeAskDone.turnId ?? `failed:${activeAskDone.at}`) : null;
+  useEffect(() => {
+    const eventId = active?.id;
+    if (!eventId || !activeAskSeenKey) return;
+    setSeenAsk((prev) => {
+      if (prev[eventId] === activeAskSeenKey) return prev;
+      const next = { ...prev, [eventId]: activeAskSeenKey };
+      try {
+        localStorage.setItem(SEEN_ASK_KEY, JSON.stringify(next));
+      } catch {
+        /* 记不住已读不影响其他行为 */
+      }
+      return next;
+    });
+  }, [active?.id, activeAskSeenKey]);
   const type = useMemo(
     () => types.find((t) => t.id === (active?.typeId ?? '')) ?? null,
     [types, active],
@@ -875,7 +930,7 @@ export function EventsPage(): JSX.Element {
       <div
         key={`${event.scope ?? ''}:${event.id}`}
         data-event-id={event.id}
-        className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}${runningIds.has(event.id) || finishedRuns[event.id] ? ' gov-ev--running' : ''}`}
+        className={`gov-ev${isClosed ? ' gov-ev--closed' : ''}${event.id === activeId ? ' gov-ev--active' : ''}${pinned ? ' gov-ev--pinned' : ''}${runningIds.has(event.id) || askingIds.has(event.id) || finishedRuns[event.id] || finishedAsks[event.id] ? ' gov-ev--running' : ''}`}
         onClick={() => selectEvent(event.id)}
       >
         <div className="gov-ev__title">
@@ -955,17 +1010,45 @@ export function EventsPage(): JSX.Element {
           </div>
         </div>
         {/*
-          * 「分析中」（2026-11-19 用户要求）：不看右栏也知道哪条正在跑。
-          * 数据来自 /events/running（进程内 activeRuns，无磁盘 I/O），4s 轮询。
+          * 行状态浮标：**追问中 > 分析中 > 追问完成/失败 > 分析完成/失败**（三者互斥：
+          * 追问要求分析不在跑，所以同一行最多命中一个「进行中」）。
+          * 数据来自 /events/running（进程内 Map，无磁盘 I/O），4s 轮询。
           * **绝对定位到标题行右侧**：塞进 meta 会把「阶段」挤到第二行、行高跟着跳
           * （真机验过两版：带文字/只留点，都会挤）；浮标不占流，只让标题提前 ellipsis。
           */}
-        {runningIds.has(event.id) ? (
+        {askingIds.has(event.id) ? (
+          <span className="gov-ev__running" title="追问进行中：回答会边生成边保存，离开页面不会丢">
+            <span className="gov-ev__running-dot" aria-hidden="true" />
+            追问中
+          </span>
+        ) : runningIds.has(event.id) ? (
           <span className="gov-ev__running" title="AI 分析进行中：已完成步骤会实时写盘，可随时停止">
             <span className="gov-ev__running-dot" aria-hidden="true" />
             分析中
           </span>
         ) : (() => {
+          /*
+           * 「追问完成 / 追问失败」（2026-11-23）：与「分析完成」同一个位置、同一套已读口径，
+           * 只是已读键换成追问的 `turnId`（再追问一次是新 turn，徽标会重新出现）。
+           * 失败没有 turnId 可认，用结束时间当已读键 —— 点开看过就不再提醒。
+           */
+          const askDone = finishedAsks[event.id];
+          if (askDone) {
+            const askSeenKey = askDone.turnId ?? `failed:${askDone.at}`;
+            if (seenAsk[event.id] !== askSeenKey) {
+              return (
+                <span
+                  className={`gov-ev__running gov-ev__running--${askDone.status === 'failed' ? 'failed' : 'done'}`}
+                  title={askDone.status === 'failed'
+                    ? '追问失败：点开详情可在追问区重试'
+                    : '追问已完成，回答未查看'}
+                >
+                  <span className="gov-ev__running-dot" aria-hidden="true" />
+                  {askDone.status === 'failed' ? '追问失败' : '追问完成'}
+                </span>
+              );
+            }
+          }
           /*
            * 「分析完成 / 分析失败」（2026-11-20）：跑完但用户还没点开的那条，行上要看得出来，
            * 否则跑完与本就没分析过长一个样。点开详情即记为已读（runId 相同就不再提示）。

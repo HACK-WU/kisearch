@@ -383,7 +383,7 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
           title={askTitle}
           onClick={() => void send()}
         >
-          {asking ? '回答中…' : remote ? '追答中…' : '发送'}
+          {asking ? '回答中…' : remote ? '追问中…' : '发送'}
         </button>
       </div>
 

@@ -86,7 +86,12 @@ import {
   readAskRunning,
   removeAskFile,
 } from './events/analysis-ask-store.js';
-import { askEventAnalysis, type AskTargetEvent } from './events/analysis-ask-runner.js';
+import {
+  askEventAnalysis,
+  listActiveAskIds,
+  listFinishedAsks,
+  type AskTargetEvent,
+} from './events/analysis-ask-runner.js';
 import {
   listTrash, readTrashSettings, writeTrashSettings, removeTrashItem, readTrashItem, isSafeTrashDirName,
 } from './trash-store.js';
@@ -969,12 +974,20 @@ export async function handleGovernanceRoutes(
          * 与 `ids` 同源（进程内缓存，无磁盘 IO）—— 重启后为空，只是少一个提示，不会显示错状态。
          */
         const finished = targets.members.flatMap((member) => listFinishedAnalysis(member));
+        /*
+         * 追问的两类标记（2026-11-23）：与 `ids` / `finished` 同源（进程内 Map，无磁盘 IO）。
+         * `asking` = 正在追问，`finishedAsks` = 刚结束（供「追问完成 / 追问失败」徽标）。
+         */
+        const asking = targets.members.flatMap((member) => listActiveAskIds(member));
+        const finishedAsks = targets.members.flatMap((member) => listFinishedAsks(member));
         return sendJson(res, 200, {
           ok: true,
           scope: targets.requested,
           ...(targets.view ? { view: targets.view } : {}),
           ids,
           finished,
+          asking,
+          finishedAsks,
         });
       }
 

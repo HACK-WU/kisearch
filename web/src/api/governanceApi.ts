@@ -595,9 +595,27 @@ export interface FinishedAnalysisView {
  * `finished` 用于列表行的「分析完成 / 分析失败」徽标：与 `ids` 同源（进程内缓存，
  * 无磁盘 I/O）。daemon 重启后 `finished` 为空 —— 只是少一个提示，不会显示错状态。
  */
+/** 刚结束的一轮追问（列表行「追问完成 / 追问失败」徽标；与 `activeRuns` 同款进程内状态） */
+export interface FinishedAskView {
+  eventId: string;
+  /** 成功才有的那一轮 id：前端据此判断这条结果是否已看过 */
+  turnId: string | null;
+  status: 'ok' | 'failed';
+  at: number;
+}
+
 export function listRunningAnalyses(
   scope: string,
-): Promise<{ ok: true; scope: string; ids: string[]; finished?: FinishedAnalysisView[] }> {
+): Promise<{
+  ok: true;
+  scope: string;
+  ids: string[];
+  finished?: FinishedAnalysisView[];
+  /** 正在追问的事件 id（2026-11-23） */
+  asking?: string[];
+  /** 最近结束的追问（2026-11-23） */
+  finishedAsks?: FinishedAskView[];
+}> {
   return req(`/api/governance/events/running?${new URLSearchParams({ scope }).toString()}`);
 }
 
