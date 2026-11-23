@@ -63,7 +63,12 @@ import { normalizePublicUrl, setWebRuntime } from './mcp-runtime.js';
 const eventLoopHistogram = monitorEventLoopDelay({ resolution: 20 });
 eventLoopHistogram.enable();
 function eventLoopUtilDelayMs(): number {
-  return eventLoopHistogram.mean / 1e6; // ns → ms；无样本时 HdrHistogram 返回 0
+  // ★ 无样本时 `mean` 是 **NaN**，不是 0（2026-11-23 实测：count=0 → mean=NaN）。
+  // 启动后首个 resolution 窗口（20ms）过去前就会有人来查 /healthz，此时若把 NaN 直接交给
+  // JSON.stringify，字段会退化成 null —— 健康检查里「事件循环延迟」这一项永久不可算（事件 #68）。
+  // 口径取「无样本 = 0ms」：调用方按 number 消费，不需要再处理 null。
+  if (eventLoopHistogram.count === 0) return 0;
+  return eventLoopHistogram.mean / 1e6; // ns → ms
 }
 
 // 延迟加载的 /api/* 处理器（避免 mcp-http 模块初始化时触发重依赖链）
