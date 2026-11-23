@@ -38,9 +38,8 @@ import { ChatStoreContext } from '@/chat/chatStoreContext';
 import { chatOpenFromSearch, withChatOpenParam } from '@/lib/chatOpenUrl';
 import { aiSettingsHref, isAiSettingsPath, resolveAiSettingsBack } from '@/lib/aiSettingsUrl';
 import { DOC_FIND_OPEN_EVENT, pickFindSeed, type DocFindOpenDetail } from '@/lib/docFind';
+import { THEME_STORAGE_KEY } from '@/lib/theme';
 import webPackage from '../../package.json';
-
-const THEME_KEY = 'ki-theme';
 
 /** 「手动忽略任务提示」的时间戳 key（失败 / 部分完成各一；全局，不按 scope 分桶） */
 const FAILED_DISMISS_KEY = 'ki.taskFailedDismissedAt';
@@ -126,7 +125,7 @@ const GOVERNANCE_LABELS: ReadonlyArray<readonly [string, string]> = [
 function useTheme(): { theme: string; toggle: () => void } {
   const [theme, setTheme] = useState(() => {
     try {
-      return localStorage.getItem(THEME_KEY) ?? 'light';
+      return localStorage.getItem(THEME_STORAGE_KEY) ?? 'light';
     } catch {
       return 'light';
     }
@@ -134,7 +133,7 @@ function useTheme(): { theme: string; toggle: () => void } {
   useEffect(() => {
     document.body.dataset.theme = theme;
     try {
-      localStorage.setItem(THEME_KEY, theme);
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
       /* ignore */
     }
