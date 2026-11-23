@@ -5,11 +5,16 @@ import {
   clearEventAnalysisAsk,
   GovernanceApiError,
   listEventAnalysisAsk,
+  saveEventAnalysisEdits,
   type AnalysisAskTurn,
+  type AnalysisDraft,
+  type AskProposalEvent,
   type AskStep,
+  type ConfirmedCodeLocation,
 } from '@/api/governanceApi';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ThinkingBlock } from '../ToolCallRow';
+import { AnalysisProposalModal } from './AnalysisProposalModal';
 
 /**
  * 追问这次分析（2026-11-17 · 批 6 / B2 前端，真机走查后补：流式输出）。
@@ -33,10 +38,17 @@ export interface AskBlockProps {
   canWrite: boolean;
   /** 当前草稿的 runId：用于分组与"拿新结论回答老问题"的防护 */
   activeRunId: string | null;
+  /**
+   * 覆盖成功后把新 doc 交给父级（S03）。
+   *
+   * 只传 draft/confirmed 两块：`resumeAvailable` 之类的字段由卡片自己合并，
+   * 追问组件不持有整份 `EventAnalysis`，也就不该假装能重建它（Q2 的教训）。
+   */
+  onAnalysisUpdated?: (next: { draft: AnalysisDraft | null; confirmed: ConfirmedCodeLocation[] }) => void;
 }
 
 export function AskBlock(props: AskBlockProps): JSX.Element {
-  const { scope, eventId, canAsk, canWrite, activeRunId } = props;
+  const { scope, eventId, canAsk, canWrite, activeRunId, onAnalysisUpdated } = props;
   const [turns, setTurns] = useState<AnalysisAskTurn[]>([]);
   /** 正在流式输出的这一轮（先上屏问题，再逐段填答案） */
   const [pending, setPending] = useState<{ question: string; answer: string } | null>(null);
@@ -49,6 +61,12 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
   const [asking, setAsking] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState('');
+  /** 本轮补丁建议（S03）：流式结束时才弹框，避免打断阅读 */
+  const [proposal, setProposal] = useState<AskProposalEvent | null>(null);
+  const [applyingProposal, setApplyingProposal] = useState(false);
+  const [proposalError, setProposalError] = useState('');
+  /** 流式过程中先收下，落库后再交给 state */
+  const proposalRef = useRef<AskProposalEvent | null>(null);
   const seqRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -81,6 +99,10 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
     setPending({ question: text, answer: '' });
     stepsRef.current = [];
     setSteps([]);
+    // 新一轮提问时丢掉上一轮未被采纳的建议（避免张冠李戴）
+    proposalRef.current = null;
+    setProposal(null);
+    setProposalError('');
 
     let received = '';
     try {
@@ -101,6 +123,12 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
           else next.push(event.step);
           stepsRef.current = next;
           setSteps(next);
+        } else if (event.type === 'proposal') {
+          /*
+           * 补丁建议先收下，**等 done 之后再弹框**：流式中途弹框会打断阅读，
+           * 而且此时 turn 还没落库，`turnId` 也不完整。
+           */
+          proposalRef.current = event;
         } else if (event.type === 'tool' || event.type === 'thinking') {
           // 旧后端原子事件兜底（没有 step 时至少能提示在动）
           if (stepsRef.current.length === 0) {
@@ -118,6 +146,10 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       }
       setTurns((prev) => [...prev, res.turn]);
       setPending(null);
+      // 补丁建议落库后才弹框（turnId 此时才可靠）
+      const suggestion = proposalRef.current;
+      proposalRef.current = null;
+      if (suggestion) setProposal(suggestion);
       stepsRef.current = [];
       setSteps([]);
     } catch (err) {
@@ -170,10 +202,48 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
     }
   };
 
+  /**
+   * 用补丁覆盖结论（S03 R-22）。
+   *
+   * 走的是**同一个写入口** `PATCH /analysis`：`expectedRunId` 取当前 runId，
+   * 冲突时后端 409，这里只把错误显示在弹框里、**不关框不丢差异**（N15）。
+   */
+  const applyProposal = async (): Promise<void> => {
+    const p = proposal;
+    if (!p || !p.valid || !p.patch || applyingProposal) return;
+    setProposalError('');
+    setApplyingProposal(true);
+    try {
+      const res = await saveEventAnalysisEdits(scope, eventId, {
+        expectedRunId: activeRunId ?? null,
+        conclusion: p.patch.conclusion,
+        chain: p.patch.chain,
+        ...(p.turnId ? { acceptedProposalTurnId: p.turnId } : {}),
+      });
+      setProposal(null);
+      onAnalysisUpdated?.({ draft: res.draft, confirmed: res.confirmed });
+    } catch (err) {
+      setProposalError((err as Error).message || '覆盖失败，请重试');
+    } finally {
+      setApplyingProposal(false);
+    }
+  };
+
   const askTitle = canAsk ? undefined : '当前账号没有提问权限（需要 knowledge.ask）';
 
   return (
     <div className="gov-ask">
+      {/* 覆盖遮罩用 fixed 定位，挂在卡片内也能正常覆盖全屏（同「重置分析」弹框） */}
+      {proposal ? (
+        <AnalysisProposalModal
+          proposal={proposal}
+          canWrite={canWrite}
+          saving={applyingProposal}
+          {...(proposalError ? { error: proposalError } : {})}
+          onConfirm={() => void applyProposal()}
+          onCancel={() => { setProposal(null); setProposalError(''); }}
+        />
+      ) : null}
       <div className="gov-ask__head">
         <span className="gov-ask__icon" aria-hidden="true">◌</span>
         <span className="gov-ask__title">追问这次分析</span>

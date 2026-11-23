@@ -197,6 +197,80 @@ describe('B2 追问执行器闸门', () => {
     );
     assert.equal(readAskDoc(scope, ev.id).turns.length, 0, '无内容的超时不得落库');
   });
+
+  it('⑧ 回答带结论补丁块 → 剥块 / 落库 / 返回 proposal（S03）', async () => {
+    const ev = await createEvent(scope, { title: '补丁', typeId: 'et_1' });
+    await seedDraft(ev.id);
+
+    const patch = {
+      conclusion: '结论改为：token 兜底缺失 + 路由未注册',
+      chain: [
+        { kind: 'root', text: '根因有两条' },
+        { kind: 'fix', text: '补兜底 + 补路由' },
+      ],
+      reason: '追问发现第二条',
+    };
+    async function* fakeStream(): AsyncGenerator<{ type: string; text?: string }> {
+      yield { type: 'content', text: `补充一点。\n\n\`\`\`ki-conclusion-patch\n${JSON.stringify(patch)}\n\`\`\`` };
+    }
+
+    const res = await askEventAnalysis(scope, { id: ev.id, title: ev.title }, {
+      question: '还有别的原因吗？',
+      deps: { loadConfigFn: () => cfg, resolveLlmStatusFn: () => okLlm, streamChatFn: fakeStream as never },
+    });
+
+    assert.equal(res.proposal?.valid, true);
+    assert.equal(res.proposal?.diff?.changed, true);
+    assert.equal(res.turn.answer, '补充一点。', '正文必须剥掉补丁块，用户不该看到 JSON');
+    assert.equal(res.turn.proposal?.conclusion, patch.conclusion);
+    assert.equal(readAskDoc(scope, ev.id).turns[0]!.proposal?.chain.length, 2, '补丁必须落库（审计）');
+  });
+
+  it('⑨ 补丁槽位不在该类型模板内 → valid:false，且不落 proposal', async () => {
+    const ev = await createEvent(scope, { title: '不合规补丁', typeId: 'et_1' });
+    await seedDraft(ev.id);
+
+    async function* fakeStream(): AsyncGenerator<{ type: string; text?: string }> {
+      yield {
+        type: 'content',
+        text: '正文\n\n```ki-conclusion-patch\n'
+          + JSON.stringify({ conclusion: '新结论', chain: [{ kind: 'nope', text: 'x' }], reason: '' })
+          + '\n```',
+      };
+    }
+
+    const res = await askEventAnalysis(scope, { id: ev.id, title: ev.title }, {
+      question: '这条能采纳吗？',
+      deps: { loadConfigFn: () => cfg, resolveLlmStatusFn: () => okLlm, streamChatFn: fakeStream as never },
+    });
+
+    assert.equal(res.proposal?.valid, false);
+    assert.match(res.proposal?.reason ?? '', /模板|槽位|节点类型/);
+    assert.equal(res.turn.proposal, undefined, '不合规的补丁不得落库（避免回看时误以为建议过）');
+    assert.equal(res.turn.answer, '正文');
+  });
+
+  it('⑩ 补丁与当前完全一致 → 不下发 proposal（不打扰）', async () => {
+    const ev = await createEvent(scope, { title: '无差异补丁', typeId: 'et_1' });
+    await seedDraft(ev.id);
+
+    async function* fakeStream(): AsyncGenerator<{ type: string; text?: string }> {
+      yield {
+        type: 'content',
+        text: '正文\n\n```ki-conclusion-patch\n'
+          + JSON.stringify({ conclusion: '根因是 token 为空未兜底', chain: [], reason: '' })
+          + '\n```',
+      };
+    }
+
+    const res = await askEventAnalysis(scope, { id: ev.id, title: ev.title }, {
+      question: '结论要改吗？',
+      deps: { loadConfigFn: () => cfg, resolveLlmStatusFn: () => okLlm, streamChatFn: fakeStream as never },
+    });
+
+    assert.equal(res.proposal, undefined);
+    assert.equal(res.turn.proposal, undefined);
+  });
 });
 
 // 防未使用告警：getAnalysisPath 在别处用不到，但保留导入便于调试定位

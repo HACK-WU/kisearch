@@ -32,7 +32,7 @@ import {
 } from '../chat/prompt-config.js';
 import { serializeToolResponse } from '../chat/retrieval/tool-response.js';
 import { GovernanceError } from '../governance-errors.js';
-import { inferAnalysisView } from './analysis-view.js';
+import { inferAnalysisView, resolveKindLabel, viewProfile } from './analysis-view.js';
 import { chainToLines } from './conclusion-chain.js';
 import {
   isAnalysisActive,
@@ -50,11 +50,19 @@ import {
 import { collectMembers } from './event-service.js';
 import { readRefs } from './refs-store.js';
 import { appendAskTurn, readAskDoc } from './analysis-ask-store.js';
-import type { AnalysisAskTurn, EventAnalysisAskDoc } from './types.js';
+import { diffProposal, extractProposal, validateProposal, type ProposalDiff } from './analysis-ask-patch.js';
+import type { AnalysisAskTurn, AskProposal, EventAnalysisAskDoc } from './types.js';
 
-/** 单条回答上限（超长截断；模板另外要求 ≤400 字） */
+/** 单条回答上限（超长截断；模板已不再限制字数，硬上限即此值） */
 export const ASK_ANSWER_MAX_CHARS = 4000;
-const CONCLUSION_CHARS = 1200;
+/**
+ * 追问上下文里结论区的**预算**。
+ *
+ * 2026-11-23 与 H10 同步提到 4000：结论本身可到 4000 字，若这里只喂 1200，
+ * 模型看到的是被截断的结论 —— 而 S03 的"补丁覆盖结论"是在这个视图上生成的，
+ * 一旦确认覆盖就会把没看到的尾巴删掉。宁可多喂几千字符（上下文上限 1000K）。
+ */
+const CONCLUSION_CHARS = 4000;
 const CANDIDATES_USED = 5;
 const CONFIRMED_USED = 5;
 const HISTORY_TURNS = 2;
@@ -248,11 +256,25 @@ function buildAskToolEntries(
   return { entries, targetDir };
 }
 
+/**
+ * 本轮补丁的对外视图（S03 §3.5）。
+ *
+ * `valid:false` 也要下发：前端要能告诉用户"AI 想改但建议不合规、原因是什么"，
+ * 而不是假装没有建议（N14）。`diff`/`patch` 仅 `valid:true` 时存在。
+ */
+export interface AskProposalView {
+  valid: boolean;
+  reason?: string;
+  reasons?: string[];
+  diff?: ProposalDiff;
+  patch?: AskProposal;
+}
+
 export async function askEventAnalysis(
   scope: string,
   event: AskTargetEvent,
   args: AskEventAnalysisArgs,
-): Promise<{ turn: AnalysisAskTurn; doc: EventAnalysisAskDoc }> {
+): Promise<{ turn: AnalysisAskTurn; doc: EventAnalysisAskDoc; proposal?: AskProposalView }> {
   const deps = args.deps;
   const now = (deps?.nowFn ?? (() => Date.now()))();
   const question = args.question.trim();
@@ -325,6 +347,15 @@ export async function askEventAnalysis(
     const toolDefs: ToolDef[] = entries.map((e) => e.def);
     const entryMap = new Map(entries.map((e) => [e.name, e] as const));
 
+    /*
+     * 补丁槽位必须**把可选值列给模型**：真机实测它会把 root 写成 `root_cause`，
+     * 然后被模板校验整份拒掉（降级正确，但白跑一轮）。骨架按事件类型取，与校验同源。
+     */
+    const patchView = inferAnalysisView(event.typeId);
+    const patchKinds = viewProfile(patchView).skeleton
+      .map((k) => `${k}（${resolveKindLabel(patchView, k)}）`)
+      .join(' / ');
+
     const systemContent = [
       '你是这次事件分析结果的答疑助手，可调用只读工具重新取证：',
       '先基于给定上下文判断；用户质疑结论或信息不足时，用工具查证（fs_* 读源码、ki_* 读知识库）。',
@@ -333,7 +364,18 @@ export async function askEventAnalysis(
         ? '已挂文档清单里的 group/name 可用 ki_get_module_info 读取正文。'
         : '本事件未挂文档；如需背景可用 ki_search 检索知识库。',
       ' 引用路径/行号必须来自本次工具返回或给定上下文，不得臆造；查不到就说明查了哪些方向。',
-      ' 查证后用中文简洁作答（不超过 400 字），不要输出代码块；不改文件、不执行系统命令、不调用编排类工具。',
+      ' 查证后用中文简洁作答；**正文里不要出现代码块**（唯一的例外是下面的补丁块）；不改文件、不执行系统命令、不调用编排类工具。',
+      /*
+       * 结论补丁（S03）：让模型在"结论该变"时给结构化建议，由服务端校验 + diff，
+       * 前端弹框由用户决定是否覆盖。不输出这块也不会错 —— 只是这轮没有可采纳的建议。
+       */
+      ' 若这轮回答意味着**分析结论本身应当修改**，请在正文之后另起一行，输出且仅输出一个围栏块：',
+      '```ki-conclusion-patch',
+      '{"conclusion":"一句话总结","chain":[{"kind":"symptom","text":"节点文本"}],"reason":"一句话说明改了什么"}',
+      '```',
+      ` 补丁的硬要求：chain 的 kind **只能**取这几个值：${patchKinds}（不要自造 root_cause / fix_suggestion 之类的名字）；`,
+      ' 最多 5 个节点、每节点不超过 200 字（分支 branches 只能挂 root）；',
+      'conclusion 不能为空（不要用补丁把结论清空）；结论没有变化时**不要**输出该块。',
     ].join('');
 
     const messages: ChatTurn[] = [
@@ -493,19 +535,62 @@ export async function askEventAnalysis(
       throw new GovernanceError('ANALYSIS_ASK_TIMEOUT', '回答超时且未产生内容，请重试');
     }
 
+    /*
+     * 结论补丁（S03 §3.2~3.4）：剥块 → 模板校验 → 与当前草稿 diff。
+     *
+     * 三步里任何一步失败都只**降级**（记一条步骤说明），绝不让追问本身失败（N13）：
+     * 用户问的是问题，补丁只是附带的建议。
+     */
+    const extracted = extractProposal(text);
+    let proposalView: AskProposalView | undefined;
+    if (extracted.patch) {
+      // 与提示词同源：同一个视角算出来的骨架，避免"提示说能写、校验说不能"
+      const reasons = validateProposal(extracted.patch, patchView);
+      if (reasons.length > 0) {
+        // N14/N20：整份判不合规并说明原因，不做"删掉不合规节点后照用"的静默裁剪
+        emitStep('proposal', 'thinking', '结论补丁', `AI 建议不合规，已忽略：${reasons[0]}`);
+        proposalView = { valid: false, reason: reasons[0]!, reasons };
+      } else {
+        const diff = diffProposal(
+          { conclusion: analysis.draft?.conclusion ?? null, chain: analysis.draft?.chain ?? [] },
+          extracted.patch,
+        );
+        if (diff.changed) {
+          proposalView = { valid: true, diff, patch: extracted.patch };
+        } else {
+          // N16：与当前一致就不打扰
+          emitStep('proposal', 'thinking', '结论补丁', 'AI 的结论与当前一致，无需覆盖');
+        }
+      }
+    } else if (extracted.error) {
+      emitStep('proposal', 'thinking', '结论补丁', `未采用建议：${extracted.error}`);
+    }
+
     const toolCalls = toolCallNames.map((name) => ({ name, at: now }));
     const turn: AnalysisAskTurn = {
       id: `ask_${now.toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
       question,
-      answer: text.slice(0, ASK_ANSWER_MAX_CHARS),
+      /*
+       * 正文用**剥掉补丁块**的版本：用户不该看到一坨 JSON。
+       * ⚠️ 不能写成 `extracted.answer || text` —— 若补丁是全文唯一内容，剥离后为空，
+       * 那个 `||` 会把**含 JSON 的原文**塞回正文（真机踩过这个坑）。
+       */
+      answer: (
+        ((extracted.patch || extracted.error) ? extracted.answer : text).slice(0, ASK_ANSWER_MAX_CHARS)
+        || '（本轮只给出了结论建议，没有文字说明）'
+      ),
       runId: draftRunId,
       at: now,
       usage: { promptTokens, completionTokens },
       toolCalls,
       context: ctx.stats,
+      // 只落**有效且确有差异**的补丁；不合规/无差异的不进记录（避免回看时误以为"当时建议过"）
+      ...(proposalView?.valid && proposalView.patch
+        ? { proposal: { ...proposalView.patch, at: now } }
+        : {}),
     };
     const saved = await appendAskTurn(scope, event.id, turn);
-    return { turn, doc: saved.doc };
+    return { turn, doc: saved.doc, ...(proposalView ? { proposal: proposalView } : {}) };
   } finally {
     // 所有出口都必须释放追问限流的并发槽，否则计数泄漏、后续追问全被判 BUSY
     followupLimiter.release();

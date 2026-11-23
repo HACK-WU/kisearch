@@ -19,7 +19,7 @@ import type { ConclusionNode, ConclusionNodeKind } from './types.js';
 /** 合法节点类型；数组顺序即阅读顺序 */
 export const CONCLUSION_KINDS: readonly ConclusionNodeKind[] = ['symptom', 'cause', 'root', 'impact', 'fix'];
 
-/** 节点上限：结论总量有限（conclusion ≤120 字 + 每节点 ≤200 字），再多必然水化 */
+/** 节点上限：结论要能一眼读完（每节点 ≤200 字、≤5 节点），再多必然水化 */
 export const CHAIN_MAX_NODES = 5;
 export const CHAIN_TEXT_MAX = 200;
 /** 分支（触发条件 / 反例）只允许挂在根因下 */
@@ -33,7 +33,7 @@ export const CHAIN_BRANCH_TEXT_MAX = 120;
  * 「`src/a.ts: 128`（第 128 行）」这种带说明的串，收进来只会让前端渲染出一个
  * 点开找不到的胶囊。行号必须是正整数。
  */
-const REF_PATTERN = /^([^\s:]+):(\d{1,7})$/;
+export const REF_PATTERN = /^([^\s:]+):(\d{1,7})$/;
 
 /**
  * 中性词表（= fault 视角的词表）。
@@ -48,7 +48,7 @@ function isKind(value: string): value is ConclusionNodeKind {
 }
 
 /** 把多行/多空格压成单个空格：节点是"一句话"，换行会把行高与轨道撑坏 */
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 

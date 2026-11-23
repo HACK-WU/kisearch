@@ -54,6 +54,8 @@ import {
   type AnalysisView,
 } from './analysis-view.js';
 import { normalizeChain, pruneChainRefs } from './conclusion-chain.js';
+// 4000 硬上限的唯一来源：解析兜底与保存校验共用，避免两处各写一个数字
+import { CONCLUSION_MAX_CHARS } from './analysis-edit.js';
 import { clearResume, readResume, writeResume, type ResumeState } from './analysis-resume.js';
 import { readRefs } from './refs-store.js';
 import { executeRecall } from '../mcp-tools/recall.js';
@@ -338,7 +340,7 @@ export function buildOutputTail(view: AnalysisView): string {
 5. 当证据足够或达到预算上限停止调用工具时，最终回复**只输出一个合法 JSON 对象**（不要附加多余解释文字）。
    下方只是**字段示意**，不是「至少一条」的要求：candidates 的条数完全由证据决定，允许为 0。格式如下：
 {
-  "conclusion": "一句话总结（≤120 字）：根因是什么、影响多大、往哪修；不要粘贴代码块；未定位到时写明已排查方向，不要留空",
+  "conclusion": "一句话总结：根因是什么、影响多大、往哪修；不要粘贴代码块；未定位到时写明已排查方向，不要留空",
   "chain": [
 ${chainSample}
   ],
@@ -852,11 +854,13 @@ function parseJsonSummary(text: string): {
     const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
     /*
      * 结论：只收字符串；剥掉代码围栏（结论区是文字层，不该出现代码），
-     * 截断 2000 字防模型整段复述工具输出；空串归 null（前端据此整块不渲染）。
+     * 超长按 `CONCLUSION_MAX_CHARS`（4000）兜底 —— 与人工/补丁校验同一阈值，
+     * 否则"允许 4000"会被这里先截成 2000，规则等于不可达。
+     * 空串归 null（前端据此整块不渲染）。
      */
     const rawConclusion = parsed.conclusion;
     const conclusion = typeof rawConclusion === 'string'
-      ? (rawConclusion.replace(/```[\s\S]*?```/g, '').trim().slice(0, 2000) || null)
+      ? (rawConclusion.replace(/```[\s\S]*?```/g, '').trim().slice(0, CONCLUSION_MAX_CHARS) || null)
       : null;
     /*
      * 因果链：模型输出是不可信输入，逐项校验在 conclusion-chain 里统一做
@@ -928,16 +932,28 @@ export async function startEventAnalysis(
   if (activeRuns.has(key) || existingDoc.draft?.status === 'running') {
     return { ok: true, reused: true, doc: existingDoc };
   }
-  if (
+  /*
+   * 覆盖保护（2026-11-23 · 人工校正 R-08）：两条独立理由，任一命中都先拦。
+   *   · 有**未处理的候选**：原行为（只对 ready/partial 生效）；
+   *   · 有**人工修订**（`editedAt`）：不限状态 —— `failed` 的草稿也能被人工补齐
+   *     （设计 S01 D1），而收尾的 `updateDraftIfMatch` 会整段重写
+   *     conclusion / chain / unconfirmed，不拦就是静默覆盖。
+   * 闸门在 `resume` 读取之前，因此**续跑同样被覆盖**，无需另加分支。
+   * 两者共用既有的 `forceOverwrite` 出口，前端已有两段式确认（AiAnalyzePanel）。
+   */
+  const hasUnhandledCandidates = Boolean(
     existingDoc.draft
     && (existingDoc.draft.status === 'ready' || existingDoc.draft.status === 'partial')
-    && existingDoc.draft.candidates.length > 0
-    && opts?.forceOverwrite !== true
-  ) {
+    && existingDoc.draft.candidates.length > 0,
+  );
+  const hasManualEdits = existingDoc.draft?.editedAt !== undefined;
+  if ((hasUnhandledCandidates || hasManualEdits) && opts?.forceOverwrite !== true) {
     throw new GovernanceError(
       'REVISION_CONFLICT',
-      '当前已有待确认的分析草稿，请先处理、丢弃或确认覆盖重新分析',
-      { runId: existingDoc.draft.runId },
+      hasManualEdits
+        ? '这次分析有未处理的内容或人工修订：重新分析会覆盖结论与未确认点（已确认的代码位置不受影响），请确认后重试'
+        : '当前已有待确认的分析草稿，请先处理、丢弃或确认覆盖重新分析',
+      { ...(existingDoc.draft ? { runId: existingDoc.draft.runId } : {}), hasManualEdits },
     );
   }
 

@@ -682,6 +682,49 @@ export function confirmEventAnalysis(
   });
 }
 
+/**
+ * 人工校正三块产物（2026-11-23 · REQ-20261123-001）：整块提交。
+ *
+ * 三个约定（详见后端 `saveDraftEdits`）：
+ * · 未提供的块保持原值，但**前端始终三块都传**（避免"只改一处"时把其余块写丢）；
+ * · `conclusion: null` / `chain: []` 是合法的"人工清空"，不是"没传"；
+ * · `expectedRunId` 传 `draft?.runId ?? null`：无草稿时传 `null` 表示"我期望此刻没有草稿"。
+ */
+export function saveEventAnalysisEdits(
+  scope: string,
+  eventId: string,
+  patch: {
+    expectedRunId?: string | null;
+    conclusion?: string | null;
+    chain?: ConclusionNode[];
+    unconfirmed?: string[];
+    confirmed?: {
+      add?: Array<{ file: string; line: number; endLine?: number; why: string }>;
+      update?: Array<{ id: string; why: string }>;
+    };
+    /**
+     * 采纳了哪一轮追问的补丁（S03 R-23）。
+     *
+     * 只在"用补丁覆盖结论"时传：服务端写完盘才回写 `.ask.json` 的
+     * `proposalAccepted`，失败不标记（用户其实没采纳）。
+     */
+    acceptedProposalTurnId?: string;
+  },
+): Promise<{
+  ok: true;
+  scope: string;
+  eventId: string;
+  editedAt?: number;
+  draft: AnalysisDraft | null;
+  confirmed: ConfirmedCodeLocation[];
+}> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope, ...patch }),
+  });
+}
+
 export function discardEventAnalysisDraft(
   scope: string,
   eventId: string,
@@ -746,10 +789,35 @@ export interface AskStep {
   at: number;
 }
 
+/** 补丁差异块（S03）：块级展示，不做全文对照 */
+export interface AskProposalDiffBlock {
+  block: 'conclusion' | 'chain';
+  kind: '改' | '增' | '删';
+  before?: string;
+  after?: string;
+}
+
+/**
+ * 追问末端的结论补丁建议（S03）。
+ *
+ * `valid:false` 也会下发：前端要能说明"AI 想改但不合规、原因是什么"，
+ * 而不是假装没有建议（N14）；此时**不给确认按钮**。
+ */
+export interface AskProposalEvent {
+  type: 'proposal';
+  turnId: string;
+  valid: boolean;
+  reason?: string;
+  reasons?: string[];
+  diff?: { changed: boolean; blocks: AskProposalDiffBlock[] };
+  patch?: { conclusion: string; chain: ConclusionNode[]; reason: string };
+}
+
 export type AskProgressEvent =
   | { type: 'step'; step: AskStep }
   | { type: 'tool'; name: string; label: string }
-  | { type: 'thinking'; text: string };
+  | { type: 'thinking'; text: string }
+  | AskProposalEvent;
 
 export async function askEventAnalysisStream(
   scope: string,
@@ -800,11 +868,26 @@ export async function askEventAnalysisStream(
           const payload = JSON.parse(line.slice(6)) as {
             type: string; text?: string; name?: string; label?: string; step?: AskStep;
             turn?: AnalysisAskTurn; message?: string; code?: string;
+            turnId?: string; valid?: boolean; reason?: string; reasons?: string[];
+            diff?: { changed: boolean; blocks: AskProposalDiffBlock[] };
+            patch?: { conclusion: string; chain: ConclusionNode[]; reason: string };
           };
           if (payload.type === 'delta') onDelta(payload.text ?? '');
           else if (payload.type === 'step' && payload.step && onEvent) onEvent({ type: 'step', step: payload.step });
           else if (payload.type === 'tool' && onEvent) onEvent({ type: 'tool', name: payload.name ?? '', label: payload.label ?? '' });
           else if (payload.type === 'thinking' && onEvent) onEvent({ type: 'thinking', text: payload.text ?? '' });
+          else if (payload.type === 'proposal' && onEvent) {
+            // 旧后端不会发这个事件；这里对缺省字段一律按"无建议"兜底
+            onEvent({
+              type: 'proposal',
+              turnId: payload.turnId ?? '',
+              valid: payload.valid === true,
+              ...(payload.reason ? { reason: payload.reason } : {}),
+              ...(payload.reasons ? { reasons: payload.reasons } : {}),
+              ...(payload.diff ? { diff: payload.diff } : {}),
+              ...(payload.patch ? { patch: payload.patch } : {}),
+            });
+          }
           else if (payload.type === 'done' && payload.turn) doneTurn = payload.turn;
           else if (payload.type === 'error') {
             errMessage = payload.message ?? '追问失败';

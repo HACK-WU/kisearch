@@ -481,6 +481,8 @@ export interface AnalysisDraftDto {
   stats: AnalysisStatsDto;
   startedAt: number;
   updatedAt: number;
+  /** 人工修订时间戳（2026-11-23）：存在即表示三块产物被人工改过；重跑后消失 */
+  editedAt?: number;
 }
 
 export interface ConfirmedCodeLocationDto {
@@ -522,6 +524,15 @@ export interface AnalysisAskTurnDto {
     historyUsed: number;
     attachedDocsUsed?: { members: number; refs: number };
   };
+  /** 结论补丁（2026-11-23 · S03）：缺省 = 没给 / 解析失败 / 与当前无差异 */
+  proposal?: {
+    conclusion: string;
+    chain: ConclusionNodeDto[];
+    reason: string;
+    at: number;
+  };
+  /** 用户是否采纳了该补丁（覆盖成功时回写） */
+  proposalAccepted?: boolean;
 }
 
 export interface EventAnalysisAskDto {
@@ -731,6 +742,8 @@ export interface AnalysisDraftSummaryDto {
   updatedAt: number;
   errorCode?: string;
   errorMessage?: string;
+  /** 人工修订时间戳（2026-11-23）：MCP 读出口据此告诉调用方"这条结论是人改的" */
+  editedAt?: number;
 }
 
 /** 详情 analysis 块 */

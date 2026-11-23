@@ -316,6 +316,8 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
           commit: draft.commit ?? null,
           startedAt: draft.startedAt,
           updatedAt: draft.updatedAt,
+          // 人工修订标记（2026-11-23 · R-13）：MCP 读出口据此声明"结论是人改的"
+          ...(draft.editedAt !== undefined ? { editedAt: draft.editedAt } : {}),
           ...(draft.errorCode ? { errorCode: draft.errorCode } : {}),
           ...(draft.errorMessage ? { errorMessage: draft.errorMessage } : {}),
         }

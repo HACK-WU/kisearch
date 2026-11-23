@@ -101,6 +101,27 @@ export async function appendAskTurn(
   });
 }
 
+/**
+ * 标记某一轮补丁"被用户采纳"（S03 R-23 审计用）。
+ *
+ * 只在覆盖**成功之后**调用：失败时用户其实没采纳，先标记会造假。
+ * 找不到该轮（记录被清空 / 裁剪掉）时静默返回 —— 审计字段不该让一次成功的覆盖变成失败。
+ */
+export async function markAskProposalAccepted(
+  scope: string,
+  eventId: string,
+  turnId: string,
+): Promise<void> {
+  await withScopeWriteLock(askLockKey(scope, eventId), 'analysis-ask', async () => {
+    const cur = readAskDoc(scope, eventId);
+    const idx = cur.turns.findIndex((t) => t.id === turnId);
+    if (idx < 0) return;
+    const turns = [...cur.turns];
+    turns[idx] = { ...turns[idx]!, proposalAccepted: true };
+    walWrite(getAskPath(scope, eventId), { version: 1, eventId, turns, updatedAt: Date.now() });
+  });
+}
+
 /** 清空本事件追问记录，返回清掉的条数 */
 export async function clearAskTurns(scope: string, eventId: string): Promise<number> {
   return withScopeWriteLock(askLockKey(scope, eventId), 'analysis-ask', async () => {

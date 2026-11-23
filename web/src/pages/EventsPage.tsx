@@ -167,7 +167,19 @@ export function EventsPage(): JSX.Element {
    * 其错误消息还会覆盖掉成功提示。ref 在这里同步写，闭包读它才是「此刻」的选中。
    */
   const activeIdRef = useRef<string | null>(null);
+  /**
+   * AI 分析编辑态是否有未保存修改（2026-11-23 · 人工校正 Q2）。
+   *
+   * 编辑器的改动只在卡片本地 state 里，切事件会随 `key={active.id}` 重挂一起丢掉。
+   * 这里拦一次并给出可执行提示（不弹框：用户点「保存 / 取消」就能继续），
+   * 刷新场景由卡片自己的 `beforeunload` 兜。
+   */
+  const analysisEditDirty = useRef(false);
   const selectEvent = useCallback((id: string | null): void => {
+    if (analysisEditDirty.current && id !== activeIdRef.current) {
+      setMessage({ tone: 'err', text: 'AI 分析有未保存的人工修改：请先「保存」或「取消」，再切换事件' });
+      return;
+    }
     // 必须先于 setState 同步写：run 的收尾在同一次事件循环里就要读到新值
     activeIdRef.current = id;
     setActiveId(id);
@@ -1383,6 +1395,7 @@ export function EventsPage(): JSX.Element {
                     setDetail((prev) => (prev ? { ...prev, analysis: next } : prev));
                   }}
                   onOpenSettings={() => openAiSettings('analysis')}
+                  onDirtyChange={(d: boolean) => { analysisEditDirty.current = d; }}
                   onRemoveLocation={(loc) => void run(async () => {
                     await removeConfirmedCodeLocation(eventScope, active.id, loc.id);
                     return `已移除代码位置「${loc.file}:${loc.line}」`;

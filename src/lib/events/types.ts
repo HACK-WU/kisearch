@@ -236,8 +236,8 @@ export interface AnalysisDraft {
   errorCode?: string;
   errorMessage?: string;
   /**
-   * 分析结论的**一句话总结**（根因是什么 + 影响多大 + 往哪修，模板要求 ≤120 字）。
-   * 旧文件或模型未给出时为 null；解析层硬上限 2000 字兜底。
+   * 分析结论的**一句话总结**（根因是什么 + 影响多大 + 往哪修；模板只要求"一句话"，硬上限 4000 字）。
+   * 旧文件或模型未给出时为 null；解析层按 `CONCLUSION_MAX_CHARS`（4000）兜底。
    * 细节看 `chain`；`chain` 为空时前端仍按纯文本渲染本字段（老事件兼容）。
    */
   conclusion: string | null;
@@ -260,6 +260,13 @@ export interface AnalysisDraft {
   stats: AnalysisStats;
   startedAt: number;
   updatedAt: number;
+  /**
+   * 人工修订时间戳（2026-11-23 · REQ-20261123-001）。
+   *
+   * 存在即表示三块产物（结论 / 未确认点 / 已确认位置）被人工改过；重跑会重建 draft，
+   * 因此该字段自然消失（= 修订标识在重新分析后清掉）。**只记时间不记人**（无 per-user 身份）。
+   */
+  editedAt?: number;
 }
 
 export interface ConfirmedCodeLocation {
@@ -305,6 +312,23 @@ export interface AnalysisAskTurn {
     /** 已挂文档清单条数（决策 C 的审计字段） */
     attachedDocsUsed?: { members: number; refs: number };
   };
+  /**
+   * 本轮末端给出的结论补丁（2026-11-23 · S03）。
+   *
+   * 缺省 = 模型没给 / 解析失败 / 与当前结论无差异（三种都按"没有补丁"处理）。
+   * `conclusion` **必非空**：补丁不允许清空结论 —— 清空不是"给新结论"。
+   */
+  proposal?: AskProposal & { /** 生成时刻（审计用） */ at: number };
+  /** 用户是否采纳了本轮补丁（覆盖成功时由 PATCH 回写，审计用） */
+  proposalAccepted?: boolean;
+}
+
+/** 追问末端的结论补丁（S03）：只覆盖结论两块，不含未确认点 / 位置 */
+export interface AskProposal {
+  conclusion: string;
+  chain: ConclusionNode[];
+  /** 模型给的一句话说明，仅展示 */
+  reason: string;
 }
 
 /** 追问记录落点：`{scope}/.events/{eventId}.ask.json`（独立于 .analysis.json） */

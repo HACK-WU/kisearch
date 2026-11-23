@@ -93,6 +93,14 @@ export function registerEventListTool(server: McpServer): void {
               : analysis.draft.conclusion,
           }
           : {}),
+              /*
+               * 人工修订标记（2026-11-23 · 人工校正 R-13）：AI 读到结论时必须能判断
+               * "这条是人改写的"，否则会把人工判断当成自己上一轮的产出继续推理。
+               * 与 `conclusionPreview` 同级（列表行本来就是扁平结构，不另起 analysis 对象）。
+               */
+              ...(analysis.draft?.editedAt !== undefined
+                ? { conclusionEditedAt: analysis.draft.editedAt }
+                : {}),
         codeLocationTotal: confirmed.length,
               codeLocationsPreview: confirmed.slice(0, locLimit).map((c) => ({
                 file: c.file,

@@ -65,6 +65,7 @@ import {
   discardAnalysisDraft,
   removeConfirmedLocation,
   resetAnalysis,
+  saveDraftEdits,
 } from './events/analysis-store.js';
 import {
   cancelEventAnalysis,
@@ -80,6 +81,7 @@ import {
   ASK_DOC_MAX_BYTES,
   ASK_DOC_MAX_TURNS,
   clearAskTurns,
+  markAskProposalAccepted,
   readAskDoc,
   removeAskFile,
 } from './events/analysis-ask-store.js';
@@ -1137,6 +1139,12 @@ export async function handleGovernanceRoutes(
               onDelta: (text) => send({ type: 'delta', text }),
               onEvent: (progress) => send(progress),
             });
+            /*
+             * 结论补丁（S03 §3.5）：`done` **之前**下发，且带 `turnId` ——
+             * 用户点「确认覆盖」时要用它回写 `.ask.json` 的 `proposalAccepted`（R-23）。
+             * 旧前端忽略未知 type，天然向后兼容。
+             */
+            if (result.proposal) send({ type: 'proposal', turnId: result.turn.id, ...result.proposal });
             send({ type: 'done', turn: result.turn });
           } catch (err) {
             const ge = err instanceof GovernanceError ? err : null;
@@ -1203,6 +1211,55 @@ export async function handleGovernanceRoutes(
             eventId: event.id,
             draft: analysisDoc.draft,
             confirmed: analysisDoc.confirmed,
+          });
+        }
+        /*
+         * 人工校正三块产物（2026-11-23 · REQ-20261123-001）：`PATCH /analysis` 整块提交。
+         *
+         * 三个刻意的取舍（设计 S01 §3.4 / D3）：
+         *   · 字段**可省略**：只是"改一句位置理由"不必回传整条链（省略 = 不改该块）；
+         *     前端仍按整块提交，因此正常情况下三块都带。
+         *   · `conclusion: null` 与 `chain: []` 是**合法输入**（人工清空），
+         *     不能当成"没传"——所以判据用 `hasOwnProperty` 而不是真值判断。
+         *   · `expectedRunId: null` 表示"我期望此刻没有草稿"，与省略（不校验）不同。
+         */
+        if (method === 'PATCH' && !segs[3]) {
+          const b = await body();
+          const scope = scopeFromBody(b);
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          const has = (key: string): boolean => Object.prototype.hasOwnProperty.call(b, key);
+          const confirmedRaw = b.confirmed;
+          const confirmed = confirmedRaw && typeof confirmedRaw === 'object' && !Array.isArray(confirmedRaw)
+            ? confirmedRaw as Record<string, unknown>
+            : {};
+          const doc = await saveDraftEdits(scope, event.id, {
+            ...(has('expectedRunId')
+              ? { expectedRunId: b.expectedRunId === null ? null : String(b.expectedRunId) }
+              : {}),
+            ...(has('conclusion') ? { conclusion: b.conclusion as string | null } : {}),
+            ...(has('chain') ? { chain: b.chain } : {}),
+            ...(has('unconfirmed') ? { unconfirmed: b.unconfirmed } : {}),
+            ...(confirmed.add !== undefined ? { confirmedAdd: confirmed.add } : {}),
+            ...(confirmed.update !== undefined ? { confirmedUpdate: confirmed.update } : {}),
+          });
+          /*
+           * 采纳审计（S03 R-23）：**只在写盘成功后**标记 —— 失败时用户并没有采纳。
+           * 标记失败不回滚主流程：审计字段不该让一次成功的覆盖变成 500。
+           */
+          const acceptedTurnId = str(b.acceptedProposalTurnId);
+          if (acceptedTurnId) {
+            await markAskProposalAccepted(scope, event.id, acceptedTurnId).catch((err: unknown) => {
+              console.warn(`[analysis] 补丁采纳标记写入失败（忽略）：${(err as Error).message}`);
+            });
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: event.id,
+            editedAt: doc.draft?.editedAt,
+            draft: doc.draft,
+            confirmed: doc.confirmed,
           });
         }
         if (method === 'POST' && segs[3] === 'confirm' && !segs[4]) {

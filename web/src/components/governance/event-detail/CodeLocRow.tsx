@@ -47,7 +47,15 @@ export function CodeLocRow(props: CodeLocRowProps): JSX.Element {
             >
               <span className="gov-codeloc__path">{path}</span>
               {/* 置信度只说人话：数字留在 title 里给排查用，界面不出现 0.85 这种值 */}
-              {conf !== null ? (
+              {/*
+               * `confidence === 0` 是「人工添加」的约定值（2026-11-23 · 人工校正）：
+               * 它与"AI 给了 0 分"在数据层不可区分，所以**不靠数值区分**，
+               * 在这里直接改写标签 —— 显示成「线索」会让人以为这条是 AI 猜的。
+               */}
+              {conf === 0 ? (
+                <span className="gov-conf gov-conf--manual" title="人工添加的位置（非 AI 判定，已服务端验真）">人工</span>
+              ) : null}
+              {conf !== null && conf > 0 ? (
                 <span
                   className={`gov-conf gov-conf--${conf >= 0.8 ? 'ok' : conf >= 0.5 ? 'warn' : 'muted'}`}
                   title={`分析时的置信度 ${conf.toFixed(2)}：高 = 读到具体分支与触发条件；中 = 读到调用链但缺最后一环；低 = 只确认了位置`}

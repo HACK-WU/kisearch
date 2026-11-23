@@ -394,3 +394,72 @@ describe('S-05d · 重置分析：清空结论与已确认位置（2026-11-23）
     assert.match(resetFn.slice(0, 600), /method: 'DELETE'/, '重置用 DELETE');
   });
 });
+describe('结论只读（H12 · 批 6 · 2026-11-23）', () => {
+  const editorSrc = fs.readFileSync(
+    path.join(webRoot, 'src/components/governance/event-detail/AnalysisEditor.tsx'), 'utf8');
+  const cardSrc = fs.readFileSync(
+    path.join(webRoot, 'src/components/governance/event-detail/EventAnalysisCard.tsx'), 'utf8');
+  const editSrc = fs.readFileSync(path.join(webRoot, '..', 'src/lib/events/analysis-edit.ts'), 'utf8');
+
+  it('编辑器里没有任何结论编辑控件', () => {
+    assert.ok(!editorSrc.includes('gov-dedit__textarea'), '不得再有 summary 输入框');
+    assert.ok(!editorSrc.includes('因果链 ·'), '不得再有因果链区块');
+    assert.ok(!editorSrc.includes('kindLabel'), '节点编辑已移除，不再需要视角词表');
+    assert.ok(!/conclusion:\s/.test(editorSrc), '保存 payload 不得发送 conclusion（结论唯一写路径是追问补丁）');
+  });
+
+  it('结论改为只读展示 + 引导语（由卡片渲染后传入）', () => {
+    assert.match(cardSrc, /分析结论（只读）/, '编辑态仍有只读结论，便于对照');
+    assert.match(cardSrc, /如需修改请追问/, '必须给出可执行的替代路径');
+    assert.ok(cardSrc.includes('conclusionBlock'), '只读块由卡片传给编辑器，保持单一 flex 容器');
+  });
+
+  it('长度口径统一为 4000（H10）', () => {
+    assert.match(editSrc, /CONCLUSION_MAX_CHARS = 4000/);
+    assert.ok(!editSrc.includes('CONCLUSION_TEMPLATE_MAX'), '旧 120 常量必须消失');
+    assert.ok(!/\b120\b/.test(editorSrc), '前端不得再出现 120 字计数');
+  });
+  it('保存后保留 resumeAvailable（不得强转丢掉「继续分析」入口）', () => {
+    assert.ok(
+      cardSrc.includes('...(analysis ?? { draft: null, confirmed: [] })'),
+      'onSaved 必须从原 analysis 展开再覆盖 draft/confirmed',
+    );
+    assert.ok(!/onUpdated\(next as EventAnalysis\)/.test(cardSrc), '不得再用 as 强转整块替换');
+  });
+});
+
+describe('追问补丁覆盖结论（S03 · 批 5）', () => {
+  const askSrc = fs.readFileSync(
+    path.join(webRoot, 'src/components/governance/event-detail/AskBlock.tsx'), 'utf8');
+  const modalSrc = fs.readFileSync(
+    path.join(webRoot, 'src/components/governance/event-detail/AnalysisProposalModal.tsx'), 'utf8');
+  const apiSrc = fs.readFileSync(path.join(webRoot, 'src/api/governanceApi.ts'), 'utf8');
+  const repoRoot = path.join(webRoot, '..');
+  const runnerSrc = fs.readFileSync(path.join(repoRoot, 'src/lib/events/analysis-ask-runner.ts'), 'utf8');
+  const patchSrc = fs.readFileSync(path.join(repoRoot, 'src/lib/events/analysis-ask-patch.ts'), 'utf8');
+  const httpSrc = fs.readFileSync(path.join(repoRoot, 'src/lib/governance-http.ts'), 'utf8');
+
+  it('不自动覆盖：必须用户确认，且复用唯一写入口', () => {
+    assert.match(modalSrc, /确认覆盖/);
+    assert.match(modalSrc, /保留当前/);
+    assert.ok(askSrc.includes('saveEventAnalysisEdits'), '覆盖必须走 PATCH /analysis');
+    assert.ok(askSrc.includes('acceptedProposalTurnId'), '采纳要回写 .ask.json（审计）');
+  });
+
+  it('不合规 / 无写权限 → 不给确认', () => {
+    assert.ok(modalSrc.includes('disabled={!canConfirm}'), '可用性由校验与写权限共同决定');
+    assert.ok(modalSrc.includes('需要写权限'), 'viewer 要看得到原因');
+  });
+
+  it('后端：围栏约定 + 按视角骨架校验 + done 前下发事件', () => {
+    assert.ok(runnerSrc.includes('ki-conclusion-patch'), '提示词要约定围栏语言');
+    assert.ok(patchSrc.includes('viewProfile(view).skeleton'), '补丁必须按该类型骨架校验');
+    assert.match(httpSrc, /type: 'proposal', turnId/, '事件要带 turnId 供采纳回写');
+  });
+
+  it('前端：流式事件能解析 proposal', () => {
+    assert.ok(apiSrc.includes("payload.type === 'proposal'"));
+  });
+});
+
+

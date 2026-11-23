@@ -22,6 +22,10 @@ import { walWrite } from '../wal.js';
 import { withScopeWriteLock } from '../scope-write-lock.js';
 import { GovernanceError } from '../governance-errors.js';
 import { normalizeChain } from './conclusion-chain.js';
+import { hasEditFields, validateDraftEdit, type ManualLocationInput } from './analysis-edit.js';
+import { resolveAnalysisTargetDir, readPromptConfig, defaultPromptConfig } from '../chat/prompt-config.js';
+import { loadConfig } from '../config.js';
+import { validateTargetRootDir, verifyCandidateLocation } from './analysis-fs-tools.js';
 import type {
   AnalysisDraft,
   ConfirmedCodeLocation,
@@ -88,12 +92,21 @@ export function normalizeAnalysisDocForRead(
    * （下游有 `normalized === d` 的早退判断，破坏它等于让所有读取都走慢路径）。
    */
   const chainOk = Array.isArray(rawChain) && chain.length === rawChain.length;
-  const normalized = conclusionOk && chainOk
+  /*
+   * `editedAt`（2026-11-23 · 人工校正）同样是历史兼容点：旧文件没有该字段；
+   * 非数字（字符串时间戳 / 损坏值）一律视为"没被人工改过"，
+   * 否则前端会拿一个垃圾值当徽标开关。
+   */
+  const rawEditedAt = (d as { editedAt?: unknown }).editedAt;
+  const editedAtOk = rawEditedAt === undefined
+    || (typeof rawEditedAt === 'number' && Number.isFinite(rawEditedAt));
+  const normalized = conclusionOk && chainOk && editedAtOk
     ? d
     : {
       ...d,
       conclusion: conclusionOk ? d.conclusion : null,
       chain: chainOk ? d.chain : chain,
+      ...(editedAtOk ? {} : { editedAt: undefined }),
     };
   const withNormalized = (draft: typeof d) => (normalized === d ? doc : { ...doc, draft });
 
@@ -214,6 +227,230 @@ export async function confirmDraftLocations(
     };
     writeAnalysisDoc(scope, next);
     return { added: additions.length, doc: next };
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 人工校正（2026-11-23 · REQ-20261123-001）
+ *
+ * 三条不变量（设计 S01 §3.3，改这里前先读）：
+ *   1. **空 patch 不写盘**：六项输入全缺省 → 直接返回，`editedAt` 不变
+ *      （否则"点开保存没改东西"也会把卡片标成「已人工修订」）；
+ *   2. **清空不置 null**：三块都空是合法终态，`draft` 必须保留 —— 前端靠它区分
+ *      「AI 没找到」与「已人工清空」，且整卡渲染门槛依赖 draft 非空；
+ *   3. **每次有效写盘必设 `editedAt`**：重跑会重建 draft，从而自然清掉该字段。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface SaveDraftEditsArgs {
+  /** 并发闸门：`undefined` 不校验；`null` 期望当前无草稿；字符串须等于当前 `draft.runId` */
+  expectedRunId?: string | null;
+  /** 以下均为**未校验**的原始输入；未提供的块保持原值 */
+  conclusion?: string | null;
+  chain?: unknown;
+  unconfirmed?: unknown;
+  confirmedAdd?: unknown;
+  confirmedUpdate?: unknown;
+}
+
+function assertRunIdMatch(current: string | null, expected: string | null | undefined): void {
+  if (expected === undefined) return;
+  if (expected === null) {
+    if (current !== null) {
+      throw new GovernanceError(
+        'REVISION_CONFLICT',
+        '当前已有分析草稿（另一个标签页可能刚跑过分析）：请刷新后重新编辑',
+        { runId: current },
+      );
+    }
+    return;
+  }
+  if (current !== expected) {
+    throw new GovernanceError(
+      'REVISION_CONFLICT',
+      '这次分析已被新一轮分析替换：你的修改仍在编辑器里，可复制后重试',
+      { runId: current },
+    );
+  }
+}
+
+/**
+ * 人工位置验真所需的代码根目录。
+ *
+ * **不依赖草稿**：重置分析后 `draft` 为空，但用户仍要能手工补位置（R-03）。
+ * 目录只从配置解析 —— 与 `startEventAnalysis` 同一真源（`resolveAnalysisTargetDir`）。
+ */
+function resolveEditableTargetRoot(scope: string, cfg = loadConfig()): string {
+  const promptCfg = readPromptConfig(cfg).config;
+  const analysisCfg = promptCfg.analysis ?? defaultPromptConfig().analysis!;
+  const configured = resolveAnalysisTargetDir(analysisCfg.targetDirs, scope);
+  if (!configured) {
+    throw new GovernanceError(
+      'ANALYSIS_TARGET_NOT_CONFIGURED',
+      `未配置 scope「${scope}」或默认的分析目标目录，请先到「AI 设置 → AI 分析」配置`,
+      { scope },
+    );
+  }
+  const dirCheck = validateTargetRootDir(configured);
+  if (!dirCheck.ok) {
+    throw new GovernanceError('ANALYSIS_TARGET_UNREADABLE', dirCheck.error, { targetDir: configured });
+  }
+  return dirCheck.realRoot;
+}
+
+async function buildManualLocations(
+  realRoot: string,
+  adds: readonly ManualLocationInput[],
+  commit: string | null,
+  now: number,
+): Promise<ConfirmedCodeLocation[]> {
+  const out: ConfirmedCodeLocation[] = [];
+  for (const add of adds) {
+    const verified = await verifyCandidateLocation(realRoot, add.file, add.line, add.endLine);
+    if (!verified.ok) {
+      throw new GovernanceError(
+        'ANALYSIS_LOCATION_VERIFY_FAILED',
+        `${add.file}:${add.line} 验真失败：${verified.reason}`,
+        { file: add.file, line: add.line, reason: verified.reason },
+      );
+    }
+    out.push({
+      id: `loc_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
+      file: verified.file,
+      line: verified.line,
+      ...(verified.endLine !== undefined ? { endLine: verified.endLine } : {}),
+      snippet: verified.realSnippet,
+      why: add.why,
+      /*
+       * `0` 的语义是"非 AI 判定"，不是"AI 置信度 0"——两者在数据层不可区分，
+       * 因此**不靠数值区分**：前端 `CodeLocRow` 见 0 时打「人工」标记。
+       */
+      confidence: 0,
+      targetDir: realRoot,
+      commit,
+      confirmedAt: now,
+    });
+  }
+  return out;
+}
+
+/** 无草稿时保存 → 新建一份"人工草稿"（Q1 已拍板允许） */
+function buildManualDraft(realRoot: string, now: number): AnalysisDraft {
+  return {
+    runId: `manual_${now.toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+    status: 'ready',
+    targetDir: realRoot,
+    commit: null,
+    conclusion: null,
+    chain: [],
+    candidates: [],
+    unconfirmed: [],
+    steps: [],
+    stats: { turns: 0, filesRead: 0, tokens: 0, ms: 0 },
+    startedAt: now,
+    updatedAt: now,
+    editedAt: now,
+  };
+}
+
+function mergeConfirmed(
+  existing: ConfirmedCodeLocation[],
+  additions: ConfirmedCodeLocation[],
+  updates: ReadonlyArray<{ id: string; why: string }>,
+): ConfirmedCodeLocation[] {
+  const seen = new Set(existing.map((c) => `${c.file}\u0000${c.line}`));
+  const added: ConfirmedCodeLocation[] = [];
+  for (const loc of additions) {
+    const key = `${loc.file}\u0000${loc.line}`;
+    // 同一位置重复添加是幂等操作（用户可能连点两次），静默跳过而不是报错
+    if (seen.has(key)) continue;
+    seen.add(key);
+    added.push(loc);
+  }
+  let merged = [...existing, ...added];
+  if (updates.length === 0) return merged;
+  const byId = new Map(merged.map((c) => [c.id, c] as const));
+  for (const upd of updates) {
+    const hit = byId.get(upd.id);
+    if (!hit) {
+      throw new GovernanceError('ANALYSIS_LOCATION_NOT_FOUND', `代码位置「${upd.id}」不存在`);
+    }
+    byId.set(upd.id, { ...hit, why: upd.why });
+  }
+  merged = merged.map((c) => byId.get(c.id) ?? c);
+  return merged;
+}
+
+/**
+ * 三块产物的人工校正写入口（唯一）。
+ *
+ * 顺序上**验真在锁外、锁内二次校验**：验真要读真实文件（几十 ms），持锁会阻塞
+ * 同事件的后台分析写盘与 confirm（设计 D7）。锁内重读是必须的——锁外到锁内之间
+ * 可能被另一轮分析整份替换。
+ */
+export async function saveDraftEdits(
+  scope: string,
+  eventId: string,
+  args: SaveDraftEditsArgs,
+  now = Date.now(),
+  deps?: { loadConfigFn?: () => ReturnType<typeof loadConfig> },
+): Promise<EventAnalysisDoc> {
+  // 不变量 1：空 patch 不写盘
+  if (!hasEditFields(args)) return readAnalysisDocRaw(scope, eventId);
+
+  const before = readAnalysisDocRaw(scope, eventId);
+  if (before.draft?.status === 'running') {
+    throw new GovernanceError('ANALYSIS_ALREADY_RUNNING', '分析仍在进行中：请先「停止」或等待完成，再修改结论');
+  }
+  assertRunIdMatch(before.draft?.runId ?? null, args.expectedRunId);
+
+  const { errors, value } = validateDraftEdit(args);
+  if (errors.length > 0) {
+    throw new GovernanceError('ANALYSIS_EDIT_INVALID', errors[0]!.reason, { errors });
+  }
+
+  // 需要代码目录的两种情况：有手工位置，或要新建草稿（draft.targetDir 是必填）
+  const needRoot = (value.confirmedAdd?.length ?? 0) > 0 || !before.draft;
+  const realRoot = needRoot ? resolveEditableTargetRoot(scope, deps?.loadConfigFn?.()) : null;
+  const additions = realRoot && value.confirmedAdd?.length
+    ? await buildManualLocations(realRoot, value.confirmedAdd, before.draft?.commit ?? null, now)
+    : [];
+
+  return withAnalysisLock(scope, eventId, 'analysis-save-edits', async () => {
+    const cur = readAnalysisDocRaw(scope, eventId);
+    if (cur.draft?.status === 'running') {
+      throw new GovernanceError('ANALYSIS_ALREADY_RUNNING', '分析仍在进行中：请先「停止」或等待完成，再修改结论');
+    }
+    assertRunIdMatch(cur.draft?.runId ?? null, args.expectedRunId);
+
+    /*
+     * `realRoot` 是**锁外**按"当时有没有草稿"决定的；锁内可能已被「重置分析」清掉，
+     * 这时 `realRoot` 为 null。若直接 `buildManualDraft(realRoot!)` 写入，`!` 只是
+     * 骗过类型，`targetDir` 会真的变成 null，后续验真与前端展示全错 —— 必须在此**重新
+     * 解析一次**（读配置是同步小开销，可接受）。
+     */
+    const base = cur.draft ?? buildManualDraft(
+      realRoot ?? resolveEditableTargetRoot(scope, deps?.loadConfigFn?.()),
+      now,
+    );
+    const nextDraft: AnalysisDraft = {
+      ...base,
+      ...(value.conclusion !== undefined ? { conclusion: value.conclusion } : {}),
+      ...(value.chain !== undefined ? { chain: value.chain } : {}),
+      ...(value.unconfirmed !== undefined ? { unconfirmed: value.unconfirmed } : {}),
+      // 不变量 3：有效写盘必设 editedAt；清空 liveThinking 避免留下永不结束的"思考中"
+      editedAt: now,
+      updatedAt: now,
+      liveThinking: undefined,
+    };
+    const next: EventAnalysisDoc = {
+      version: 1,
+      eventId,
+      draft: nextDraft,
+      confirmed: mergeConfirmed(cur.confirmed, additions, value.confirmedUpdate ?? []),
+      updatedAt: now,
+    };
+    writeAnalysisDoc(scope, next);
+    return next;
   });
 }
 
