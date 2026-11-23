@@ -631,6 +631,16 @@ a:hover { text-decoration: underline; }
   color: var(--ki-color-success);
   font-size: var(--ki-font-size-xs);
 }
+/* 「去回收站」（REQ-20261123-005 · S01）：独立于 notice —— 后者有 max-width + ellipsis，
+   链接嵌进去会被省略号吞掉。flex:none 让它在 flex 行里不被压缩。 */
+.ki-page-head__notice-link {
+  flex: none;
+  margin-left: 6px;
+  color: var(--ki-color-primary);
+  font-size: var(--ki-font-size-xs);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 
 /* 服务横幅 */
 .ki-banner {
@@ -1657,8 +1667,12 @@ a:hover { text-decoration: underline; }
   z-index: 1000;
   display: flex;
   flex-direction: column;
-  /* 入场动画：从右滑入，避免 right 偏移导致的首次渲染抖动 */
-  animation: ki-drawer-in 0.25s cubic-bezier(0.4, 0, 0.2, 1) both;
+  /* 入场动画：从右滑入，避免 right 偏移导致的首次渲染抖动
+     ⚠️ 入场动画一律不写 `both` / `forwards`（2026-11-23）：动画结束后仍在 fill 生效状态会让
+     元素常驻一个独占合成层（层内文字退化为灰度抗锯齿，观感发毛）或留下计算后的 transform
+     （层叠上下文 / fixed 包含块，见下方 .ki-chat-cfg__field 的踩坑注释）。末帧与元素自然样式
+     一致时，不写 fill 就等价且能释放合成层；有 animation-delay 时用 `backwards`。 */
+  animation: ki-drawer-in 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 @media (max-width: 960px) {
   .ki-drawer { width: 100vw; }
@@ -2916,7 +2930,7 @@ a:hover { text-decoration: underline; }
   inset: 0;
   background: var(--ki-scrim);
   z-index: 999;
-  animation: ki-scrim-in 0.2s ease both;
+  animation: ki-scrim-in 0.2s ease;
 }
 @keyframes ki-scrim-in { from { opacity: 0; } to { opacity: 1; } }
 .ki-drawer__scrim--show { display: block; }
@@ -4889,7 +4903,7 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
   min-width: 0;
   z-index: 990;
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.12), -2px 0 8px rgba(0, 0, 0, 0.06);
-  animation: ki-chat-overlay-in 0.25s cubic-bezier(0.4, 0, 0.2, 1) both;
+  animation: ki-chat-overlay-in 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 @keyframes ki-chat-overlay-in {
   from { transform: translateX(100%); }
@@ -5019,8 +5033,10 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-cfg__card { background: var(--ki-color-surface); border: 1px solid var(--ki-color-border); border-radius: var(--ki-radius-md); padding: var(--ki-space-4); }
 /* 危险开关 / 删除 skill 的二次确认：**行内浮层、无遮罩**（2026-11-11 用户拍板 A 方案）
    - 落点由 PromptConfigLayer 现算（贴着触发它的那一行，下方不够高就翻到行上方），这里只管"浮起来"的观感
-   - absolute 而非 fixed：窄屏浮层 `.ki-chat-panel--overlay` 动画结束后仍留 `transform`，
-     会把 fixed 的参照系变成那块面板（坐标全体错位）；相对定位父级 `.ki-chat-cfg` 无此问题
+   - absolute 而非 fixed：与相对定位父级 `.ki-chat-cfg` 同参照系。当初的理由是窄屏浮层
+     `.ki-chat-panel--overlay` 的入场动画带 `fill-mode: both`、结束后仍留 `transform`，会把 fixed 的
+     参照系换成那块面板（坐标全体错位）；2026-11-23 该 fill-mode 已去掉（只在 240ms 入场期间有
+     transform），但浮层仍可能恰好在入场期间被打开，且 absolute 本身无副作用，故沿用
    - z-index 2：只在配置层内部高于列表 / 底栏，不参与 app 级层叠（不再压暗阅读器）
    - 卡面（背景 / 边框 / 圆角 / 内边距 / 入场动画）复用 `.ki-chat-cfg__card` */
 .ki-chat-cfg__confirm {
@@ -5225,6 +5241,8 @@ body.ki-resizing * { cursor: col-resize !important; user-select: none !important
 .ki-chat-cfg__tool--hint {
   background: var(--ki-color-primary-soft);
   box-shadow: inset 0 0 0 1px var(--ki-color-primary);
+  /* ❌ 这里的 `both` 不能去掉：末帧（transparent）才是想要的最终态，去掉会闪回高亮底。
+     它只动 background（非合成属性），不产生常驻合成层，与上面那条规则无关。 */
   animation: ki-cfg-hint 1.6s ease both;
 }
 @keyframes ki-cfg-hint {
@@ -5256,9 +5274,9 @@ select.ki-chat-cfg__ta--select {
 @keyframes ki-cfg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 /* ── D6 模态框 / 确认卡：遮罩柔化 + 卡片入场 + 三段结构 ── */
-.ki-chat-cfg__mask { backdrop-filter: blur(3px); animation: ki-mask-in .16s ease both; }
+.ki-chat-cfg__mask { backdrop-filter: blur(3px); animation: ki-mask-in .16s ease; }
 @keyframes ki-mask-in { from { opacity: 0; } }
-.ki-chat-cfg__card { animation: ki-card-in .22s cubic-bezier(.25, .7, .35, 1) both; }
+.ki-chat-cfg__card { animation: ki-card-in .22s cubic-bezier(.25, .7, .35, 1); }
 @keyframes ki-card-in { from { opacity: 0; transform: translateY(10px) scale(.97); } }
 .ki-chat-cfg__modal { padding: 0; border-radius: var(--ki-radius-lg); box-shadow: 0 24px 72px rgba(15, 27, 52, .28); }
 .ki-chat-cfg__modal .ki-chat-cfg__modal-body { padding: var(--ki-space-4) var(--ki-space-5); }
@@ -5297,7 +5315,8 @@ select.ki-chat-cfg__ta--select {
 /* ════════════════════════════════════════════════════════════════
    D8. 消息入场 / 头像 / 用户气泡（走查 #6/#9：移植 demo D3 段）
    ════════════════════════════════════════════════════════════════ */
-.ki-chat-msg { animation: ki-msg-in .3s cubic-bezier(.25, .6, .35, 1) both; }
+/* 不带 fill-mode：气泡是长住元素，`both` 会让每条消息常驻一个独占合成层（长会话下文字发毛 + 层数堆积） */
+.ki-chat-msg { animation: ki-msg-in .3s cubic-bezier(.25, .6, .35, 1); }
 /* 刚从流式气泡收尾重挂载的消息：跳过入场动画（流式内容无缝接续，防"完成后闪一下"） */
 .ki-chat-msg--instant { animation: none; }
 @keyframes ki-msg-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
@@ -5371,7 +5390,7 @@ select.ki-chat-cfg__ta--select {
   max-height: 300px; overflow: auto; overscroll-behavior: contain;
 }
 .ki-chat-tool[hidden] { display: none; }
-.ki-chat-tool:not([hidden]) { animation: ki-tool-in .2s ease both; }
+.ki-chat-tool:not([hidden]) { animation: ki-tool-in .2s ease; }
 @keyframes ki-tool-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 .ki-chat-tool__sec + .ki-chat-tool__sec {
   margin-top: var(--ki-space-2);
@@ -6571,7 +6590,7 @@ select.ki-chat-cfg__ta--select {
   border-left: 1px solid var(--ki-color-border);
   box-shadow: -8px 0 32px rgba(18, 24, 21, 0.07);
   /* 从右侧滑入：transform 走合成层，位移即自身宽度 */
-  animation: ki-detail-in 240ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  animation: ki-detail-in 240ms cubic-bezier(0.22, 0.61, 0.36, 1);
 }
 @keyframes ki-detail-in {
   from { transform: translateX(100%); }
@@ -6582,7 +6601,7 @@ select.ki-chat-cfg__ta--select {
 .ki-detail__scrim {
   position: fixed; inset: 0; z-index: 1020;
   background: var(--ki-scrim);
-  animation: ki-scrim-in 0.2s ease both;
+  animation: ki-scrim-in 0.2s ease;
 }
 
 /* 头部两行：标题 + 关闭；状态 pill + 元信息 */
