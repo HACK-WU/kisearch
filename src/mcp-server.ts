@@ -1344,6 +1344,9 @@ export async function startMcpServer(): Promise<void> {
     web: opts.web,
     uploadApi: opts.uploadApi,
     uploadMaxBytes: opts.uploadMaxBytes,
+    // 文档链接的对外地址（REQ-20261123-003）：仅配置文件提供，无 CLI 参数——
+    // 它与 `--web` 走 lock 延续的方式不同，配在 config 里 `ki mcp restart` 自然带上。
+    publicUrl: loadConfig().mcp?.http?.publicUrl ?? null,
     buildServer: buildKiMcpServer,
     onShutdown: () => {
       stopDataSourceScheduler();

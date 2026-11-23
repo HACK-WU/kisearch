@@ -123,6 +123,28 @@ ki mcp --http --web
 - `--web` 已指定但未找到 `index.html` 时打印警告，MCP 服务仍正常启动。
 - 前端经 MCP SDK（`StreamableHTTPClientTransport`）同源调用 `/mcp` 工具，`/api/*` 走同源 fetch，无需 CORS。
 
+### 写文档的工具会返回「打开这篇文档」的链接
+
+开了前端页面之后，MCP 的写文档工具（`ki_sync_relation`、`ki_bulk_sync_relation`、`ki_edit_relation`）在**成功**返回里会多一个 `url`，指向这篇文档在页面里的位置：
+
+```json
+{
+  "ok": true,
+  "scope": "monitor-memory",
+  "group": "项目踩坑点",
+  "relation": "APIResource把ReadTimeout转成BKAPIError导致超时判定失效",
+  "url": "http://127.0.0.1:7423/browse?scope=monitor-memory&group=%E9%A1%B9%E7%9B%AE%E8%B8%A9%E5%9D%91%E7%82%B9&relation=APIResource%E6%8A%8AReadTimeout%E8%BD%AC%E6%88%90BKAPIError%E5%AF%BC%E8%87%B4%E8%B6%85%E6%97%B6%E5%88%A4%E5%AE%9A%E5%A4%B1%E6%95%88"
+}
+```
+
+- 批量写入时**每条成功结果各带一个** `url`；被跳过或失败的条目没有。
+- 链接打开的是网页，**需要登录**；账号没有该知识库的权限时，页面会提示无权访问。
+- 没开前端页面（没加 `--web`，或前端产物没构建出来）时，这个字段**整条不出现**（不是空字符串），工具照常写入。
+- 删除类工具（`ki_delete_relation`）**不会**返回链接 —— 文档已经不存在，给了也打不开。
+- 地址默认按请求里的主机名推导。经反向代理、容器端口映射或部署在子路径下时，如果地址不对，配 `mcp.http.publicUrl`（见[配置项说明](./configuration.md)）。
+- `publicUrl` 里的路径前缀必须与实际部署一致：页面由反向代理挂在 `/ki` 下就写 `/ki`。**前缀配错不会报错**，浏览器里只会看到一片空白 —— 遇到白屏先核对这个前缀。
+- 文档改名、移动或删除后旧链接会失效：页面会显示「加载失败」并说明该文档不在这个分组里，旁边有「重试」按钮，左侧目录仍可正常浏览。重新写入一次即可拿到新地址。
+
 ### `/api/*` 扩展路由
 
 | 路由 | 方法 | 说明 |

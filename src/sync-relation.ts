@@ -1231,7 +1231,15 @@ export async function executeBulkSyncRelation(params: {
 }
 
 export type SyncRelationResult =
-  | { ok: true; scope: string; relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; /** FTS-only → dense 切换时清掉的旧全文索引条数（无切换则不出现） */ ftsRemoved?: number; /** 旧全文索引清理失败条数（ID 已保留等待重试；不出现 = 全成功） */ ftsCleanupFailed?: number; /** 清理失败原因 / 未清理原因（如 dense 写入未成功） */ ftsCleanupReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string;
+  | { ok: true; scope: string;
+  /**
+   * 实际落盘的 Group 路径（REQ-20261123-003）。
+   *
+   * 与入参的区别：入参留空会落到根保留键 `__root__`，首尾斜杠会被剥掉。
+   * MCP 工具层据此拼「打开该文档」的链接 —— 用入参会生成打不开的地址。
+   */
+  group: string;
+  relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; /** FTS-only → dense 切换时清掉的旧全文索引条数（无切换则不出现） */ ftsRemoved?: number; /** 旧全文索引清理失败条数（ID 已保留等待重试；不出现 = 全成功） */ ftsCleanupFailed?: number; /** 清理失败原因 / 未清理原因（如 dense 写入未成功） */ ftsCleanupReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string;
   /** 分类回显：AI 必须能知道自己写进去的是什么分类（否则写完自己也解释不了） */
   lifecycle?: string; expiresAt?: number; ttlDays?: number; eventId?: string; lifecycleSource?: string;
   /** 绑定事件时回显（AI 引用时用得到） */
@@ -1626,6 +1634,9 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
     return {
       ok: true,
       scope,
+      // 落盘用的 group（已归一，留空落根时是 '__root__'）。MCP 工具层要用它拼文档链接，
+      // **不要**改用 resolveGroupPath 的 resolvedPath —— 那只是提示，不改落点（见上方 hint 逻辑）。
+      group,
       ...result,
       ...(pathHint ? { hint: pathHint } : {}),
       vectorPending: false,

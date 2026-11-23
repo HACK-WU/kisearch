@@ -52,7 +52,7 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
         draft.status = 'editing';
         delete draft.error;
         saveDraft(draft);
-        return { ok: true, action: 'edit', scope, editId: draft.editId, status: draft.status,
+        return { ok: true, action: 'edit', scope, group: draft.group, relation: draft.relation, editId: draft.editId, status: draft.status,
           revision: draft.revision, totalLines: edited.totalLines, editsApplied: params.edits.length,
           previews: edited.previews };
       }
@@ -63,7 +63,7 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
       const draft = createDraft({ scope, group: params.group, relation: params.relation,
         baseRevision: live.revision, baseMetadataRevision: live.metadataRevision,
         baseContent: live.content, content: edited.content });
-      return { ok: true, action: 'edit', scope, editId: draft.editId, status: draft.status,
+      return { ok: true, action: 'edit', scope, group: draft.group, relation: draft.relation, editId: draft.editId, status: draft.status,
         revision: draft.revision, totalLines: edited.totalLines, editsApplied: params.edits.length,
         previews: edited.previews };
     }
@@ -123,21 +123,21 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
       if (draft.status === 'failed') await discardUnpublishedIndex(draft);
       draft.status = 'cancelled';
       saveDraft(draft);
-      return { ok: true, action: 'cancel', scope, editId: draft.editId, status: draft.status };
+      return { ok: true, action: 'cancel', scope, group: draft.group, relation: draft.relation, editId: draft.editId, status: draft.status };
     }
     if (params.action === 'finish') {
       if (!params.expectedRevision || draft.revision !== params.expectedRevision) throw new Error('草稿版本冲突：请 view 最新草稿后重试');
       if (!params.requestId) throw new Error('finish 需要 request_id，以支持超时后幂等查询与重试');
       if (draft.status === 'published') {
         // 幂等返回：附带本次发布记录的 request_id / wiki 结果，便于超时后确认归属与副作用。
-        return { ok: true, action: 'finish', scope, editId: draft.editId, status: draft.status,
+        return { ok: true, action: 'finish', scope, group: draft.group, relation: draft.relation, editId: draft.editId, status: draft.status,
           ...(draft.requestId ? { requestId: draft.requestId } : {}),
           ...(draft.wikiSynced !== undefined ? { wikiSynced: draft.wikiSynced } : {}),
           ...(draft.wikiReason ? { wikiReason: draft.wikiReason } : {}) };
       }
       if (draft.status === 'cancelled') throw new Error('已取消草稿不能发布');
       if ((draft.status === 'queued' || draft.status === 'running') && isRelationEditJobActive(draft.editId)) {
-        return { ok: true, action: 'finish', scope, editId: draft.editId, status: draft.status };
+        return { ok: true, action: 'finish', scope, group: draft.group, relation: draft.relation, editId: draft.editId, status: draft.status };
       }
       // 确定性失败（正文/元数据在编辑期间变化、chunk 超限等）重试必然再失败，
       // 直接拒绝并提示重建草稿，避免调用方按「沿用 request_id 重试」空转。
@@ -155,7 +155,7 @@ export async function executeEditRelationLocal(params: EditRelationParams): Prom
       delete draft.retryable;
       saveDraft(draft);
       queueRelationEditFinish(draft);
-      return { ok: true, action: 'finish', scope, editId: draft.editId, status: 'queued', requestId: draft.requestId };
+      return { ok: true, action: 'finish', scope, group: draft.group, relation: draft.relation, editId: draft.editId, status: 'queued', requestId: draft.requestId };
     }
     throw new Error('不支持的 action');
   } catch (err) {

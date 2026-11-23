@@ -105,11 +105,15 @@ ki sync-relation \
 ```json
 {
   "ok": true,
+  "scope": "default",
+  "group": "目标Group路径",
   "relation": "agent-rule-体验测试条目",
   "evicted": null,
   "vectorStored": true
 }
 ```
+
+`group` 回显的是**实际落盘**的位置：留空 Group 写入根目录时为 `__root__`，首尾斜杠会被去掉。脚本要拿它做后续操作时以这个值为准。
 
 **`sync-relation` 同名覆盖**：Relation 名称相同时，自动覆盖原有内容。
 

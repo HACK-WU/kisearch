@@ -148,6 +148,13 @@ export interface McpHttpConfig {
   uploadApi?: boolean;
   /** 第三方上传单次请求体上限（字节，默认 512MB；见 open-api/constants.ts） */
   uploadMaxBytes?: number;
+  /**
+   * 对外可访问的站点根（REQ-20261123-003）：如 `https://ki.example.com/ki`。
+   *
+   * 配了就**整段以它为准**（含子路径）——用于反代 / 容器端口映射 / 子路径部署，
+   * 这些场景下请求 Host 头要么是后端地址、要么缺前缀。不配则按请求 Host 推导。
+   */
+  publicUrl?: string;
 }
 
 export interface McpConfig {
@@ -775,6 +782,9 @@ function parseAndExpand(configFile: string): KiConfig {
           localAdmin: typeof h.localAdmin === 'boolean' ? h.localAdmin : undefined,
           uploadApi: typeof h.uploadApi === 'boolean' ? h.uploadApi : undefined,
           uploadMaxBytes: h.uploadMaxBytes !== undefined ? Number(h.uploadMaxBytes) : undefined,
+          // ⚠️ schema 加了字段必须在这里同步赋值，否则「配置写了、校验过了、消费端永远 undefined」
+          //（`localAdmin` 曾长期静默失效就是这个成因，见 config-schema.ts 同处注释）
+          publicUrl: h.publicUrl ? String(h.publicUrl) : undefined,
         },
       };
     }

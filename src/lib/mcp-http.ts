@@ -54,6 +54,9 @@ import { sendOpenApiError } from './open-api/respond.js';
 import { describeUploadApiReuseMismatch, resolveUploadApi } from './upload-api-flag.js';
 import { purgeExpired } from './trash-service.js';
 import { resumePendingOnStartup, pendingCount } from './visibility-queue.js';
+// 运行时快照（REQ-20261123-003）：工具层据此判断「能不能给出文档链接」。
+// 独立模块零依赖，工具层引入它不会反向依赖传输层（避免 import 环）。
+import { normalizePublicUrl, setWebRuntime } from './mcp-runtime.js';
 
 // S0-4：事件循环延迟采样（导入后高负载归因证据：busy 与 idle 一目了然）。
 // 进程生命周期均值——长期运行后近期尖峰会被稀释，归因时建议配合两次采样看增量。
@@ -142,6 +145,13 @@ export interface HttpServerOptions {
   uploadApi?: boolean;
   /** 第三方上传单次请求体上限（字节，缺省 512MB）：只用于启动日志回显与后续路由限流 */
   uploadMaxBytes?: number;
+  /**
+   * 对外可访问的站点根（`mcp.http.publicUrl`，REQ-20261123-003）。
+   *
+   * 只用于「写工具返回文档链接」的取址：配了就以它为准（含子路径），不配按请求 Host 推导。
+   * 启动时写入运行时快照，之后只读——改动需重启才生效（与 `--web` 同）。
+   */
+  publicUrl?: string | null;
 }
 
 import { isLoopbackHost } from './net-addr.js';
@@ -1352,9 +1362,17 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
 
   // --web：静态目录默认 web/dist（相对于包根目录）；目录不存在时提示但不阻塞 MCP 启动
   let webDir: string | null = null;
+  /**
+   * 前端产物是否真的可用。
+   *
+   * ⚠️ 不能拿 `!!webDir` 当判据：下面在产物缺失时**仍会给 webDir 赋值**（只为打印告警），
+   * 据它判断会让工具层以为「有前端页面」，进而生成必然 404 的文档链接（REQ-20261123-003 S-01 D-03）。
+   */
+  let webIndexReady = false;
   if (opts.web) {
     webDir = path.join(getPackageRoot(), 'web', 'dist');
-    if (!fs.existsSync(path.join(webDir, 'index.html'))) {
+    webIndexReady = fs.existsSync(path.join(webDir, 'index.html'));
+    if (!webIndexReady) {
       process.stderr.write(
         `警告：--web 已指定，但未找到前端构建产物（${path.join(webDir, 'index.html')}）。` +
           `请先在 web/ 目录执行 npm install && npm run build。静态页面将不可访问，MCP 服务正常启动。\n`,
@@ -1381,6 +1399,22 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     });
     httpServer.listen(port, host, () => resolve());
   });
+
+  /**
+   * 运行时快照置位（REQ-20261123-003）：**必须在 listen 成功之后**——绑定失败时本进程并不
+   * 对外服务，提前置位会留下误导性的残留快照（同进程重试绑定、单测复用端口都会踩到）。
+   *
+   * publicUrl 非法时只告警一次并按「未配置」处理：配置写错不该拖垮检索服务
+   * （与 `--web` 缺产物同风格）。
+   */
+  const normalizedPublicUrl = normalizePublicUrl(opts.publicUrl);
+  if (opts.publicUrl && !normalizedPublicUrl) {
+    process.stderr.write(
+      `警告：mcp.http.publicUrl「${String(opts.publicUrl)}」不是合法的 http/https 地址，已忽略；` +
+        'MCP 写工具返回的文档链接将改按请求 Host 推导。\n',
+    );
+  }
+  setWebRuntime({ webEnabled: webIndexReady, publicUrl: normalizedPublicUrl });
 
   /**
    * 服务重启收尾（2026-11-02）：把上一个进程遗留的 non-terminal 任务改判为 failed 并注明中断原因。

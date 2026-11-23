@@ -2,6 +2,21 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeEditRelation } from '../../edit-relation.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
+import { docUrl, withUrl, type DocLinkContext } from './doc-link.js';
+
+/**
+ * 给草稿/发布结果附加文档链接（REQ-20261123-003）。
+ *
+ * 只有结果里同时拿得到 scope + group + relation 时才加：`cancel` 与「字段缺失的历史返回」
+ * 都自然落进 `docUrl` 的空值分支，不需要在这里分支判断 action。
+ */
+function attachUrl(result: Record<string, unknown>, ctx: DocLinkContext): Record<string, unknown> {
+  if (result.ok !== true) return result;
+  const scope = typeof result.scope === 'string' ? result.scope : '';
+  const group = typeof result.group === 'string' ? result.group : '';
+  const relation = typeof result.relation === 'string' ? result.relation : '';
+  return withUrl(result, docUrl({ scope, group, relation }, ctx));
+}
 
 export function registerEditRelationTool(server: McpServer): void {
   server.tool(
@@ -9,7 +24,8 @@ export function registerEditRelationTool(server: McpServer): void {
     '局部修改已有的大 Relation：edit 可多轮、每轮同时修改多个不重叠行区间（行号从 1 开始且包含 end_line，以当前草稿版本为准）；view 查看草稿/发布状态；finish 提交终稿并一次性更新向量/全文索引、清理旧索引；cancel 放弃尚未开始发布的草稿。'
     + '注意：finish 是异步的——返回 queued 后必须用 view 轮询到 published/failed（超时重试请沿用同一 request_id；view 的 published=true 表示正文已生效，finish 此时只做旧索引清理）。'
     + 'finish 会用草稿正文覆盖写回该 Relation 的源文件（若该 Group 配置了 wikiSync，会重写其 frontmatter 与正文，目标目录为空时还会自动补齐历史关系）。'
-    + '小 Relation 建议直接用 ki_sync_relation 提交完整正文，更简单高效。',
+    + '小 Relation 建议直接用 ki_sync_relation 提交完整正文，更简单高效。'
+    + '成功时结果里带 url（该文档在 Web 端的地址），请原样告知用户；cancel 不返回链接。',
     {
       action: z.enum(['edit', 'view', 'finish', 'cancel']).describe('edit 修改草稿；view 查询草稿/发布状态；finish 提交最终正文；cancel 放弃尚未发布的草稿'),
       scope: z.string().optional().default('default').describe('项目隔离标识'),
@@ -26,7 +42,7 @@ export function registerEditRelationTool(server: McpServer): void {
       start_line: z.number().int().positive().optional().describe('view 可选：查看草稿的起始行'),
       end_line: z.number().int().positive().optional().describe('view 可选：查看草稿的结束行（包含）'),
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const result = await withTimeout(executeEditRelation({
           action: args.action,
@@ -40,7 +56,7 @@ export function registerEditRelationTool(server: McpServer): void {
           startLine: args.start_line,
           endLine: args.end_line,
         }), args.action === 'cancel' ? TOOL_TIMEOUT.BULK : TOOL_TIMEOUT.WRITE, 'ki_edit_relation');
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }], ...(!result.ok ? { isError: true } : {}) };
+        return { content: [{ type: 'text', text: JSON.stringify(attachUrl(result, extra), null, 2) }], ...(!result.ok ? { isError: true } : {}) };
       } catch (err) {
         return { isError: true, content: [{ type: 'text', text: (err as Error).message }] };
       }

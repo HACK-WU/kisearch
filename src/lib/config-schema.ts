@@ -389,6 +389,16 @@ const CONFIG_SCHEMA: ConfigNode = {
             uploadApi: { type: 'boolean' },
             /** 第三方上传单次请求体上限（字节，默认 512MB，上界 4GiB） */
             uploadMaxBytes: { type: 'number', validate: uploadMaxBytesRange },
+            /**
+             * 对外可访问的站点根（REQ-20261123-003），如 `https://ki.example.com/ki`。
+             *
+             * MCP 写工具成功后返回的文档链接以它为准（含子路径）；不配则按请求 Host 推导。
+             * 判断合法性（http/https + 可解析）在运行期做，非法只告警不阻塞启动。
+             *
+             * ⚠️ 与 `uploadApi` 同一条纪律：本字段**必须在 `config.ts` 的 mcp.http 解析块
+             * 里同步赋值**，只加 schema 不赋值 = 配置永远读不到（`localAdmin` 的旧坑）。
+             */
+            publicUrl: { type: 'string' },
           },
         },
       },
