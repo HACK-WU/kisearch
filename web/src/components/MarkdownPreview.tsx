@@ -51,6 +51,13 @@ import { deepLink, parseKiLink } from '@/lib/kiLinks';
 export interface AssetBase {
   scope: string;
   group: string;
+  /**
+   * 回收站条目目录名（可选）。
+   *
+   * 给了就从 `.trash/{group}/{trashDir}/assets` 读：文档删除时 group 的 assets 被整目录
+   * 复制进条目目录，原位置可能已随组删除而不存在（回收站阅读器必须带它才看得到图）。
+   */
+  trashDir?: string;
 }
 
 /** HTML 属性转义（防 alt/src/title 中的引号破坏属性边界） */
@@ -168,6 +175,8 @@ function blockedImageNotice(url: string, alt: string): string {
 export function rewriteAssetSrc(href: string, base?: AssetBase): string {
   if (!base || !href || isExternalOrAbsoluteUrl(href)) return href;
   const qs = new URLSearchParams({ scope: base.scope, group: base.group, path: href });
+  // 回收站阅读器：附件在条目目录的副本里；不带 trash 会去已删除的原位置找（必然 404）
+  if (base.trashDir) qs.set('trash', base.trashDir);
   return `/api/asset?${qs.toString()}`;
 }
 
@@ -1139,7 +1148,7 @@ export function MarkdownPreview({ text, assetBase, onLocalLink, renderedHtml, de
   const theme = useDocumentTheme();
   const html = useMemo(
     () => renderedHtml ?? renderMarkdownHtml(text, assetBase, preferredLang),
-    [text, renderedHtml, assetBase?.scope, assetBase?.group, preferredLang],
+    [text, renderedHtml, assetBase?.scope, assetBase?.group, assetBase?.trashDir, preferredLang],
   );
 
   // Markdown 通过 dangerouslySetInnerHTML 注入，不能给每个链接绑定 React onClick；

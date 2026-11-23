@@ -12,8 +12,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import '@/styles/governance.css';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
+import { ModuleDrawer } from '@/components/ModuleDrawer';
 import {
-  getTrashSettings, listTrash, purgeTrash, putTrashSettings, restoreTrash,
+  getTrashContent, getTrashSettings, listTrash, purgeTrash, putTrashSettings, restoreTrash,
   GovernanceApiError,
   type TrashItemView, type TrashReason, type TrashSettingsView,
 } from '@/api/governanceApi';
@@ -63,6 +64,13 @@ export function TrashPage(): JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 「彻底删除」的两步确认态：勾选变化即撤销（避免选了 A 确认后误删 B） */
   const [purgeConfirm, setPurgeConfirm] = useState(false);
+  /**
+   * 点开正文的回收站条目（文档名可点，与分类页 / 事件页同一形态）。
+   *
+   * `dirName` 是条目唯一坐标：同一个 `group + name` 可能有多份（撞名目录带时间戳后缀），
+   * 只带 group + name 会读错条目。
+   */
+  const [docTarget, setDocTarget] = useState<{ scope: string; group: string; name: string; dirName: string } | null>(null);
 
   /**
    * 只读账号（R34 / S-07 §3.4）：回收站可看（恢复/清理是写操作，一律禁用）。
@@ -106,6 +114,33 @@ export function TrashPage(): JSX.Element {
 
   useEffect(() => { void load(); }, [load]);
 
+  /**
+   * 切 scope 时收起正文抽屉：`ModuleDrawer` 载入正文后不再重取
+   * （`if (content !== null) return`），留着会在新库下继续显示上一个库的快照。
+   */
+  useEffect(() => { setDocTarget(null); }, [scope]);
+
+  /**
+   * 抽屉取数：回收站条目的正文快照。
+   *
+   * ⚠️ 必须 `useCallback`：`ModuleDrawer` 把 `fetcher` 列入取数 effect 的依赖，
+   * 内联箭头函数每次 render 都换引用 ⇒ 失败态（content 仍为 null）会无限重试。
+   */
+  const trashFetcher = useCallback(
+    (s: string) => {
+      // 缺条目坐标时不发请求（抽屉已被收起却仍有调用方取数时，直接给可读原因而不是 400 响应）
+      if (!docTarget?.dirName) {
+        return Promise.resolve({ content: '', error: '条目已关闭或不存在，请重新点开文档名' });
+      }
+      return getTrashContent(s, docTarget.group, docTarget.dirName)
+        // 空正文是既定事实（历史遗留条目）：给一句能照着做的说明，别落到阅读器的通用「未找到原文」
+        .then((res) => (res.empty
+          ? { content: '', error: '这篇的快照里没有正文（历史遗留条目），请彻底删除' }
+          : { content: res.content }));
+    },
+    [docTarget?.dirName, docTarget?.group],
+  );
+
   const counts = useMemo(() => {
     const base: Record<Filter, number> = { all: items.length, 'temp-expired': 0, 'event-closed': 0, 'event-expired': 0, manual: 0 };
     for (const item of items) base[item.reason] += 1;
@@ -129,6 +164,12 @@ export function TrashPage(): JSX.Element {
     setMessage(null);
     try {
       setMessage({ tone: 'ok', text: await fn() });
+      /*
+       * 写操作成功 = 条目集合变了（恢复出站 / 彻底删除）：把正文抽屉收起。
+       * 不按"是不是同一条目"细分 —— 抽屉里挂着的是**已被删除的**快照，
+       * 操作后再留着它，用户会以为这篇还在回收站里。
+       */
+      setDocTarget(null);
       await load();
     } catch (err) {
       const code = err instanceof GovernanceApiError && err.code ? `[${err.code}] ` : '';
@@ -300,7 +341,25 @@ export function TrashPage(): JSX.Element {
                     <div className="gov-cell-name">
                       {/* 组条目用 ▸ + 徽标区分：不新增筛选段 —— 「分组」与现有 reason 段是两套维度，
                           混在一行会让计数重复（手动删除里已含组条目），用户会认为数字错乱 */}
-                      {item.kind === 'group' ? `▸ ${item.name}` : item.name}
+                      {item.kind === 'group' ? (
+                        `▸ ${item.name}`
+                      ) : broken ? (
+                        /* 正文缺失的条目点开只会得到空正文：保留纯文本并说明原因，不做"点了才知道" */
+                        <span title="快照里没有正文（正文缺失），无法查看">{item.name}</span>
+                      ) : (
+                        /* 文档名可点开正文（与分类页 / 事件页同一形态，2026-11-23）：
+                           正文取的是删除时的快照，走 trash/content 而非 doc/get */
+                        <button
+                          type="button"
+                          className="gov-cell-name--link"
+                          title={`查看「${item.name}」删除时的正文`}
+                          onClick={() => setDocTarget({
+                            scope: item.scope, group: item.group, name: item.name, dirName: item.dirName,
+                          })}
+                        >
+                          {item.name}
+                        </button>
+                      )}
                       {item.kind === 'group' ? (
                         <span className="gov-badge gov-badge--kb" style={{ marginLeft: 6 }}>
                           {/* docCount 缺失（旧 daemon）时只说「分组」，不要显示「含 undefined 篇」 */}
@@ -381,6 +440,30 @@ export function TrashPage(): JSX.Element {
         删除时用户只想清干净，不想做知识整理；放在回收站里由人主动触发，既不阻塞删除，
         也天然有 7 天窗口 —— 真没用的直接到期清除，有价值的再提炼成 wiki。
       </div>
+
+      {/*
+        文档名 → 右侧阅读抽屉（与分类页 / 事件页同一形态，S-07 §3.3「直接复用 ModuleDrawer」）。
+        · `key` 含 dirName：同组同名的多份回收条目也能各自重挂载，正文不串台；
+        · `scope` 用**条目所属库**（视图模式下顶栏 scope 是视图名，拿它读不到正文）；
+        · 不传 editable / onDeleted / onMoved：这是读入口，抽屉里只该有复制 / 下载 / 全屏。
+      */}
+      {docTarget ? (
+        <ModuleDrawer
+          key={`${docTarget.scope}/${docTarget.dirName}`}
+          scope={docTarget.scope}
+          module={docTarget.name}
+          group={docTarget.group}
+          fetcher={trashFetcher}
+          /* 图片附件从条目目录的 assets 副本读（`writeTrashItem` 入站时整目录复制过一份） */
+          assetTrashDir={docTarget.dirName}
+          notice={(
+            <span>
+              正在查看<strong>回收站快照</strong>（删除时的正文，不可编辑）。恢复后才会回到知识库，并重建检索索引。
+            </span>
+          )}
+          onClose={() => setDocTarget(null)}
+        />
+      ) : null}
 
       {settingsOpen ? (
         <div className="gov-modal-mask" onClick={() => setSettingsOpen(false)}>

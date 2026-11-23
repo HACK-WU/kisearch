@@ -85,6 +85,8 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   ['GET', '/governance/docs', 'knowledge.read'],
   ['GET', '/governance/docs/search', 'knowledge.read'],
   ['GET', '/governance/trash', 'knowledge.read'],
+  // 回收站正文快照（2026-11-23）：漏登记 = 404，页面「点开看原文」整条链路失效
+  ['GET', '/governance/trash/content', 'knowledge.read'],
   ['POST', '/governance/trash/restore', 'knowledge.write'],
   ['POST', '/governance/trash/purge', 'knowledge.write'],
   ['POST', '/governance/trash/sweep', 'knowledge.write'],
@@ -99,7 +101,7 @@ const WRITE_TOOLS = ['ki_event_set_stage'];
 const FORBIDDEN_CREATE_TOOLS = ['ki_event_create', 'ki_lifecycle_create', 'ki_event_type_create', 'ki_event_delete', 'ki_event_type_write'];
 
 describe('① 路由权限登记（漏一条就是 404）', () => {
-  it('44 条全部命中 permission 且能力正确', () => {
+  it('45 条全部命中 permission 且能力正确', () => {
     const problems: string[] = [];
     for (const [method, p, capability] of ROUTES) {
       const match = matchRoute(method, p);
@@ -114,8 +116,8 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
     assert.deepEqual(problems, [], `以下路由登记有误：\n${problems.join('\n')}`);
   });
 
-  it('表里正好 44 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 44);
+  it('表里正好 45 条（新增/删除路由必须同步这张表）', () => {
+    assert.equal(ROUTES.length, 45);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {

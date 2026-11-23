@@ -2541,6 +2541,18 @@ a:hover { text-decoration: underline; }
   border-radius: var(--ki-radius-sm);
   font-size: 12px;
 }
+/* 常驻状态说明（回收站「这是删除时快照」）：与上面的一次性提示不同 —— 不悬浮、不遮正文、
+   不自动消失，因为它说明的是「你正在看什么」，整个阅读期间都得在。 */
+.ki-drawer__notice {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-md);
+  background: var(--ki-color-bg-muted);
+  color: var(--ki-color-text-muted);
+  font-size: var(--ki-font-size-sm);
+  line-height: 1.6;
+}
 /* 全屏切换按钮 */
 .ki-drawer__fullscreen {
   background: none;

@@ -70,6 +70,12 @@ export const GOVERNANCE_CODE_NUMBERS = {
   TRASH_SETTINGS_INVALID: 1307,
   /** 快照拿不到正文：进站会得到空文档，必须中止删除（fail-closed） */
   TRASH_CONTENT_MISSING: 1308,
+  /** `dirName` 不是单段目录名（含 `/`、`\`、`..`）：可把路径搬出 `.trash/`（事件 #80） */
+  TRASH_BAD_DIRNAME: 1309,
+  /** `group` 路径非法（绝对路径 / 含 `.` `..` / 空段）：请求错误，与"条目损坏"区分 */
+  TRASH_BAD_GROUP: 1310,
+  /** 组条目没有单篇正文：读正文接口只服务文档条目 */
+  TRASH_GROUP_NO_CONTENT: 1311,
 
   // ── S-05 参考文档（1400-1499）──
   REF_ALREADY_ASSOCIATED: 1401,
@@ -208,6 +214,10 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   EVENT_NOT_FOUND: 404,
   TYPE_NOT_FOUND: 404,
   TRASH_NOT_FOUND: 404,
+  // 回收站请求参数非法（2026-11-23）：与 404「条目不存在」区分开，前端可据此给"改参数"而非"刷新"
+  TRASH_BAD_DIRNAME: 400,
+  TRASH_BAD_GROUP: 400,
+  TRASH_GROUP_NO_CONTENT: 400,
   REF_NOT_FOUND: 404,
   FIND_TARGET_NOT_AUTHORIZED: 403,
   REF_DOC_NOT_FOUND: 404,

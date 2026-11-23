@@ -450,6 +450,24 @@ interface ModuleDrawerProps {
    * 由页面持有文案、交给新实例消费一次；消费后页面应清空该 prop，否则下次重挂载会重复弹。
    */
   initialNotice?: string;
+  /**
+   * 正文上方的**常驻**提示（不自动消失）。
+   *
+   * 与 `initialNotice` 的分工：那个是一次性回执（3.5s 消失，见上面的说明），
+   * 这个是状态说明 —— 例如回收站里看到的是「删除时的快照」，整个阅读期间都得在，
+   * 否则用户会以为自己看的是知识库当前这一篇。
+   *
+   * ⚠️ 仅在**正文模式**渲染：传了 `bodySlot`（页级内容替换正文）时不显示 ——
+   * 那种场景下"正文"不是本文档，状态说明会误导。
+   */
+  notice?: ReactNode;
+  /**
+   * 回收站条目目录名（可选）：图片附件改从条目目录的 assets 副本读。
+   *
+   * 只有回收站阅读器需要；其他调用方不传 = 从 `{group}/assets` 读（既有行为不变）。
+   * 文档删除时 assets 被整目录复制进 `.trash/{group}/{dirName}/`，原位置未必还在。
+   */
+  assetTrashDir?: string;
 }
 
 /**
@@ -507,6 +525,8 @@ export function ModuleDrawer({
   onMoved,
   onDeleted,
   initialNotice,
+  notice,
+  assetTrashDir,
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
@@ -1391,6 +1411,8 @@ export function ModuleDrawer({
       {/* bodySlot（页级内容，如全库搜索结果列表）优先：头部仍是本组件的形态，只有正文被替换 */}
       {bodySlot ?? (
         <>
+      {/* 常驻状态说明（如「这是回收站快照」）：占文档流、不遮挡正文，也不随时间消失 */}
+      {notice ? <div className="ki-drawer__notice" role="note">{notice}</div> : null}
       {savedNotice && <div className="ki-drawer__copy-failed" role="status">{savedNotice}</div>}
       {selectionWarning && <div className="ki-drawer__copy-failed" role="status">{selectionWarning}</div>}
       {anchorWarning && <div className="ki-drawer__copy-failed" role="status">{anchorWarning}。文档已打开，请重新选择位置。</div>}
@@ -1437,7 +1459,8 @@ export function ModuleDrawer({
           <article className="ki-markdown ki-markdown--drawer" onMouseUp={() => { captureReaderSelection(); }} onKeyUp={() => { captureReaderSelection(); }}>
             <MarkdownPreview
               text={displayedContent}
-              assetBase={group ? { scope, group } : undefined}
+              /* 回收站：附件从条目目录的 assets 副本读（原位置可能已随组删除而不存在） */
+              assetBase={group ? { scope, group, ...(assetTrashDir ? { trashDir: assetTrashDir } : {}) } : undefined}
               onLocalLink={onLocalLink}
             />
           </article>

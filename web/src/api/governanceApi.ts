@@ -142,6 +142,8 @@ export interface EventStageView {
 export interface EventTypeView {
   id: string;
   name: string;
+  /** 类型用途说明（≤200 字）；未描述时后端省略该字段 */
+  description?: string;
   builtin: boolean;
   terminalAction: 'keep' | 'trash';
   fallbackDays: number | null;
@@ -178,6 +180,8 @@ export function updateEventType(
   patch: {
     revision: number;
     name?: string;
+    /** 省略 = 不改；空串 = 清除（后端归一后删字段） */
+    description?: string;
     stages?: StagePatch[];
     terminalAction?: 'keep' | 'trash';
     fallbackDays?: number | null;
@@ -418,6 +422,45 @@ export interface TrashItemView {
 export interface TrashSettingsView {
   keepDays: 3 | 7 | 14 | 30;
   expireAction: 'purge' | 'notify';
+}
+
+/**
+ * 回收站条目正文（删除时的快照，2026-11-23）。
+ *
+ * 与 `/api/doc/get` 的区别必须记住：文档进站时已从知识库摘除，正文只剩
+ * `.trash/…/content.md`，所以回收站页不能复用 `getDocContent`（必然 404）。
+ */
+export interface TrashContentView {
+  ok: true;
+  scope: string;
+  group: string;
+  dirName: string;
+  name: string;
+  /** 删除时的正文快照；缺失的历史条目为空串（配 `empty`） */
+  content: string;
+  /** 快照里没有正文（历史坏条目）：页面给说明，不当错误 */
+  empty: boolean;
+  sizeBytes: number;
+  hasAssets: boolean;
+  reason: TrashReason;
+  deletedAt: number;
+  expiresAt: number;
+  ttlDays: number;
+}
+
+/**
+ * 读回收站条目的正文快照。
+ *
+ * `dirName` 是条目唯一坐标（同 `group + name` 可能有多份，撞名时目录带时间戳后缀），
+ * 只传 group + name 会读错或读不到。
+ */
+export function getTrashContent(
+  scope: string,
+  group: string,
+  dirName: string,
+): Promise<TrashContentView> {
+  const params = new URLSearchParams({ scope, group, dirName });
+  return req(`/api/governance/trash/content?${params.toString()}`);
 }
 
 /**

@@ -143,7 +143,41 @@ function safeGroupSegments(group: string): string[] {
   return segs;
 }
 
+/**
+ * 条目目录名是否合法（单段，不得逃出 `{group}/`）。
+ *
+ * `group` 由 {@link safeGroupSegments} 兜底，但 `dirName` 直接来自 HTTP body
+ * （restore / purge）与 query（trash/content），此前没有任何校验：`path.join` 会把
+ * `../` 归一化掉 ⇒ 可用 `dirName: "../../../../tmp/x"` 对宿主机任意已存在目录执行
+ * `rmSync(recursive)`（事件 #80）。这里必须是**白名单式单段判定**，而不是"拦某些串"。
+ */
+export function isSafeTrashDirName(dirName: string): boolean {
+  /*
+   * 只拒**空串**，不拒「全空格」：空串会让 `path.join` 落到 group 目录（等价 `.`，
+   * 但语义上不是调用方要的条目）；而全空格是合法目录名（relation 名允许空格），
+   * 一并拒掉同样会造成「删不掉也恢复不了」的死锁。
+   */
+  if (!dirName) return false;
+  /**
+   * 只拦 `..`，**不拦 `.`**：`..` 会逃出当前 group（这是要防的），而 `.` 只归一到
+   * group 目录本身。relation 名恰为 `.` 是合法的（`isUnsafeRelationName` 只拦 `/`、`\`、`..`），
+   * 此时条目目录名就是 `.` —— 一并拒掉会让这类条目**既恢复不了也删不掉**（死锁）。
+   *
+   * `.` 的退化语义（数据模型固有、非本处引入）：该条目的目录就是 group 的回收站目录，
+   * `listTrash` 见到 meta.json 即停止递归 ⇒ 同组的其他条目会被它"吞"掉、不在列表里出现。
+   * 放行它只是为了「已存在的那条还能读/能恢复/能删」。
+   */
+  if (dirName === '..') return false;
+  // 分隔符与 NUL：任何一段都可能把路径搬出当前 group
+  if (dirName.includes('/') || dirName.includes('\\') || dirName.includes('\0')) return false;
+  return true;
+}
+
 function trashItemDir(scope: string, group: string, dirName: string): string {
+  // 纵深防御：HTTP 三入口已前置判过（返回 400），这里再兜一层，避免新调用方绕过
+  if (!isSafeTrashDirName(dirName)) {
+    throw new Error(`非法的回收站条目名：${dirName}`);
+  }
   return path.join(getTrashRoot(scope), ...safeGroupSegments(group), dirName);
 }
 

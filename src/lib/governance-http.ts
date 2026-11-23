@@ -86,7 +86,9 @@ import {
   removeAskFile,
 } from './events/analysis-ask-store.js';
 import { askEventAnalysis, type AskTargetEvent } from './events/analysis-ask-runner.js';
-import { listTrash, readTrashSettings, writeTrashSettings, removeTrashItem } from './trash-store.js';
+import {
+  listTrash, readTrashSettings, writeTrashSettings, removeTrashItem, readTrashItem, isSafeTrashDirName,
+} from './trash-store.js';
 import { restoreAnyFromTrash, purgeExpired } from './trash-service.js';
 import { withScopeWriteLock } from './scope-write-lock.js';
 import { pendingCount, listPending, scheduleConsume } from './visibility-queue.js';
@@ -794,6 +796,8 @@ export async function handleGovernanceRoutes(
         const scope = scopeFromBody(b);
         const type = await createType(scope, {
           name: String(b.name ?? ''),
+          // hasOwnProperty 而非 str()：空串是合法输入（= 未描述），不能被当成「没传」
+          ...(Object.prototype.hasOwnProperty.call(b, 'description') ? { description: b.description as string | null } : {}),
           ...(Array.isArray(b.stages) ? { stages: b.stages as Array<{ name: string; visibility: 'full' | 'fts-only' | 'hidden'; disabled?: boolean }> } : {}),
           ...(str(b.terminalAction) ? { terminalAction: str(b.terminalAction) as 'keep' | 'trash' } : {}),
           ...(pick(b, 'fallbackDays', 'fallback_days') !== undefined ? { fallbackDays: num(pick(b, 'fallbackDays', 'fallback_days')) ?? null } : {}),
@@ -806,6 +810,8 @@ export async function handleGovernanceRoutes(
         const type = await updateType(scope, segs[1], {
           revision: num(b.revision) ?? -1,
           ...(str(b.name) ? { name: str(b.name)! } : {}),
+          // 三态：未传=不改 / 传空串=清除 / 传值=写入（见 type-service.normalizeTypeDescription）
+          ...(Object.prototype.hasOwnProperty.call(b, 'description') ? { description: b.description as string | null } : {}),
           ...(Array.isArray(b.stages) ? { stages: b.stages as Array<{ key?: string; name: string; visibility: 'full' | 'fts-only' | 'hidden'; disabled?: boolean }> } : {}),
           ...(str(b.terminalAction) ? { terminalAction: str(b.terminalAction) as 'keep' | 'trash' } : {}),
           ...(pick(b, 'fallbackDays', 'fallback_days') !== undefined ? { fallbackDays: num(pick(b, 'fallbackDays', 'fallback_days')) ?? null } : {}),
@@ -1889,14 +1895,85 @@ export async function handleGovernanceRoutes(
         });
       }
 
+      /*
+       * 回收站条目正文（删除时的快照）。
+       *
+       * 为什么不能复用 `/api/doc/get`：文档进站时已从 KB 摘除（正文只剩 `.trash/…/content.md`），
+       * doc/get 会直接 404「未匹配到有效路径」。这里读的是快照，不是知识库当前内容。
+       *
+       * `dirName` 必须过 `isSafeTrashDirName`：它是单段目录名，未校验时 `../` 会逃出
+       * `.trash/`，把本端点变成「任意 content.md 读取」（事件 #80）。
+       */
+      if (segs[1] === 'content' && method === 'GET') {
+        const scope = scopeFromQuery();
+        const group = str(q.get('group')) ?? '';
+        const dirName = str(q.get('dirName')) ?? str(q.get('dir_name')) ?? '';
+        /*
+         * group 自己也要判：`readTrashItem` 内部用 `safeGroupSegments` 兜底，
+         * 但它是**抛错**（会被下面 catch 成 409「条目损坏」）—— 那是误报，
+         * 非法 group 是请求错误（400），不是数据坏掉。
+         *
+         * ⚠ 这里**不能**用 `path.isAbsolute`：本函数顶部的 `const path = url.pathname…`
+         * 把 `node:path` 模块遮蔽了（`path` 此刻是字符串）→ 调 `.isAbsolute` 直接 TypeError（500）。
+         * 绝对路径用平台无关的字面判定（POSIX `/`、UNC `\\`、Windows 盘符）。
+         */
+        if (!group.trim()
+          || /^[\\/]/.test(group)
+          || /^[A-Za-z]:[\\/]/.test(group)
+          || group.split(/[\\/]/).some((seg) => seg === '..' || seg === '.' || seg === '')) {
+          return sendJson(res, 400, { ok: false, code: 'TRASH_BAD_GROUP', error: `非法的 Group 路径：${group}` });
+        }
+        if (!isSafeTrashDirName(dirName)) {
+          return sendJson(res, 400, { ok: false, code: 'TRASH_BAD_DIRNAME', error: `非法的回收站条目名：${dirName}` });
+        }
+        let found: ReturnType<typeof readTrashItem>;
+        try {
+          found = readTrashItem(scope, group, dirName);
+        } catch (err) {
+          // meta.json 损坏：条目坏掉是既定事实，别报成 500（页面要能说清"这篇读不了"）
+          return sendJson(res, 409, { ok: false, scope, code: 'TRASH_CORRUPTED', error: (err as Error).message });
+        }
+        if (!found) {
+          return sendJson(res, 404, { ok: false, scope, code: 'TRASH_NOT_FOUND', error: '回收站条目不存在（可能已被恢复或彻底删除）' });
+        }
+        if (found.item.kind === 'group') {
+          return sendJson(res, 400, {
+            ok: false, scope, code: 'TRASH_GROUP_NO_CONTENT',
+            error: '分组条目没有单篇正文，请先「恢复整组」再从知识库查看',
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          scope,
+          group,
+          dirName,
+          name: found.item.name,
+          content: found.content,
+          // 空串不是错误：正文缺失的历史条目照样能点开，页面据 empty 给「快照里没有正文」的说明
+          empty: found.content.length === 0,
+          sizeBytes: found.item.sizeBytes,
+          hasAssets: found.item.hasAssets,
+          reason: found.item.reason,
+          deletedAt: found.item.deletedAt,
+          expiresAt: found.item.expiresAt,
+          ttlDays: found.item.ttlDays,
+        });
+      }
+
       if (segs[1] === 'restore' && method === 'POST') {
         const b = await body();
         const scope = scopeFromBody(b);
+        const group = String(b.group ?? '');
+        const dirName = String(b.dirName ?? b.dir_name ?? '');
         /*
          * 纵深防御：视图下回收站列表恒为空，正常入口点不到「恢复」；
          * 但直接调 API 仍可能带视图名。视图不是库，一律拒。
          */
         assertNotScopeView(scope, 'trash-restore');
+        // 目录名来自请求体，未校验时 `../` 会落到 `.trash/` 之外（事件 #80）
+        if (!isSafeTrashDirName(dirName)) {
+          return sendJson(res, 400, { ok: false, scope, code: 'TRASH_BAD_DIRNAME', error: `非法的回收站条目名：${dirName}` });
+        }
         /*
          * 必须持 scope 写锁（REQ-20261123-005 · S04）：组恢复要写树 + N 篇 KB + N 份分片，
          * 与并发写入强冲突；文档恢复一并纳入（行为不变，只是并发时排队）。
@@ -1904,8 +1981,8 @@ export async function handleGovernanceRoutes(
          */
         const outcome = await withScopeWriteLock(scope, 'trash-restore', async () => restoreAnyFromTrash({
           scope,
-          group: String(b.group ?? ''),
-          dirName: String(b.dirName ?? b.dir_name ?? ''),
+          group,
+          dirName,
           ...(str(b.targetLifecycle) ? { targetLifecycle: str(b.targetLifecycle) as 'wiki' | 'temp' } : {}),
         }));
         return outcome.ok
@@ -1917,7 +1994,16 @@ export async function handleGovernanceRoutes(
         const b = await body();
         const scope = scopeFromBody(b);
         assertNotScopeView(scope, 'trash-purge');
-        const removed = removeTrashItem(scope, String(b.group ?? ''), String(b.dirName ?? b.dir_name ?? ''));
+        const group = String(b.group ?? '');
+        const dirName = String(b.dirName ?? b.dir_name ?? '');
+        /*
+         * ⚠ 这一处曾可删宿主机任意目录（事件 #80）：`removeTrashItem` 内部先 existsSync
+         * 再 `rmSync(recursive)`，而 `path.join` 会把 `../../` 归一化掉。
+         */
+        if (!isSafeTrashDirName(dirName)) {
+          return sendJson(res, 400, { ok: false, scope, code: 'TRASH_BAD_DIRNAME', error: `非法的回收站条目名：${dirName}` });
+        }
+        const removed = removeTrashItem(scope, group, dirName);
         return removed
           ? sendJson(res, 200, { ok: true, scope, purged: true })
           : sendJson(res, 404, { ok: false, code: 'TRASH_NOT_FOUND', error: '回收站条目不存在' });

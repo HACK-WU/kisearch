@@ -152,7 +152,7 @@ ki mcp --http --web
 | `/api/health` | GET | 健康报告（复用 `runHealthCheck` doctor 逻辑，含 zvec 探活）。embedding 探测按 4s 单次预算收紧、网络类失败记 warn，整体 deadline 由探测预算派生 |
 | `/api/search-config` | GET | 语义检索默认 `timeout`（秒），仅返回非敏感配置 |
 | `/api/doc/list` | GET | Group 路径 + 文档列表（支持 `q` **名称 / 路径**模糊搜索：`group` 与导入源 `sourcePath` 按最长重叠段合并为「逻辑路径」，无 `sourcePath` 时退回 `group/name`；检索词与候选都做归一 —— 反斜杠与全角 `／` 统一为 `/`、去分隔符两侧空白、折叠重复 `/`、去 `./` 与前导/尾随 `/`、大小写不敏感，**纯分隔符/空白视为无检索词**（按不过滤返回）；带 `q` 时每条命中文档附 `matchedBy`（`name` / `path`）与 `logicalPath`。默认分页上限 500，带缓存） |
-| `/api/asset` | GET | 读取 group 级附件（`?scope&group&path`，导入时复制的本地图片）；纯文件读取免重启生效；`group`/`path` 双锚点防穿越，非图片后缀与缺失均 404 JSON（不走 SPA fallback） |
+| `/api/asset` | GET | 读取 group 级附件（`?scope&group&path`，导入时复制的本地图片）；纯文件读取免重启生效；`group`/`path` 双锚点防穿越，非图片后缀与缺失均 404 JSON（不走 SPA fallback）。可选 `trash=<回收站条目目录名>`：改从回收站条目里的附件副本读（回收站阅读器用；该参数按单段目录名校验，非法值 400） |
 | `/api/import/upload` | POST | 上传文件落盘受控目录（`~/.ki/import-uploads/<uploadId>/`）；分批上传可传 `batchIndex`/`batchCount`，最后一批传 `finalize` 后由后端启动导入并返回 `jobId`；同内容重试幂等 |
 | `/api/import/upload-status` | GET | 按 `scope`、`uploadId` 查询上传会话状态与 `jobId`，用于标签页重开后找回已启动的导入任务 |
 | `/api/import/run` | POST | 兼容原有两步调用：显式触发导入（异步 job，返回 `jobId`）；同一 `uploadId` 且参数一致时返回已有任务，不重复启动。可选 body：`skipDuplicates?: boolean`（缺省 `false`，跳过「内容与库中一致但 `sourcePath` 不同」的疑似重复文档，判定由服务端按预检同一判据重算）、`pickMode?: 'dir'\|'files'\|'mixed'`（本次选择方式，**只有 `'dir'` 才会计算清理候选**）、`pruneStale?: boolean`（是否计算清理候选，缺省关）、`preserveRels?: string[]`（上传失败文件，视为「本次有」，当前无生产调用方）。参数不一致时：job **运行中** → `409 { code: 'IMPORT_JOB_PARAMS_MISMATCH' }`；job **已终态** → 允许新建 job。剔除后为空 → job `failed` + `errorCode: 'ALL_FILES_DUPLICATES'`（`/api/import/status` 会回传 `errorCode`）。切分参数越界（段长 100–4000、重叠 0–500、重叠须小于段长）→ `400 INVALID_CHUNK`，校验在建 job 之前 |

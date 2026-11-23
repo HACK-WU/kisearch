@@ -96,6 +96,9 @@ describe('② 错误码登记', () => {
     assert.equal(GOVERNANCE_CODE_NUMBERS.EVENT_CLOSED, 1102);
     assert.equal(GOVERNANCE_CODE_NUMBERS.VISIBILITY_PARTIAL, 1202);
     assert.equal(GOVERNANCE_CODE_NUMBERS.RESTORE_NAME_CONFLICT, 1303);
+    // 回收站参数类错误（2026-11-23）：dirName / group 非法必须与「条目不存在」分成不同码
+    assert.equal(GOVERNANCE_CODE_NUMBERS.TRASH_BAD_DIRNAME, 1309);
+    assert.equal(GOVERNANCE_CODE_NUMBERS.TRASH_GROUP_NO_CONTENT, 1311);
     assert.equal(GOVERNANCE_CODE_NUMBERS.REF_ALREADY_ADDED, 1402);
     // REQ-20261120-001：治理视图聚合独占 17xx，且**不得**塞进 15xx（上一条测试强制）
     assert.equal(GOVERNANCE_CODE_NUMBERS.SCOPE_MULTI_UNSUPPORTED, 1701);

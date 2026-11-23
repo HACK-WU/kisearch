@@ -80,6 +80,8 @@ import { handleViewsApi } from './views-api.js';
 import { readJsonBody as readApiJsonBody } from './http-body.js';
 import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
+// 附件寻址的回收站分支（2026-11-23）：回收站条目自带 group 级 assets 副本
+import { getTrashRoot, isSafeTrashDirName } from './trash-store.js';
 import {
   ASSET_EXTENSIONS,
   DEFAULT_MAX_ASSET_SIZE,
@@ -2159,6 +2161,43 @@ const ASSET_MIME: Record<string, string> = {
  * scope 越权由 handleApiRequest 统一校验（authScopes）。
  * 404 返回 JSON：/api/* 不走 SPA fallback，避免把缺失附件伪装成 200 + index.html（REQ 层 2 缺陷）。
  */
+/** 附件根目录解析结果：失败时带 HTTP 状态与给人看的文案 */
+export type AssetDirResolution =
+  | { ok: true; dir: string }
+  | { ok: false; status: 400 | 403; error: string };
+
+/**
+ * 解析 `/api/asset` 的附件根目录。
+ *
+ * 两条来源：
+ *   - 常规：`{kbDir}/{scope}/{group}/assets`；
+ *   - 回收站（`trash=<dirName>`）：`{kbDir}/{scope}/.trash/{group}/{dirName}/assets` ——
+ *     `writeTrashItem` 入站时把 group 级 assets 整目录复制到了条目目录里，回收站阅读器
+ *     只有走这条分支才看得到图（否则取的是文档删除后的原位置）。
+ *
+ * 安全三条（顺序不能乱）：
+ *   ① group 必须是干净相对路径段序列 —— 否则会搬移下面两个锚点，搞出跨 scope 读取；
+ *   ② `trash` 必须是单段目录名 —— 事件 #80：`../` 会被 `path.join` 归一化掉，
+ *      `purge` 当时就是这么删到 KB 外的；
+ *   ③ 结果必须落在该 scope 的 KB 根内（第一锚点），调用方再校验文件落在该目录内（第二锚点）。
+ */
+export function resolveAssetDir(scope: string, group: string, trashDir?: string): AssetDirResolution {
+  if (!group || path.isAbsolute(group) || group.split(/[\\/]/).some((s) => s === '..' || s === '.' || s === '')) {
+    return { ok: false, status: 400, error: 'Bad Request: invalid group' };
+  }
+  if (trashDir && !isSafeTrashDirName(trashDir)) {
+    return { ok: false, status: 400, error: `Bad Request: invalid trash dirName ${trashDir}` };
+  }
+  const kbRoot = path.resolve(getKbDir(scope));
+  const dir = trashDir
+    ? path.resolve(path.join(getTrashRoot(scope), group, trashDir, 'assets'))
+    : path.resolve(getAssetsDir(scope, group));
+  if (dir !== kbRoot && !dir.startsWith(kbRoot + path.sep)) {
+    return { ok: false, status: 403, error: 'Forbidden' };
+  }
+  return { ok: true, dir };
+}
+
 async function handleAsset(res: http.ServerResponse, url: URL): Promise<void> {
   const scopeRaw = url.searchParams.get('scope') ?? '';
   const scope = resolveScope(loadConfig(), scopeRaw);
@@ -2168,10 +2207,16 @@ async function handleAsset(res: http.ServerResponse, url: URL): Promise<void> {
     sendJson(res, 400, { ok: false, error: 'Bad Request: group and path are required' });
     return;
   }
-  // group 穿越校验：group 原样进 path.join 会搬移下方前缀校验的锚点 → 跨 scope 越权 / KB 外宿主机文件读取。
-  // 拒绝绝对路径与含 .. / . / 空段的 group（合法 group 为干净相对路径段序列）。
-  if (path.isAbsolute(group) || group.split(/[\\/]/).some((s) => s === '..' || s === '.' || s === '')) {
-    sendJson(res, 400, { ok: false, error: 'Bad Request: invalid group' });
+  /**
+   * 回收站寻址（2026-11-23）：带 `trash=<dirName>` 时从条目目录里的 assets **副本**读。
+   *
+   * 不带该参数 = 原行为（`{group}/assets`），既有调用方零影响。
+   * group / trash 的穿越校验与 KB 根锚点都在 `resolveAssetDir` 里（事件 #80 的同一口径）。
+   */
+  const trashDir = (url.searchParams.get('trash') ?? '').trim();
+  const asset = resolveAssetDir(scope, group, trashDir || undefined);
+  if (!asset.ok) {
+    sendJson(res, asset.status, { ok: false, error: asset.error });
     return;
   }
   let decoded: string;
@@ -2181,13 +2226,8 @@ async function handleAsset(res: http.ServerResponse, url: URL): Promise<void> {
     // 与导入侧“解码失败按原样”对称：文件名含裸 % （如 50%.png）时不至永远 404
     decoded = rawPath;
   }
-  // 双锚点校验：assetsDir 必须落在该 scope 的 KB 根内（不可搬移），resolved 必须落在 assetsDir 内（防穿越）
-  const kbRoot = path.resolve(getKbDir(scope));
-  const assetsDir = path.resolve(getAssetsDir(scope, group));
-  if (assetsDir !== kbRoot && !assetsDir.startsWith(kbRoot + path.sep)) {
-    sendJson(res, 403, { ok: false, error: 'Forbidden' });
-    return;
-  }
+  // 双锚点的第一锚点已在 resolveAssetDir 判过；这里是第二锚点：resolved 必须落在 assetsDir 内（防穿越）
+  const assetsDir = asset.dir;
   const resolved = path.normalize(path.join(assetsDir, decoded));
   if (resolved !== assetsDir && !resolved.startsWith(assetsDir + path.sep)) {
     sendJson(res, 403, { ok: false, error: 'Forbidden' });

@@ -163,6 +163,8 @@ const RULES: Rule[] = [
   exact('GET', '/governance/docs', 'permission', 'knowledge.read'),
   exact('GET', '/governance/docs/search', 'permission', 'knowledge.read'),
   exact('GET', '/governance/trash', 'permission', 'knowledge.read'),
+  // 回收站条目的正文快照（2026-11-23）：读操作，与列表同档；漏登记 = 404「接口不存在」
+  exact('GET', '/governance/trash/content', 'permission', 'knowledge.read'),
   exact('POST', '/governance/trash/restore', 'permission', 'knowledge.write'),
   exact('POST', '/governance/trash/purge', 'permission', 'knowledge.write'),
   exact('POST', '/governance/trash/sweep', 'permission', 'knowledge.write'),

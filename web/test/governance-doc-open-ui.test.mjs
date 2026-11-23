@@ -22,6 +22,8 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf-8');
 
 const events = read('src/pages/EventsPage.tsx');
 const lifecycle = read('src/pages/LifecyclePage.tsx');
+/** 回收站页（2026-11-23 补齐的第三页文档名入口） */
+const trash = read('src/pages/TrashPage.tsx');
 const css = read('src/styles/governance.css');
 /** 2026-11-17 改版：文档行抽到 DocLine，跨页断言改读组件源码 */
 const docLine = read('src/components/governance/event-detail/DocLine.tsx');
@@ -112,6 +114,68 @@ test('分类页：文档名是可点按钮，且同样复用 ModuleDrawer', () =
   assert.match(lifecycle, /<ModuleDrawer[\s\S]{0,320}?fetcher=\{getDocContent\}/);
 });
 
+/**
+ * 回收站是治理三页里最后一页补入口的（2026-11-23）：
+ * 它的正文**不在知识库里**（删除时已摘除，只剩 `.trash/…/content.md` 快照），
+ * 所以形态照分类页、取数必须换 `getTrashContent` —— 照抄 `getDocContent` 必然 404。
+ */
+test('回收站：文档名可点，正文走 trash/content 快照（不得复用 doc/get）', () => {
+  assert.match(
+    trash,
+    /<button[\s\S]{0,200}?className="gov-cell-name--link"/,
+    '回收站文档名必须是按钮（与分类页同一可点击态）',
+  );
+  assert.match(
+    trash,
+    /onClick=\{\(\) => setDocTarget\(\{[\s\S]{0,160}?dirName: item\.dirName/,
+    '点击必须带上 dirName：同组同名的多份回收条目靠它区分',
+  );
+  assert.match(
+    trash,
+    /import \{[\s\S]{0,200}?getTrashContent[\s\S]{0,320}?\} from '@\/api\/governanceApi';/,
+    '取数必须走回收站自己的接口',
+  );
+  assert.ok(!trash.includes('getDocContent'), '回收站正文在 .trash 快照里，doc/get 必然 404');
+  assert.match(trash, /const trashFetcher = useCallback\(/, 'fetcher 必须 useCallback 固定引用（否则失败态无限重试）');
+  assert.match(trash, /<ModuleDrawer[\s\S]{0,320}?fetcher=\{trashFetcher\}/);
+  assert.match(
+    trash,
+    /key=\{`\$\{docTarget\.scope\}\/\$\{docTarget\.dirName\}`\}/,
+    'key 含 scope + dirName：换条目、以及同名多份也要重挂载',
+  );
+  assert.match(trash, /<ModuleDrawer[\s\S]{0,200}?scope=\{docTarget\.scope\}/, '抽屉按条目所属库读正文');
+  assert.match(trash, /useEffect\(\(\) => \{ setDocTarget\(null\); \}, \[scope\]\);/, '切 scope 必须收起抽屉');
+  // 快照身份要常驻说明：一次性的 initialNotice（3.5s 消失）撑不住这个语义
+  assert.match(trash, /notice=\{/, '抽屉要给「这是回收站快照」的常驻提示');
+});
+
+/**
+ * 回收站的图片附件（2026-11-23）：文档删除时 group 的 assets 被整目录复制进
+ * `.trash/{group}/{dirName}/`，原位置未必还在 ⇒ 抽屉必须把 dirName 一路透传到
+ * `/api/asset?trash=`，否则图片裂成「图片未导入」占位。
+ */
+test('回收站图片附件：dirName 从页面透传到 /api/asset?trash=', () => {
+  const drawer = read('src/components/ModuleDrawer.tsx');
+  const markdown = read('src/components/MarkdownPreview.tsx');
+
+  assert.match(trash, /assetTrashDir=\{docTarget\.dirName\}/, 'TrashPage 必须把条目目录名交给抽屉');
+  assert.match(
+    drawer,
+    /assetTrashDir \? \{ trashDir: assetTrashDir \} : \{\}/,
+    'ModuleDrawer 要把 assetTrashDir 转成 AssetBase.trashDir（其余调用方不传 = 行为不变）',
+  );
+  assert.match(
+    markdown,
+    /if \(base\.trashDir\) qs\.set\('trash', base\.trashDir\);/,
+    'MarkdownPreview 必须把 trash 拼进 /api/asset 的 query',
+  );
+  assert.match(
+    markdown,
+    /assetBase\?\.trashDir, preferredLang\]/,
+    'useMemo 依赖要含 trashDir，否则换条目后图片不重算',
+  );
+});
+
 test('切 scope（事件页还要换事件）时收起抽屉，避免串库', () => {
   // 2026-11-17 改版：同一 effect 还要收回 AI 查找面板/二次确认等跨事件临时态，
   // 契约不变：依赖必须是 [scope, activeId]，且第一句就是 setDocTarget(null)。
@@ -146,7 +210,7 @@ test('辅助计数函数可用（防被改坏后静默失效）', () => {
 });
 
 test('治理页抽屉保持只读：不得开启 editable，也不得挂删除 / 移动回调', () => {
-  for (const [page, src] of [['EventsPage', events], ['LifecyclePage', lifecycle]]) {
+  for (const [page, src] of [['EventsPage', events], ['LifecyclePage', lifecycle], ['TrashPage', trash]]) {
     const start = src.indexOf('<ModuleDrawer');
     assert.ok(start > 0, `${page} 应渲染 ModuleDrawer`);
     const block = src.slice(start, src.indexOf('/>', start));
