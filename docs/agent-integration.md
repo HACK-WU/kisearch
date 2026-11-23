@@ -6,7 +6,7 @@ kisearch 面向 AI Agent 提供三类资产：**检索 Skill**、**记忆行为 
 |---|---|---|
 | `ki-search` | [`skills/ki-search/SKILL.md`](../skills/ki-search/SKILL.md) | 代码知识库检索/写入：四步走查询 + 白名单/黑名单 |
 | `task-recall` | [`skills/task-recall/SKILL.md`](../skills/task-recall/SKILL.md) | 开工前预取：任务画像 → `ki_recall` → 按清单读正文；含触发判据与 6 条禁忌 |
-| `agents-md-init` | [`skills/agents-md-init/SKILL.md`](../skills/agents-md-init/SKILL.md) | 记忆行为口径真源：初始化 AGENTS.md 结构 + 主动沉淀（何时写、写哪、怎么查重）+ 代码片段格式 + 会话收尾自查与汇报四要素 + 近期工作归档 |
+| `agents-md-init` | [`skills/agents-md-init/SKILL.md`](../skills/agents-md-init/SKILL.md) | 记忆行为口径真源：初始化 AGENTS.md 结构 + 主动沉淀（何时写、写哪、怎么查重）+ 代码片段格式 + 会话收尾自查与汇报四要素（+ 写工具返回 url 时的「文档链接」条件要素）+ 近期工作归档 |
 | `ki-search-first` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-search-first) | 所有任务的记忆前置：先查项目记忆，再进入代码/专家/解决方案路径 |
 | `ki-memory-lookup` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-lookup) | 只读查询 SSOT，按记忆类型选择目录导航或语义检索 |
 | `ki-memory-write` | [HACK-WU/skills](https://github.com/HACK-WU/skills/tree/master/skills/ki-memory-write) | 统一查重、格式校验、双写、刷新、校验与结账删除 |
@@ -121,6 +121,8 @@ curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill
 ```
 
 > 之前按旧指引放在 `<项目>/rules/ai-codekb-memory.md` 的文件可以删掉：内容已由 skill 承接，两份并存会出现两套口径。
+
+> **改完 skill 记得重装**：安装是把 skill 文件**复制**到本机 skill 目录（不是软链），改仓库里的 `SKILL.md` 不会自动生效——运行期读的是已安装那份。改完源码后重跑上面的安装命令（或直接覆盖本机 skill 目录里的同名文件），否则改动会静默失效。
 
 > 存量用户迁移：旧版 `ki setup` 使用 `~/.ki-targets`，现已由安装器的 `~/.skill-targets`（或当前目录 `./.skill-targets`）取代，旧配置不再生效；如需保留原目标列表，请迁移到新文件。
 
