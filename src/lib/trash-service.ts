@@ -289,6 +289,24 @@ export function restoreFromTrash(args: RestoreArgs): RestoreOutcome {
     };
   }
 
+  /**
+   * 正文缺失 → **拒绝恢复**（fail-closed，事件 #81）。
+   *
+   * 与入站 `!content.trim()` 的 TRASH_CONTENT_MISSING 对称，也与本文件组恢复
+   * （`restoreGroupFromTrash` 的 `if (!entry.content)`）同一口径：写一篇空文档
+   * 比不恢复更糟 —— 用户会以为数据救回来了，而「这篇本来是坏的」信息随条目删除不可逆丢失。
+   *
+   * 为什么不在 HTTP 层挡：`restoreFromTrash` 才是唯一落盘口，MCP/CLI 与组恢复都汇到这里；
+   * 页面禁用按钮只是体验层，不能当校验。
+   */
+  if (!content.trim()) {
+    return {
+      ok: false,
+      code: 'TRASH_CORRUPTED',
+      error: `「${item.group}/${item.name}」的快照里没有正文，恢复只会得到空文档；请彻底删除该条目`,
+    };
+  }
+
   // ① 同名冲突：同组已存在同名文档时拒绝（R25 / N6），不静默覆盖
   const doc = loadGroupCache(args.scope, item.group);
   const existing = doc?.hot_relations.find((r) => r.text === item.name);

@@ -76,6 +76,11 @@ export const GOVERNANCE_CODE_NUMBERS = {
   TRASH_BAD_GROUP: 1310,
   /** 组条目没有单篇正文：读正文接口只服务文档条目 */
   TRASH_GROUP_NO_CONTENT: 1311,
+  /**
+   * 条目快照坏掉：正文缺失时恢复只会写出空文档，故 fail-closed（事件 #81）。
+   * 与 1302 TRASH_NOT_FOUND 区分：条目还在，只是救不回来，用户该做的是彻底删除。
+   */
+  TRASH_CORRUPTED: 1312,
 
   // ── S-05 参考文档（1400-1499）──
   REF_ALREADY_ASSOCIATED: 1401,
@@ -224,6 +229,12 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   TRASH_BAD_DIRNAME: 400,
   TRASH_BAD_GROUP: 400,
   TRASH_GROUP_NO_CONTENT: 400,
+  /**
+   * 409 而非默认 400：请求本身合法（条目存在、参数对），是**数据状态**冲突
+   * —— 与 RESTORE_NAME_CONFLICT 同类。未登记时 `httpStatusFor` 会给 400，
+   * 前端会把「这条救不回来」误读成「我参数传错了」。
+   */
+  TRASH_CORRUPTED: 409,
   REF_NOT_FOUND: 404,
   FIND_TARGET_NOT_AUTHORIZED: 403,
   REF_DOC_NOT_FOUND: 404,

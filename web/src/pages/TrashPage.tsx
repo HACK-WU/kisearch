@@ -133,9 +133,13 @@ export function TrashPage(): JSX.Element {
         return Promise.resolve({ content: '', error: '条目已关闭或不存在，请重新点开文档名' });
       }
       return getTrashContent(s, docTarget.group, docTarget.dirName)
-        // 空正文是既定事实（历史遗留条目）：给一句能照着做的说明，别落到阅读器的通用「未找到原文」
+        /**
+         * 空正文是既定事实：给一句能照着做的说明，别落到阅读器的通用「未找到原文」。
+         * 正常路径上这类条目已被 `hasContent === false` 挡住、名字不可点（事件 #81）；
+         * 这条只剩「列表加载后正文才丢」的竞态兜底，所以措辞不写"历史遗留"。
+         */
         .then((res) => (res.empty
-          ? { content: '', error: '这篇的快照里没有正文（历史遗留条目），请彻底删除' }
+          ? { content: '', error: '这篇的快照里没有正文，恢复也只会得到空文档；请彻底删除该条目' }
           : { content: res.content }));
     },
     [docTarget?.dirName, docTarget?.group],
@@ -151,11 +155,13 @@ export function TrashPage(): JSX.Element {
   const selectedItems = items.filter((i) => selected.has(keyOf(i)));
   /**
    * 正文缺失的条目不能恢复（写回去是空文档）——批量路径同样要挡。
+   * 判据是 `hasContent === false`（后端现读 content.md 得出），**不是** `sizeBytes > 0`：
+   * sizeBytes 是入站瞬间的目录字节快照，入站后正文丢失的条目仍是旧值 >0（事件 #81）。
    * 组条目也排除：它的回执是 `restored / failed` 明细，与文档的单条回执揉不进一句提示，
    * 由行内的「恢复整组」单独处理（REQ-20261123-005 · S05）。
    */
   const docSelected = selectedItems.filter((i) => i.kind !== 'group');
-  const restorable = docSelected.filter((i) => i.sizeBytes > 0);
+  const restorable = docSelected.filter((i) => i.hasContent !== false);
   const brokenSelected = docSelected.length - restorable.length;
   const groupSelected = selectedItems.length - docSelected.length;
 
@@ -235,13 +241,28 @@ export function TrashPage(): JSX.Element {
             const skipped = brokenSelected;
             await run(async () => {
               let ok = 0;
+              /**
+               * 失败项必须说出原因：列表算出的判据与恢复时的事实可能不同步
+               * （条目加载后正文才丢失 → 服务端 fail-closed 返回 TRASH_CORRUPTED）。
+               * 此前这里 `catch(() => null)` 只把它算作"没成功"，用户看到 `0 / 1 篇`
+               * 却不知道是坏条目还是权限/网络问题（事件 #81 复核时发现）。
+               */
+              const failures: string[] = [];
               for (const item of targets) {
                 // 按条目所属库恢复：视图名不是库，传它会直接 409
-                const r = await restoreTrash(item.scope, { group: item.group, dirName: item.dirName }).catch(() => null);
-                if (r) ok += 1;
+                try {
+                  await restoreTrash(item.scope, { group: item.group, dirName: item.dirName });
+                  ok += 1;
+                } catch (err) {
+                  const code = err instanceof GovernanceApiError && err.code ? `${err.code}：` : '';
+                  failures.push(`${item.name}（${code}${(err as Error).message}）`);
+                }
               }
               const skipText = skipped > 0 ? `；跳过 ${skipped} 篇（正文缺失，请彻底删除）` : '';
-              return `批量恢复完成：${ok} / ${targets.length} 篇${skipText}`;
+              const failText = failures.length > 0
+                ? `；失败 ${failures.length} 篇：${failures.slice(0, 2).join('；')}${failures.length > 2 ? '…' : ''}`
+                : '';
+              return `批量恢复完成：${ok} / ${targets.length} 篇${skipText}${failText}`;
             });
           })()}
         >
@@ -319,9 +340,14 @@ export function TrashPage(): JSX.Element {
           <tbody>
             {visible.map((item) => {
               const left = daysLeft(item.expiresAt);
-              // 快照里没有正文（sizeBytes=0）时恢复只会写进空串 —— 禁用两条恢复路径。
-              // 组条目是例外：空组快照本来就没有正文（它走「恢复整组」分支）
-              const broken = item.kind !== 'group' && item.sizeBytes === 0;
+              /**
+               * 快照里没有正文时恢复只会写进空串 —— 禁用两条恢复路径、名字也不给点。
+               * 判据是 `hasContent === false`（后端读 content.md 得出）：`sizeBytes === 0`
+               * 曾在「入站后正文丢失」的条目上失效（sizeBytes 停在入站旧值 >0，事件 #81）。
+               * 只认 `false`：旧 daemon 不下发该字段时按未知处理，避免把整页条目锁死。
+               * 组条目是例外：空组快照本来就没有正文（它走「恢复整组」分支）。
+               */
+              const broken = item.kind !== 'group' && item.hasContent === false;
               return (
                 <tr key={keyOf(item)}>
                   <td>

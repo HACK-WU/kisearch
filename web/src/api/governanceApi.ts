@@ -427,6 +427,11 @@ export interface TrashItemView {
   dirName: string;
   hasAssets: boolean;
   sizeBytes: number;
+  /**
+   * 快照里是否有正文；仅 `kind='doc'` 下发。
+   * **只把 `false` 当正文缺失** —— 旧 daemon 不返回该字段，按 `undefined` 判坏会把全部条目锁死。
+   */
+  hasContent?: boolean;
   /** 仅 kind='group'：组内剩余篇数 */
   docCount?: number;
   /** 仅 kind='group'：被删组连同子组的节点数 */
@@ -643,7 +648,10 @@ export interface GovernanceDiagnostics {
   failures: { items: Array<{ group: string; relation: string; kind: string; code: string; message: string; attempts: number }> };
   trash: {
     total: number;
-    /** 正文缺失（sizeBytes===0）的条目：恢复只会写回空串，UI 应禁止恢复 */
+    /**
+     * 正文缺失（hasContent===false）的条目：恢复只会写回空串，UI 应禁止恢复。
+     * 口径与列表一致，不要再用 sizeBytes 判断（事件 #81）
+     */
     emptyContent: Array<{ group: string; name: string; dirName: string; reason: string }>;
     /** emptyContent 只扫最近 200 条，这里给出实际扫描条数 */
     scanned: number;

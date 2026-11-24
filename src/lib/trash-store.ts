@@ -476,10 +476,72 @@ export function readGroupSnapshotAssets(
 export interface TrashEntry extends TrashItem {
   /** 目录绝对路径（内部用，不下发 API） */
   dir: string;
+  /**
+   * 快照里是否有正文（**读侧算出来的，不落盘**）。
+   *
+   * 为什么必须由后端给：`sizeBytes` 是**入站瞬间**的目录字节快照（此刻还没写 meta.json），
+   * 入站后 content.md 丢失的条目该值停在旧值 >0，拿它判「正文缺失」会漏（事件 #81）。
+   * 正文存在性只有读 `content.md` 才知道，所以列表阶段就一并算出来。
+   *
+   * 仅 `kind==='doc'` 有值；组条目没有单篇正文（`docs/NNNN/content.md` 才是正文），故缺省。
+   */
+  hasContent?: boolean;
 }
 
-/** 列出回收站条目（按 deletedAt 倒序） */
-export function listTrash(scope: string, opts: { reason?: TrashReason; limit?: number; offset?: number } = {}): {
+/**
+ * 条目目录里是否有**可恢复的正文**：`content.md` 存在且不是纯空白。
+ *
+ * 口径必须与 `moveToTrash` 的入站判定一致（那里用 `!content.trim()` 拒绝空正文），
+ * 否则会出现「列表说可恢复 → 恢复才报错」的两套标准。
+ *
+ * 为什么只读前 4KB：列表要给最多 200 条各判一次（回收站页 / diagnostics），
+ * 整篇读盘实测 200×100KB ≈ 96ms，占满一页的响应时间；只读头部把常态压到几毫秒。
+ * 判据本身不变 —— 头部非空白即「有正文」；头部全空白时，只有**大于一个块**的
+ * 文件才需要整篇复查（正文前面垫了 4KB 空白这种极端形状），否则必为空白。
+ */
+const CONTENT_PROBE_CHUNK = 4096;
+
+function hasRestorableContent(itemDir: string): boolean {
+  const contentPath = path.join(itemDir, 'content.md');
+  let size: number;
+  try {
+    size = fs.statSync(contentPath).size;
+  } catch {
+    return false; // 文件不存在：正文快照缺失
+  }
+  if (size === 0) return false;
+
+  const headLen = Math.min(size, CONTENT_PROBE_CHUNK);
+  try {
+    const buf = Buffer.alloc(headLen);
+    const fd = fs.openSync(contentPath, 'r');
+    try {
+      fs.readSync(fd, buf, 0, headLen, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    // 头部被截断在多字节字符中间时会得到替换字符（非空白）→ 判为有正文，不会误判成坏条目
+    if (buf.toString('utf-8').trim().length > 0) return true;
+  } catch {
+    // 读不到（权限 / IO）：不宣称「正文缺失」——写成 false 会让页面建议用户彻底删除
+    return true;
+  }
+  if (size <= CONTENT_PROBE_CHUNK) return false;
+  try {
+    return fs.readFileSync(contentPath, 'utf-8').trim().length > 0;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * 列出回收站条目（按 deletedAt 倒序）。
+ *
+ * `probeContent`（默认 true）决定要不要为 doc 条目算 `hasContent`：读 `content.md` 有 IO，
+ * 只给**真正需要判定「正文缺失」的消费方**开（列表页 / diagnostics）。
+ * 到期清理、库体积统计只要元数据，传 false 免掉整目录读盘。
+ */
+export function listTrash(scope: string, opts: { reason?: TrashReason; limit?: number; offset?: number; probeContent?: boolean } = {}): {
   items: TrashEntry[];
   total: number;
 } {
@@ -501,9 +563,10 @@ export function listTrash(scope: string, opts: { reason?: TrashReason; limit?: n
           const item = readJson<TrashItem>(path.join(child, 'meta.json'));
           if (item && typeof item.name === 'string') {
             // 存量条目无 kind：读侧补成 'doc'（不写回磁盘，见头注释约束 4）
+            const kind: TrashKind = item.kind === 'group' ? 'group' : 'doc';
             out.push({
               ...item,
-              kind: item.kind === 'group' ? 'group' : 'doc',
+              kind,
               group: item.group || groupSegs.join('/'),
               dir: child,
             });
@@ -522,7 +585,15 @@ export function listTrash(scope: string, opts: { reason?: TrashReason; limit?: n
   filtered.sort((a, b) => b.deletedAt - a.deletedAt);
   const offset = Math.max(0, opts.offset ?? 0);
   const limit = opts.limit && opts.limit > 0 ? opts.limit : filtered.length;
-  return { items: filtered.slice(offset, offset + limit), total: filtered.length };
+  // 只给**本页真正要下发的**条目算 hasContent：total 计算不需要它，别为翻页外的条目读盘
+  const page = filtered.slice(offset, offset + limit);
+  if (opts.probeContent !== false) {
+    for (const item of page) {
+      // 组条目的正文在 docs/NNNN/ 里，没有单篇快照 —— 不给 hasContent，免得被误判成「坏条目」
+      if (item.kind === 'doc') item.hasContent = hasRestorableContent(item.dir);
+    }
+  }
+  return { items: page, total: filtered.length };
 }
 
 export interface TrashContent {
@@ -566,7 +637,7 @@ export function updateTrashItemMeta(scope: string, group: string, dirName: strin
   return next;
 }
 
-/** 已到期条目（purgeExpired 的输入；纯读） */
+/** 已到期条目（purgeExpired 的输入；纯读、只看期限，不探正文 → probeContent:false 免读盘） */
 export function findExpiredTrash(scope: string, now: number): TrashEntry[] {
-  return listTrash(scope).items.filter((i) => i.expiresAt <= now);
+  return listTrash(scope, { probeContent: false }).items.filter((i) => i.expiresAt <= now);
 }

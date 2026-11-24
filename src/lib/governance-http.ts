@@ -2112,8 +2112,10 @@ export async function handleGovernanceRoutes(
             for (const i of failures.items) failureItems.push({ ...i, scope: member } as unknown as Record<string, unknown>);
             trashTotal += trash.total;
             scanned += trash.items.length;
-            // 只对 doc 条目判「正文缺失」：空组快照本来就没有正文，否则每次诊断都报假告警
-            for (const item of trash.items.filter((i) => i.kind !== 'group' && i.sizeBytes === 0)) {
+            // 只对 doc 条目判「正文缺失」：空组快照本来就没有正文，否则每次诊断都报假告警。
+            // 判据用 hasContent（读 content.md），**不能**用 sizeBytes===0 —— 它是入站瞬间的
+            // 目录字节快照，正文入站后丢失时该值仍是旧值 >0，会漏报（事件 #81）
+            for (const item of trash.items.filter((i) => i.kind !== 'group' && i.hasContent === false)) {
               emptyContent.push({ scope: member, group: item.group, name: item.name, dirName: item.dirName, reason: item.reason });
             }
           } catch (err) {
@@ -2145,13 +2147,13 @@ export async function handleGovernanceRoutes(
         trash: {
           total: trash.total,
           /**
-           * 正文缺失的条目（challenger C1）：`sizeBytes === 0` 意味着快照里没有正文，
-           * 恢复只会写进空串。历史上因 `getLocalKbDir` 双 join 产生过一批，
-           * 这里持续暴露，避免它们被误恢复成空文档。
+           * 正文缺失的条目（challenger C1）：快照里没有正文时，恢复只会写进空串。
+           * 判据是 `hasContent`（listTrash 现读 content.md 得出），**不是** `sizeBytes === 0`
+           * —— 后者是入站瞬间的目录字节快照，入站后正文丢失的条目仍是旧值 >0（事件 #81）。
            */
           emptyContent: trash.items
             // 组条目排除在外：空组快照本来就没有正文，不该被当成「坏条目」
-            .filter((item) => item.kind !== 'group' && item.sizeBytes === 0)
+            .filter((item) => item.kind !== 'group' && item.hasContent === false)
             .map((item) => ({ group: item.group, name: item.name, dirName: item.dirName, reason: item.reason })),
           /** `emptyContent` 只扫最近 200 条（limit 上限），更老的条目可能未覆盖 */
           scanned: trash.items.length,

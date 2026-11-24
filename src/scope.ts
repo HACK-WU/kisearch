@@ -78,7 +78,8 @@ function removeKbDir(scope: string): boolean {
  */
 function trashHint(scope: string): string {
   try {
-    const { items } = listTrash(scope);
+    // 只数条数与体积，不判正文存在性（probeContent:false 免整目录读盘）
+    const { items } = listTrash(scope, { probeContent: false });
     if (items.length === 0) return '';
     let groups = 0;
     let bytes = 0;

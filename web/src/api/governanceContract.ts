@@ -201,6 +201,11 @@ export interface TrashItemDto {
   ttlAssumed: boolean;
   restoreCount: number;
   sizeBytes: number;
+  /**
+   * 快照里是否有正文（读 `content.md` 得出）；仅 `kind='doc'` 下发。
+   * 前端只把 `false` 当「正文缺失」，缺省/未下发视为未知（兼容旧 daemon）。
+   */
+  hasContent?: boolean;
   hasAssets: boolean;
   dirName: string;
   /** 仅 kind='group'：组内剩余篇数 */
