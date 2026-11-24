@@ -1,3 +1,4 @@
+import { useCallback, useLayoutEffect, useRef } from 'react';
 import type { EventSummaryCardProps } from './types';
 
 /**
@@ -9,6 +10,7 @@ import type { EventSummaryCardProps } from './types';
  *   放最左既不打乱主操作的位置，也不会让「删除事件」离「流转」更远）。
  * - 描述并入本卡（C-06），编辑态由父级 `descEdit` 承载（C-12：输入不丢焦点）。
  * - 未分析时给一行入口引导（C-15）——现状那句引导在「代码位置」空态里，改版后该段并入分析卡会消失。
+ * - 描述编辑框高度随内容自适应（2026-11-24 用户反馈：读态整段展开，点「编辑」后塌成 4 行看不全）。
  */
 export function EventSummaryCard(props: EventSummaryCardProps) {
   const {
@@ -19,6 +21,51 @@ export function EventSummaryCard(props: EventSummaryCardProps) {
   } = props;
 
   const readOnlyTitle = canWrite ? undefined : '只读账号无法修改事件';
+
+  /**
+   * 「事件描述」编辑框高度跟随内容（2026-11-24 用户反馈：读态整段展开，点「编辑」后塌成 4 行）。
+   *
+   * · 先归零再按 `scrollHeight` 设高：高度随内容**可增可减**（不归零则删掉几行后收不回去）。
+   *   下限由 `rows={4}` 的内在高度决定，不是 CSS 的 `min-height:76px` —— textarea 的
+   *   `scrollHeight` 不会小于自身内容盒高度，所以短描述停在 4 行（chromium 实测 95px，
+   *   该值低于 76px 以下的场景才轮到 min-height 兜）。长描述则完全由内容撑开，无内部滚动。
+   * · 补边框差：全局 `box-sizing: border-box` 下 `scrollHeight` 不含上下边框，直接赋值会少 2px
+   *   让最后一行被裁 —— 用此刻的 `offsetHeight - clientHeight`（只剩边框）补齐。
+   *   实测（chromium，960px 宽）：1179 字读态 246px / 编辑态 248px，4000 字 805px，溢出恒 0。
+   * · 挂载即校准：编辑态是条件渲染，textarea 每次重新挂到 DOM 时 `rows={4}` 先生效，
+   *   ref 回调里立刻补一次，才不会闪一下再撑开。
+   * · 宽度变化（窗口缩放、侧栏收展）会改变折行数 → ResizeObserver 兜底；回调里只比较宽度，
+   *   否则改高度同样会触发回调、自激循环（与 ChatPanel 输入区同一口径）。
+   */
+  const descRef = useRef<HTMLTextAreaElement | null>(null);
+  const descRoRef = useRef<ResizeObserver | null>(null);
+  const syncDescHeight = useCallback(() => {
+    const ta = descRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight + (ta.offsetHeight - ta.clientHeight)}px`;
+  }, []);
+  const bindDesc = useCallback((el: HTMLTextAreaElement | null) => {
+    // 重挂载 / 卸载：先断旧观察器，避免观察已移除的节点
+    descRoRef.current?.disconnect();
+    descRoRef.current = null;
+    descRef.current = el;
+    if (!el) return;
+    syncDescHeight();
+    if (typeof ResizeObserver === 'undefined') return;
+    let lastWidth = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === lastWidth) return;
+      lastWidth = el.clientWidth;
+      syncDescHeight();
+    });
+    ro.observe(el);
+    descRoRef.current = ro;
+  }, [syncDescHeight]);
+  // 内容驱动（含输入、取消后再进编辑的初值回填、切事件后描述变化）
+  useLayoutEffect(() => {
+    if (descEdit.open) syncDescHeight();
+  }, [descEdit.open, descEdit.draft, syncDescHeight]);
 
   return (
     <section className="gov-dcard gov-dcard--summary">
@@ -120,12 +167,13 @@ export function EventSummaryCard(props: EventSummaryCardProps) {
           {descEdit.open ? (
             <div className="gov-desc-edit">
               <textarea
-                className="gov-textarea"
+                className="gov-textarea gov-textarea--fit"
                 rows={4}
                 maxLength={4000}
                 placeholder="补充事件现象、报错原文、复现条件等…"
                 value={descEdit.draft}
                 autoFocus
+                ref={bindDesc}
                 onChange={(e) => onDescChange(e.target.value)}
               />
               <div className="gov-desc-edit__foot">

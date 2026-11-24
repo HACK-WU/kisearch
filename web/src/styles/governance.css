@@ -1619,6 +1619,12 @@
   resize: vertical;
 }
 .gov-textarea:focus { outline: none; border-color: var(--ki-color-primary); }
+/*
+  描述内联编辑（EventSummaryCard）：高度由内容驱动（syncDescHeight 校正），
+  · 关掉手动拖拽 —— 拖完一打字就被拉回内容高度，反而像 bug；
+  · 行高对齐读态 `.gov-desc-text` 的 1.6，进出编辑态时逐行位置不跳。
+*/
+.gov-textarea--fit { resize: none; line-height: 1.6; }
 
 .gov-desc-text {
   margin: 0;
