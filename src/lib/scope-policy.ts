@@ -95,6 +95,8 @@ export const BLOCKED_OPS: ReadonlySet<string> = new Set([
   'trash-settings',
   // 档位切换只由 event-transition / 删除链路触发（二者已拦），单独登记防止被直接调用绕过
   'visibility-apply',
+  // 外部结论上传（REQ-20261123-009 · S-01）：写事件分析产物，只读库同样不许改结论
+  'analysis-import',
 ]);
 
 /** 判定某 op 的归属；`unknown` = 未登记（按拦截处理，并由单测报警） */

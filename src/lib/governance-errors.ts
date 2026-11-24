@@ -182,6 +182,12 @@ export const GOVERNANCE_CODE_NUMBERS = {
   ANALYSIS_EDIT_INVALID: 1622,
   /** 人工新增的代码位置验真失败（路径不存在 / 行号越界 / 二进制 / 不可读） */
   ANALYSIS_LOCATION_VERIFY_FAILED: 1623,
+  /** 外部上传（MCP）传入的 targetDir 与配置解析出的分析根目录不一致：两个基准会让 ref 解析漂移 */
+  ANALYSIS_TARGET_OUT_OF_ROOT: 1624,
+  /** 外部上传允许剔除无效候选时，剔除后一条有效位置都不剩（无位置的结论无法确认） */
+  ANALYSIS_CANDIDATE_ALL_DROPPED: 1625,
+  /** 覆盖已有 AI 结论必须显式 `overwrite: true`（防外部上传静默吃掉站内跑批结果） */
+  ANALYSIS_DRAFT_EXISTS: 1626,
 
   // ── 治理读路径视图聚合（REQ-20261120-001，1700-1799）──
   // ⚠ 不得塞进 1500-1599：契约测试断言「15xx 只放传输层错误」，
@@ -261,6 +267,9 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   ANALYSIS_RESUME_UNAVAILABLE: 409,
   ANALYSIS_EDIT_INVALID: 400,
   ANALYSIS_LOCATION_VERIFY_FAILED: 400,
+  ANALYSIS_TARGET_OUT_OF_ROOT: 400,
+  ANALYSIS_CANDIDATE_ALL_DROPPED: 409,
+  ANALYSIS_DRAFT_EXISTS: 409,
   REF_LIMIT_EXCEEDED: 409,
   DOC_BOUND_TO_OTHER_EVENT: 409,
   EVENT_MEMBER_LIMIT_EXCEEDED: 409,

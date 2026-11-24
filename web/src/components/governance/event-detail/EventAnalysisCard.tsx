@@ -43,12 +43,52 @@ export interface EventAnalysisCardProps {
   onDirtyChange?: (dirty: boolean) => void;
 }
 
-type ChipTone = 'idle' | 'run' | 'ok' | 'warn' | 'err';
+type ChipTone = 'idle' | 'run' | 'ok' | 'warn' | 'err' | 'ext';
 
-function chipOf(analysis: EventAnalysis | null): { tone: ChipTone; text: string } {
+/**
+ * ms 时间戳 → `2026-11-23 14:02`。
+ *
+ * 不复用 `lib/usersPageModel.formatTime`：它吃字符串（用户页 ISO 字段），
+ * 传 ms 数字会得到 `Invalid Date`；来源行只需要到分钟，自带 6 行比改公共函数安全。
+ */
+function fmtStamp(ts: number | undefined | null): string {
+  if (typeof ts !== 'number' || !Number.isFinite(ts)) return '—';
+  const d = new Date(ts);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** `title` 只在需要解释文案歧义时给（如「已修订」可能是追问补丁） */
+function chipOf(analysis: EventAnalysis | null): { tone: ChipTone; text: string; title?: string } {
   const draft = analysis?.draft ?? null;
   const confirmed = analysis?.confirmed ?? [];
+  const cands = draft?.candidates ?? [];
   if (draft?.status === 'running') return { tone: 'run', text: '分析中 ◐' };
+  /*
+   * 外部上传（2026-11-23 · REQ-20261123-009）：来源必须**前置**——
+   * 否则外部草稿会落到下面的「未定位到 / 草稿 N 处」，与"已有结论"自相矛盾。
+   * 但 `failed` 时不掩盖失败（异常数据也要看得见）。
+   */
+  if (draft?.source === 'external' && draft.status !== 'failed') {
+    /*
+     * 确认反馈（走查 #4）：来源前置后 chip 一直停在「外部上传」，用户确认完看不到生效。
+     * 只数**本版**结论确认的位置（`confirmedAt >= startedAt`）—— 上一版留下的已确认位置
+     * 与当前结论无关，算进来会给出一个误导性的数字。
+     *
+     * 优化（第二轮走查）：外部 + 已修订时把「已修订」**并进 chip**，卡头不再单挂一个
+     * 「已修订」小标 —— 两个标签并排既挤又重复。修订是比"确认了几处"更强的信号，优先显示。
+     */
+    if (draft.editedAt !== undefined) {
+      return {
+        tone: 'ext',
+        text: '外部上传 · 已修订',
+        // 徽标并入 chip 后 title 只能挂在这里：说清"修订"可能是追问补丁而非人手改
+        title: '外部结论被修订过（人工校正或追问补丁），结论本身仍来自上传',
+      };
+    }
+    const fresh = confirmed.filter((c) => c.confirmedAt >= draft.startedAt).length;
+    return { tone: 'ext', text: fresh > 0 ? `外部上传 · 已确认 ${fresh} 处` : '外部上传' };
+  }
   /*
    * 人工定稿（R-17 / S02 D3）：AI 没给出可用结论、但人补上了 ——
    * 此时继续显示「失败 / 未定位到」会让人以为还得再跑一次。
@@ -57,12 +97,12 @@ function chipOf(analysis: EventAnalysis | null): { tone: ChipTone; text: string 
   if (draft?.editedAt !== undefined && (draft.status === 'failed' || draft.status === 'partial')) {
     return { tone: 'ok', text: '已人工定稿' };
   }
-  if (draft && draft.candidates.length > 0 && draft.candidates.every(
+  if (draft && cands.length > 0 && cands.every(
     (c) => confirmed.some((x) => x.file === c.file && x.line === c.line),
   )) return { tone: 'ok', text: `已确认 ${confirmed.length} 处` };
   if (draft?.errorCode === 'ANALYSIS_CANCELED') return { tone: 'warn', text: '已停止' };
   if (draft?.status === 'failed') return { tone: 'err', text: '失败' };
-  if (draft && draft.candidates.length > 0) return { tone: 'warn', text: `草稿 ${draft.candidates.length} 处` };
+  if (cands.length > 0) return { tone: 'warn', text: `草稿 ${cands.length} 处` };
   if (confirmed.length > 0) return { tone: 'ok', text: `已确认 ${confirmed.length} 处` };
   // 跑完但一条候选都没有：说「未定位到」，别让它显示成「未开始」（会让人以为没跑过）。
   if (draft) return { tone: 'idle', text: '未定位到' };
@@ -130,6 +170,12 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
   const chip = chipOf(analysis);
   const running = draft?.status === 'running';
   const edited = draft?.editedAt !== undefined;
+  /** 结论来源（2026-11-23 · REQ-20261123-009）：缺省 = AI 在线分析 */
+  const isExternal = draft?.source === 'external';
+  /** 兜底：外部产物理论上必带三个集合，但缺字段不能让整卡崩（S-03 §7） */
+  const unconfirmed = draft?.unconfirmed ?? [];
+  /** 已确认位置里属于**上一版结论**的条数（外部重传会保留 confirmed，不提示会被误读） */
+  const staleConfirmed = draft ? confirmed.filter((c) => c.confirmedAt < draft.startedAt).length : 0;
   /** 有东西可清才出「重置分析」（运行中也算"有"，但按钮禁用） */
   const hasResettable = Boolean(draft) || confirmed.length > 0;
   const canEdit = canWrite && !busy && !running;
@@ -137,7 +183,7 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
    * 确认条里的清点**必须在发请求前算好** —— 请求成功回来这里已经什么都没有了。
    * 老数据可能只有纯文本结论（没有 `chain`），按"1 段文本"计，不要显示"结论 0 个节点"。
    */
-  const unconfirmedCount = draft?.unconfirmed?.length ?? 0;
+  const unconfirmedCount = unconfirmed.length;
   const resetItems = [
     chain.length > 0 ? `结论 ${chain.length} 个节点` : draft?.conclusion ? '结论 1 段文本' : '',
     unconfirmedCount > 0 ? `未确认点 ${unconfirmedCount} 项` : '',
@@ -186,12 +232,42 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
                   重置分析
                 </button>
               ) : null}
-              {edited ? <span className="gov-dchip gov-dchip--ok" title="这三块由人工改过（不是 AI 原文）">已人工修订</span> : null}
-              <span className={`gov-dchip gov-dchip--${chip.tone}`}>{chip.text}</span>
+              {/*
+                走查 #5：追问补丁与人工校正都写 `editedAt`，外部来源时标「已人工修订」会让人
+                以为"是某个人手改的"。第二轮优化后「已修订」已并入来源 chip（见 `chipOf`），
+                这里只在 **AI 来源**渲染独立徽标，避免两个标签并排。
+              */}
+              {edited && !isExternal ? (
+                <span className="gov-dchip gov-dchip--ok" title="这三块由人工改过（不是 AI 原文）">
+                  已人工修订
+                </span>
+              ) : null}
+              <span className={`gov-dchip gov-dchip--${chip.tone}`} title={chip.title}>{chip.text}</span>
             </>
           )}
         </span>
       </div>
+
+      {/* 来源行（2026-11-23 · REQ-20261123-009）：标题已固定「AI 分析」，据此说明结论是谁产出的 */}
+      {draft ? (
+        <div className="gov-dcard__source">
+          {isExternal
+            ? `来源 ${draft.sourceClient && draft.sourceClient !== 'mcp' ? draft.sourceClient : 'MCP'} · 上传于 ${fmtStamp(draft.importedAt)}`
+              /*
+               * 走查 #3：外部结论被人改过 / 追问补丁改过后，只写「上传于」会让人以为
+               * 最近一次改动就是上传；追加修订时间，保留两个事实。
+               */
+              + (draft.editedAt !== undefined ? ` · 修订于 ${fmtStamp(draft.editedAt)}` : '')
+            /*
+             * 第二轮优化：人工修订会把 `updatedAt` 一起推到修订时间，原「完成于 updatedAt」
+             * 会变成"完成时间 == 修订时间"的假信息。所以有 `editedAt` 时只说「修订于」，
+             * 不假装那还是完成时间。
+             */
+            : draft.editedAt !== undefined
+              ? `来源 AI 在线分析 · 修订于 ${fmtStamp(draft.editedAt)}`
+              : `来源 AI 在线分析 · 完成于 ${fmtStamp(draft.updatedAt)}`}
+        </div>
+      ) : null}
 
       <div className="gov-dcard__body">
         {editing ? (
@@ -276,14 +352,14 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
              * 未确认点：独立区块，**不随过程区折叠、也不随已确认消失**（2026-11-18 用户反馈）。
              * 人工清空后给占位说明（有 editedAt 才说"已清空"，否则沿用"整块不渲染"）。
              */}
-            {draft && draft.status !== 'running' && (draft.unconfirmed.length > 0 || (edited && draft.unconfirmed.length === 0)) ? (
+            {draft && draft.status !== 'running' && (unconfirmed.length > 0 || (edited && unconfirmed.length === 0)) ? (
               <div className="gov-unconfirmed">
                 <div className="gov-unconfirmed__head">
-                  未确认点 · {draft.unconfirmed.length} 项
+                  未确认点 · {unconfirmed.length} 项
                 </div>
-                {draft.unconfirmed.length > 0 ? (
+                {unconfirmed.length > 0 ? (
                   <ul className="gov-unconfirmed__list">
-                    {draft.unconfirmed.map((item, i) => (
+                    {unconfirmed.map((item, i) => (
                       <li key={`unconfirmed-${i}`}>{item}</li>
                     ))}
                   </ul>
@@ -295,7 +371,20 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
 
             {confirmed.length > 0 ? (
               <div className="gov-confirmed">
-                <div className="gov-confirmed__head">已确认的相关位置 · {confirmed.length} 处</div>
+                <div className="gov-confirmed__head">
+                  已确认的相关位置 · {confirmed.length} 处
+                  {staleConfirmed > 0 ? (
+                    <span className="gov-confirmed__note">
+                      {/*
+                        第二轮优化：「含 N 处」在**全部**都来自上一版时会读成"还有本版的"，
+                        那种情况直接说「均为」，语义不留歧义。
+                      */}
+                      {staleConfirmed === confirmed.length
+                        ? '（均为上一版结论确认的位置）'
+                        : `（含 ${staleConfirmed} 处来自上一版结论）`}
+                    </span>
+                  ) : null}
+                </div>
                 <div className="gov-codelist">
                   {confirmed.map((loc) => (
                     <CodeLocRow

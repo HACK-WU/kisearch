@@ -16,17 +16,23 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getEventsDir } from './store.js';
+import { findEventIn, getEventsDir, readAllEvents } from './store.js';
 import { readJson } from '../store.js';
 import { walWrite } from '../wal.js';
 import { withScopeWriteLock } from '../scope-write-lock.js';
 import { GovernanceError } from '../governance-errors.js';
-import { normalizeChain } from './conclusion-chain.js';
-import { hasEditFields, validateDraftEdit, type ManualLocationInput } from './analysis-edit.js';
+import { normalizeChain, pruneChainRefs } from './conclusion-chain.js';
+import {
+  hasEditFields,
+  validateDraftEdit,
+  validateExternalImport,
+  type ManualLocationInput,
+} from './analysis-edit.js';
 import { resolveAnalysisTargetDir, readPromptConfig, defaultPromptConfig } from '../chat/prompt-config.js';
 import { loadConfig } from '../config.js';
 import { validateTargetRootDir, verifyCandidateLocation } from './analysis-fs-tools.js';
 import type {
+  AnalysisCandidate,
   AnalysisDraft,
   ConfirmedCodeLocation,
   EventAnalysisDoc,
@@ -451,6 +457,221 @@ export async function saveDraftEdits(
     };
     writeAnalysisDoc(scope, next);
     return next;
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 外部结论上传（2026-11-23 · REQ-20261123-009 · S-01）
+ *
+ * 与 `saveDraftEdits` 的分工：那边是**人工校正**（必打 `editedAt`），这边是
+ * **外部来源写入**（打 `source` / `importedAt`，**不打** `editedAt`）。刻意分成
+ * 两个函数而不是加参数：`buildManualDraft` 必设 `editedAt`、`expectedRunId: null`
+ * 的语义是「期望没有草稿」，与「允许覆盖外部草稿」直接冲突，塞在一起两条语义会互相污染。
+ *
+ * 顺序：**验真在锁外、锁内二次校验**（同 `saveDraftEdits`）——验真要读真实文件，
+ * 持锁会阻塞同事件的后台分析写盘与 confirm。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+export interface ExternalAnalysisInput {
+  conclusion?: string | null;
+  chain?: unknown;
+  candidates: unknown;
+  unconfirmed?: unknown;
+  /** 传入时必须等于配置解析出的分析根目录（两个基准会让 ref 解析漂移） */
+  targetDir?: string;
+  commit?: string | null;
+  /** 覆盖已有【非外部】结论必须显式 true；**不豁免** expectedRunId */
+  overwrite?: boolean;
+  /** 允许剔除验真失败的候选（默认 false = 整批失败） */
+  skipInvalidCandidates?: boolean;
+  expectedRunId?: string | null;
+  sourceClient?: string;
+}
+
+export interface ExternalAnalysisOutcome {
+  doc: EventAnalysisDoc;
+  /** 被剔除的无效候选；仅 skipInvalidCandidates 时可能非空 */
+  dropped: Array<{ file: string; line: number; reason: string }>;
+  /** 是否覆盖了已有草稿 */
+  overwritten: boolean;
+  /** 本次上传**直接生效**的候选位置数（已写入 `confirmed[]`，无需人工确认） */
+  autoConfirmed: number;
+}
+
+/** 上传闸门：运行中 / 期望 runId / 覆盖权限。锁外与锁内各判一次，规则必须完全一致 */
+function assertExternalImportGate(doc: EventAnalysisDoc, input: ExternalAnalysisInput): void {
+  if (doc.draft?.status === 'running') {
+    throw new GovernanceError(
+      'ANALYSIS_ALREADY_RUNNING',
+      '分析仍在进行中：请先「停止」或等待完成，再上传结论',
+      { runId: doc.draft.runId },
+    );
+  }
+  assertRunIdMatch(doc.draft?.runId ?? null, input.expectedRunId);
+  if (doc.draft && doc.draft.source !== 'external' && input.overwrite !== true) {
+    throw new GovernanceError(
+      'ANALYSIS_DRAFT_EXISTS',
+      '当前已有 AI 分析结论：覆盖它需要显式 overwrite=true（覆盖后原结论不可恢复）',
+      { currentRunId: doc.draft.runId, source: doc.draft.source ?? 'ai' },
+    );
+  }
+}
+
+/** `targetDir` 只接受与配置根等价的路径（realpath 后比较，防符号链接绕过） */
+function assertTargetDirMatchesRoot(configRoot: string, requested: string): void {
+  const norm = (p: string): string => {
+    try {
+      return fs.realpathSync(path.resolve(p));
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  if (norm(requested) !== norm(configRoot)) {
+    throw new GovernanceError(
+      'ANALYSIS_TARGET_OUT_OF_ROOT',
+      `targetDir 必须是分析配置根目录「${configRoot}」，收到「${requested}」`,
+      { configRoot, targetDir: requested },
+    );
+  }
+}
+
+/**
+ * 写入一份外部上传的分析结论。
+ *
+ * 产出形状与 `buildManualDraft` 同族（无分析过程：`steps: []`、`stats` 全 0），
+ * 差别只有三处：`runId` 前缀 `ext_`、带 `source/importedAt/sourceClient`、**不设 `editedAt`**。
+ */
+export async function saveExternalAnalysis(
+  scope: string,
+  eventId: string,
+  input: ExternalAnalysisInput,
+  now = Date.now(),
+  deps?: { loadConfigFn?: () => ReturnType<typeof loadConfig> },
+): Promise<ExternalAnalysisOutcome> {
+  /*
+   * 事件必须存在：分析产物是**独立文件**，不校验的话外部传一个错的 eventId 也能落盘，
+   * 结果是一个永远没人打开、也不会随事件删除清理的孤儿文件（S-01 §6）。
+   */
+  if (!findEventIn(readAllEvents(scope), eventId)) {
+    throw new GovernanceError('EVENT_NOT_FOUND', `事件「${eventId}」不存在`);
+  }
+
+  const before = readAnalysisDocRaw(scope, eventId);
+  assertExternalImportGate(before, input);
+
+  const { errors, value } = validateExternalImport({
+    ...(input.conclusion !== undefined ? { conclusion: input.conclusion } : {}),
+    ...(input.chain !== undefined ? { chain: input.chain } : {}),
+    candidates: input.candidates,
+    ...(input.unconfirmed !== undefined ? { unconfirmed: input.unconfirmed } : {}),
+  });
+  if (errors.length > 0) {
+    throw new GovernanceError('ANALYSIS_EDIT_INVALID', errors[0]!.reason, { errors });
+  }
+
+  const configRoot = resolveEditableTargetRoot(scope, deps?.loadConfigFn?.());
+  if (input.targetDir !== undefined && input.targetDir !== null) {
+    assertTargetDirMatchesRoot(configRoot, input.targetDir);
+  }
+
+  /* 验真：默认整批失败（fail-loud）；允许剔除时逐条记录原因 */
+  const dropped: ExternalAnalysisOutcome['dropped'] = [];
+  const candidates: AnalysisCandidate[] = [];
+  for (const [index, cand] of value.candidates.entries()) {
+    const verified = await verifyCandidateLocation(configRoot, cand.file, cand.line, cand.endLine);
+    if (!verified.ok) {
+      if (input.skipInvalidCandidates === true) {
+        dropped.push({ file: cand.file, line: cand.line, reason: verified.reason });
+        continue;
+      }
+      throw new GovernanceError(
+        'ANALYSIS_LOCATION_VERIFY_FAILED',
+        `第 ${index + 1} 条候选位置 ${cand.file}:${cand.line} 验真失败：${verified.reason}`,
+        { index, file: cand.file, line: cand.line, reason: verified.reason },
+      );
+    }
+    candidates.push({
+      id: `cand_${now.toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+      file: verified.file,
+      line: verified.line,
+      ...(verified.endLine !== undefined ? { endLine: verified.endLine } : {}),
+      snippet: verified.realSnippet,
+      why: cand.why,
+      confidence: cand.confidence,
+    });
+  }
+  if (candidates.length === 0) {
+    throw new GovernanceError(
+      'ANALYSIS_CANDIDATE_ALL_DROPPED',
+      `全部候选位置验真失败（${dropped.length} 条），没有可用位置无法上传`,
+      { dropped },
+    );
+  }
+  /*
+   * 剔除模式下链上的 ref 可能指向被剔掉的位置：按 `pruneChainRefs` 的既有策略
+   * **只剪 ref、保留节点文本**（那句因果判断通常仍成立）。
+   */
+  const chain = input.skipInvalidCandidates === true
+    ? pruneChainRefs(value.chain, candidates)
+    : value.chain;
+
+  return withAnalysisLock(scope, eventId, 'analysis-import', async () => {
+    const cur = readAnalysisDocRaw(scope, eventId);
+    assertExternalImportGate(cur, input);
+    /*
+     * 外部上传的候选位置**直接生效**（2026-11-23 用户拍板，取代原「上传后等人工确认」）：
+     *   · 外部 AI 已经把位置验真过了（上面逐条 `verifyCandidateLocation`），再要人确认一遍
+     *     只是形式；而页面上的「确认」带 `expectedRunId`，外部反复上传必然把页面拖进
+     *     `REVISION_CONFLICT`（真机踩到：点确认报"草稿已被新一轮分析更新"）。
+     *   · 直接写 `confirmed[]` 还让 `ConclusionChain` 的引用胶囊立刻可点（它要求 ref 命中
+     *     confirmed 且有 snippet），比"先待确认"少一步。
+     * 去重复用 `mergeConfirmed`（同 `file+line` 幂等），所以重复上传不会堆重复位置。
+     */
+    const autoConfirmed: ConfirmedCodeLocation[] = candidates.map((c) => ({
+      id: `loc_${now.toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+      file: c.file,
+      line: c.line,
+      ...(c.endLine !== undefined ? { endLine: c.endLine } : {}),
+      snippet: c.snippet,
+      why: c.why,
+      confidence: c.confidence,
+      targetDir: configRoot,
+      commit: input.commit ?? null,
+      confirmedAt: now,
+    }));
+    const merged = mergeConfirmed(cur.confirmed, autoConfirmed, []);
+    const draft: AnalysisDraft = {
+      runId: `ext_${now.toString(36)}_${crypto.randomBytes(3).toString('hex')}`,
+      status: 'ready',
+      targetDir: configRoot,
+      commit: input.commit ?? null,
+      conclusion: value.conclusion ?? null,
+      chain,
+      // 已全部转成 confirmed：留空 = 页面不再出现「待确认的代码位置」
+      candidates: [],
+      unconfirmed: value.unconfirmed ?? [],
+      steps: [],
+      stats: { turns: 0, filesRead: 0, tokens: 0, ms: 0 },
+      startedAt: now,
+      updatedAt: now,
+      source: 'external',
+      importedAt: now,
+      ...(input.sourceClient ? { sourceClient: input.sourceClient } : {}),
+    };
+    const next: EventAnalysisDoc = {
+      version: 1,
+      eventId,
+      draft,
+      confirmed: merged,
+      updatedAt: now,
+    };
+    writeAnalysisDoc(scope, next);
+    return {
+      doc: next,
+      dropped,
+      overwritten: cur.draft !== null,
+      autoConfirmed: merged.length - cur.confirmed.length,
+    };
   });
 }
 

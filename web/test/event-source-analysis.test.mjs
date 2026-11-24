@@ -233,7 +233,9 @@ describe('S-05c · 过程可观测（去重 + 工具明细）', () => {
 
   it('未确认点是卡片级独立区块：不随已确认与过程折叠消失（2026-11-18 走查）', () => {
     assert.match(analysisCardSrc, /className="gov-unconfirmed"/, '要有独立的未确认点区块');
-    assert.match(analysisCardSrc, /draft\.unconfirmed\.map/, '逐条列出，不再 join 成一行');
+    // 2026-11-23：兜底改造后列表来源是 `const unconfirmed = draft?.unconfirmed ?? []`，
+    // 断言放宽到 `unconfirmed.map`（`draft.unconfirmed.map` 也命中，语义不变：逐条列出、不 join）
+    assert.match(analysisCardSrc, /unconfirmed\.map/, '逐条列出，不再 join 成一行');
     const start = analysisCardSrc.indexOf('className="gov-unconfirmed"');
     const end = analysisCardSrc.indexOf('className="gov-confirmed"');
     assert.ok(start > 0 && end > start, '未确认点应位于已确认位置之前');

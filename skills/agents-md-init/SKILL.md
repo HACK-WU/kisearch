@@ -291,7 +291,7 @@ description: 初始化或刷新项目根目录 AGENTS.md 的结构、索引缓�
 | 情形 | 通道 |
 |------|------|
 | 本机文档 → 远端 ki（**默认**） | `use_skill("ki-upload")` 的 `upload` / `upload-dir`：跨机可用、自动切分 + 向量化 |
-| **属于某个事件产出的文档**（debug 报告 / 需求报告 / 复盘） | 同上，额外带 `--lifecycle event --event '#N'`：上传即挂成该事件的 `docs`（分类随阶段）。已有文档则用 `ki_event_docs(action="add")` 事后补挂 |
+| **属于某个事件产出的文档**（debug 报告 / 需求报告 / 复盘） | 同上，额外带 `--lifecycle event --event '#N'`：上传即挂成该事件的 `docs`（分类随阶段）。已有文档则用 `ki_event_edit(action="members", docAction="add", docRefs=[...])` 事后补挂 |
 | 正文已在上下文里且很短（一段结论） | MCP `ki_sync_relation` 逐条写（**不做 chunk 切分，长文档别用**） |
 | 文件与 ki 同机 | `ki import --source <dir> --scope ${scope}-memory --group <g>` |
 
@@ -477,7 +477,7 @@ description: 初始化或刷新项目根目录 AGENTS.md 的结构、索引缓�
 □ 有未记录的代码要点 / 决策？    → ${scope}-memory（§2.5 / §2.6）
 □ 有"发现了但没做"的事？        → use_skill("event-report")
 □ 产出了产物文档（报告 / 复盘）？→ 挂到对应事件（docs，先挂再推终态，见 event-report §5）
-□ 做完的事对应未收口事件？      → ki_event_set_stage 推到真实阶段（已修复不许停在「修复中」）
+□ 做完的事对应未收口事件？      → ki_event_edit(action=stage) 推到真实阶段（已修复不许停在「修复中」）
 □ 进度有变化？                  → 更新「近期工作」对应条目
 □ 索引有变更？                  → 刷新「项目记忆索引」（§2.3）
 □ 本次有写工具返回 url？        → 收尾逐条贴 `[文档名称](url)`（§2.7.1 ⑤）

@@ -184,10 +184,13 @@ export function EventsPage(): JSX.Element {
   const activeIdRef = useRef<string | null>(null);
   /**
    * 详情新鲜度基线（走查 #1）：外部上传（MCP）不经过站内 running 标记，
-   * 4s 轮询只拉标记、不拉详情，页面会一直停在旧结论上。这里记「上次看到的 runId」，
-   * 变了才整条刷新（`undefined` 表示还没建立基线，首轮只记录不刷新）。
+   * 4s 轮询只拉标记、不拉详情，页面会一直停在旧结论上。
+   *
+   * 基线是「runId + 已确认位置数」的**签名**而不是只用 runId：人工确认位置不会换
+   * runId，只比 runId 时多标签页里的确认动作永远等不到刷新。
+   * `undefined` = 还没建立基线（首轮只记录、不刷新）。
    */
-  const draftRunIdRef = useRef<string | null | undefined>(undefined);
+  const detailSigRef = useRef<string | undefined>(undefined);
   /**
    * AI 分析编辑态是否有未保存修改（2026-11-23 · 人工校正 Q2）。
    *
@@ -717,23 +720,28 @@ export function EventsPage(): JSX.Element {
    * 首轮只建立基线不刷新，避免进页面就多打一条详情请求；隐藏标签页跳过。
    */
   useEffect(() => {
-    if (!activeId) {
-      draftRunIdRef.current = undefined;
-      return undefined;
-    }
+    /*
+     * 切事件也必须重建基线：否则会拿上一条事件的签名与新事件比对，
+     * 首次 check 就判成"变了"，白白多刷一次详情（还可能是别人的结论）。
+     */
+    detailSigRef.current = undefined;
+    if (!activeId) return undefined;
     let alive = true;
+    /** 签名 = 结论版本 + 已确认位置数：两者任一变化都意味着页面该刷新 */
+    const sigOf = (a: { draft?: { runId?: string } | null; confirmed?: unknown[] } | null): string =>
+      `${a?.draft?.runId ?? ''}:${a?.confirmed?.length ?? 0}`;
     const check = async (): Promise<void> => {
       if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const latest = await getEventAnalysis(scope, activeId);
         if (!alive) return;
-        const nextRun = latest?.draft?.runId ?? null;
-        if (draftRunIdRef.current === undefined) {
-          draftRunIdRef.current = nextRun;
+        const nextSig = sigOf(latest);
+        if (detailSigRef.current === undefined) {
+          detailSigRef.current = nextSig;
           return;
         }
-        if (nextRun !== draftRunIdRef.current) {
-          draftRunIdRef.current = nextRun;
+        if (nextSig !== detailSigRef.current) {
+          detailSigRef.current = nextSig;
           await loadDetail(activeId);
         }
       } catch {

@@ -8,7 +8,7 @@
  *
  * 2026-11-18 增补 `force` + `confirm_title`（清理测试 / 废弃事件用）：
  *   · `force` 只开放给**无关联文档**的事件——有成员时必须先收口（`applyTerminalAction`
- *     会把文档与索引一起处理）或先 `ki_event_docs remove` 解绑；
+ *     会把文档与索引一起处理）或先 `ki_event_edit members remove` 解绑；
  *   · `confirm_title` 必须与标题逐字一致：逼调用方先把标题读出来，避免按错的 id 删掉别的事件
  *     （与回收站 `PURGE_CONFIRM_MISMATCH` 同一手感）。
  */
@@ -22,7 +22,7 @@ import { toolError } from './event-create.js';
 export function registerEventDeleteTool(server: McpServer): void {
   server.tool(
     'ki_event_delete',
-    '删除事件；必须指定关联文档去向（wiki=长期保留 / trash=移入回收站）。未收口事件默认拒绝（先用 ki_event_set_stage 走到终态）；'
+    '删除事件；必须指定关联文档去向（wiki=长期保留 / trash=移入回收站）。未收口事件默认拒绝（先用 ki_event_edit stage 走到终态）；'
       + '清理测试/废弃的**空事件**可传 force + confirm_title（标题逐字一致）',
     {
       scope: z.string().optional().default('default').describe('知识库名'),

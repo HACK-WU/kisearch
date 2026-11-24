@@ -115,7 +115,7 @@ function buildHint(
     parts.push(`⚠ ${binding.docs.visibilityFailed.length} 篇索引未能摘除，仍可能被检索到`);
   }
   if (visibility.mode === 'hidden') {
-    parts.push('当前阶段不可检索：语义与全文都搜不到，这是阶段设计的预期行为；推进阶段用 ki_event_set_stage');
+    parts.push('当前阶段不可检索：语义与全文都搜不到，这是阶段设计的预期行为；推进阶段用 ki_event_edit stage');
   } else if (visibility.mode === 'fts-only') {
     parts.push('当前阶段仅全文可命中：语义检索不会召回，这是预期行为');
   } else {

@@ -37,7 +37,7 @@ export const MANUAL_LOCATION_WHY_MAX = 200;
 /** 单次请求最多手工新增几个位置（防一次贴一屏） */
 export const MANUAL_LOCATION_ADD_MAX = 20;
 
-export type EditField = 'conclusion' | 'chain' | 'unconfirmed' | 'confirmed';
+export type EditField = 'conclusion' | 'chain' | 'unconfirmed' | 'confirmed' | 'candidates';
 
 /** 一条可定位的校验错误；`index` 是该字段内的第几项（0 起） */
 export interface EditFieldError {
@@ -315,4 +315,166 @@ export function validateDraftEdit(
   if (payload.confirmedUpdate !== undefined) validateConfirmedUpdate(payload.confirmedUpdate, errors, value);
 
   return { errors, value };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * 外部结论上传的校验（2026-11-23 · REQ-20261123-009 · S-01）
+ *
+ * 与人工校正同一取向：**严格报错、绝不静默裁剪**。不复用 `normalizeChain`
+ * （模型侧那份会 `slice` 超长节点）：外部 AI 会以为上传成功而内容已被改。
+ *
+ * 三条额外规则（人工校正不需要，外部入口必须有）：
+ *   1. `candidates` 必填且 ≥1 —— 没有代码位置的结论进不了「确认位置」链路；
+ *   2. `chain` 至少 1 个节点 —— 只有一句 conclusion 的产物没有因果链；
+ *   3. `chain[].ref` 必须落在 `candidates` 内 —— 否则前端胶囊永远点不开
+ *      （`ConclusionChain` 要求 ref 在 confirmed 命中且 snippet 非空）。
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/** 单次外部上传的候选位置上限（与人工新增位置同档，防一次贴一屏） */
+export const EXTERNAL_CANDIDATE_MAX = MANUAL_LOCATION_ADD_MAX;
+/** 候选缺省置信度：外部 AI 未标注时用中性值，不伪造 1.0 */
+export const EXTERNAL_CANDIDATE_DEFAULT_CONFIDENCE = 0.5;
+
+/** 外部上传的候选位置（尚未验真；验真在 service 层做） */
+export interface ExternalCandidateInput {
+  file: string;
+  line: number;
+  endLine?: number;
+  why: string;
+  confidence: number;
+}
+
+export interface ExternalImportPayload {
+  conclusion?: string | null;
+  chain?: unknown;
+  candidates: unknown;
+  unconfirmed?: unknown;
+}
+
+export interface NormalizedExternalImport {
+  conclusion?: string | null;
+  chain: ConclusionNode[];
+  candidates: ExternalCandidateInput[];
+  unconfirmed?: string[];
+}
+
+function validateExternalCandidates(raw: unknown, errors: EditFieldError[]): ExternalCandidateInput[] {
+  if (!Array.isArray(raw)) {
+    errors.push({ field: 'candidates', reason: '候选位置必须是数组（外部上传至少 1 条）' });
+    return [];
+  }
+  if (raw.length === 0) {
+    errors.push({ field: 'candidates', reason: '外部上传必须至少带 1 条代码位置' });
+    return [];
+  }
+  if (raw.length > EXTERNAL_CANDIDATE_MAX) {
+    errors.push({ field: 'candidates', reason: `候选位置最多 ${EXTERNAL_CANDIDATE_MAX} 条（当前 ${raw.length} 条）` });
+    return [];
+  }
+  const seen = new Set<string>();
+  const list: ExternalCandidateInput[] = [];
+  raw.forEach((item, index) => {
+    if (!isPlainObject(item)) {
+      errors.push({ field: 'candidates', index, reason: '位置格式不合法（应为对象）' });
+      return;
+    }
+    const file = typeof item.file === 'string' ? item.file.trim() : '';
+    if (!file) {
+      errors.push({ field: 'candidates', index, reason: '路径不能为空' });
+      return;
+    }
+    if (/\s/.test(file)) {
+      errors.push({ field: 'candidates', index, reason: '路径不能含空格（写成「路径:行号」会解析不出来）' });
+      return;
+    }
+    const line = typeof item.line === 'number' ? item.line : Number(item.line);
+    if (!Number.isInteger(line) || line < 1) {
+      errors.push({ field: 'candidates', index, reason: '行号必须是正整数' });
+      return;
+    }
+    let endLine: number | undefined;
+    if (item.endLine !== undefined && item.endLine !== null) {
+      const parsed = typeof item.endLine === 'number' ? item.endLine : Number(item.endLine);
+      if (!Number.isInteger(parsed) || parsed < line) {
+        errors.push({ field: 'candidates', index, reason: '结束行号必须是整数且不小于起始行号' });
+        return;
+      }
+      endLine = parsed;
+    }
+    const why = typeof item.why === 'string' ? oneLine(item.why) : '';
+    if (!why) {
+      errors.push({ field: 'candidates', index, reason: '理由不能为空（说明这处代码为什么是证据）' });
+      return;
+    }
+    if (why.length > MANUAL_LOCATION_WHY_MAX) {
+      errors.push({ field: 'candidates', index, reason: `理由 ${why.length} 字，超过上限 ${MANUAL_LOCATION_WHY_MAX} 字` });
+      return;
+    }
+    let confidence = EXTERNAL_CANDIDATE_DEFAULT_CONFIDENCE;
+    if (item.confidence !== undefined && item.confidence !== null) {
+      const parsed = typeof item.confidence === 'number' ? item.confidence : Number(item.confidence);
+      if (!Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+        errors.push({ field: 'candidates', index, reason: '置信度必须是 0~1 之间的数字' });
+        return;
+      }
+      confidence = parsed;
+    }
+    const key = `${file}:${line}`;
+    if (seen.has(key)) {
+      errors.push({ field: 'candidates', index, reason: `与前文某条重复（${key}）` });
+      return;
+    }
+    seen.add(key);
+    list.push({ file, line, ...(endLine !== undefined ? { endLine } : {}), why, confidence });
+  });
+  return list;
+}
+
+/**
+ * 校验一次外部结论上传。**不裁剪**，只报错。
+ *
+ * 结论 / 链 / 未确认点三块复用 `validateDraftEdit`（阈值与人工入口同源），
+ * 本函数只追加外部入口特有的三条规则与自身字段校验。
+ */
+export function validateExternalImport(
+  payload: ExternalImportPayload,
+): { errors: EditFieldError[]; value: NormalizedExternalImport } {
+  const errors: EditFieldError[] = [];
+  const base = validateDraftEdit({
+    ...(payload.conclusion !== undefined ? { conclusion: payload.conclusion } : {}),
+    ...(payload.chain !== undefined ? { chain: payload.chain } : {}),
+    ...(payload.unconfirmed !== undefined ? { unconfirmed: payload.unconfirmed } : {}),
+  });
+  errors.push(...base.errors);
+
+  const candidates = validateExternalCandidates(payload.candidates, errors);
+  const chain = base.value.chain ?? [];
+  if (chain.length === 0) {
+    errors.push({ field: 'chain', reason: '结论链至少需要 1 个节点（现象 → 原因 → 根因 → 影响 → 建议）' });
+  } else if (candidates.length > 0) {
+    /*
+     * ref ⊆ candidates：`pruneChainRefs` 只在模型侧剪枝，外部入口若放过悬空 ref，
+     * 前端胶囊会因 confirmed 无匹配而永久不可点（用户看到「无法预览」却查不出原因）。
+     */
+    const allowed = new Set(candidates.map((c) => `${c.file}:${c.line}`));
+    chain.forEach((node, index) => {
+      if (node.ref && !allowed.has(node.ref)) {
+        errors.push({
+          field: 'chain',
+          index,
+          reason: `引用位置「${node.ref}」不在候选位置内（确认后也点不开）`,
+        });
+      }
+    });
+  }
+
+  return {
+    errors,
+    value: {
+      ...(base.value.conclusion !== undefined ? { conclusion: base.value.conclusion } : {}),
+      chain,
+      candidates,
+      ...(base.value.unconfirmed !== undefined ? { unconfirmed: base.value.unconfirmed } : {}),
+    },
+  };
 }

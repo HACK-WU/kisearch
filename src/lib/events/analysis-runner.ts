@@ -38,6 +38,10 @@ import {
 } from '../chat/prompt-config.js';
 import { getChatTool, type ChatToolDescribe } from '../chat/mcp-tool-registry.js';
 import { serializeToolResponse } from '../chat/retrieval/tool-response.js';
+// 取图结果分流（REQ-20261123-008 B5）：与对话链路同一套判据/转换，避免两处口径漂移
+import { isToolImageResult, toImageParts, toToolImageSummary, demoteOlderImages } from '../chat/retrieval/tool-image.js';
+import { CHAT_BUDGET } from '../chat/chat-contract.js';
+import { executeGetImage } from '../asset-image.js';
 import { renderSkillLoadedBlock, USE_SKILL_TOOL_NAME } from '../chat/retrieval/tool-loop.js';
 import { getSharedOperationCoordinator } from '../operation-coordinator.js';
 import { listRegisteredDataSourceRecords } from '../datasource.js';
@@ -248,6 +252,22 @@ function rememberFinished(
     if (oldest === undefined) break;
     finishedRuns.delete(oldest);
   }
+}
+
+/**
+ * 记一次「外部来源的结论已就绪」（2026-11-23 · REQ-20261123-009 · 走查 #2）。
+ *
+ * 站内分析器收尾时写 `finishedRuns`，事件列表据此显示「分析完成」；外部上传（MCP）
+ * 根本不经过分析器，不补这条的话**列表永远看不出"有新结论"**，只有点进详情才发现。
+ * 语义与站内收尾完全一致：同一事件只保留最新一条（重新上传会覆盖）。
+ */
+export function markExternalConclusionReady(
+  scope: string,
+  eventId: string,
+  runId: string,
+  at = Date.now(),
+): void {
+  rememberFinished(runKey(scope, eventId), eventId, 'ready', runId, at);
 }
 
 /** 新一次分析开始时清掉旧记录：列表该显示「分析中」而不是上一轮的「分析完成」 */
@@ -724,6 +744,53 @@ export function buildKbReadToolEntries(
       },
     },
     {
+      /*
+       * 取图（REQ-20261123-008 B5）：与对话侧 `CHAT_MCP_TOOLS` 的 `ki_get_image` 同语义，
+       * 但这里是**独立实现**（分析域 entry 是 `run(args)`、scope 在闭包），不能直接复用
+       * chat 的 entry —— 两者的排队车道、超时、结果形状都不同。
+       *
+       * 返回判别形状 `{ kind:'images', text, images[] }`：外层在**序列化之前**分流，
+       * 字节转 image part 进 tool 消息，`response`（过程区展示 + 落盘）只留摘要。
+       */
+      name: 'ki_get_image',
+      def: {
+        type: 'function',
+        function: {
+          name: 'ki_get_image',
+          description: '查看知识库文档里图片的实际内容（像素）。参数 refs 用 ki_get_module_info 返回的 images[].ref（1~3 张，优先取 supported:true 的）。取不到时摘要会说明原因（格式不支持 / 文件缺失 / 超限）。',
+          parameters: {
+            type: 'object',
+            properties: {
+              group: { type: 'string', description: '文档所属 group 路径' },
+              refs: {
+                type: 'array',
+                items: { type: 'string' },
+                minItems: 1,
+                maxItems: 3,
+                description: 'images[].ref 原样传回，1~3 张',
+              },
+            },
+            required: ['group', 'refs'],
+          },
+        },
+      },
+      describe: (a) => ({
+        label: '查看文档图片',
+        summary: `${String(a.group ?? '')} · ${Array.isArray(a.refs) ? a.refs.length : 0} 张`,
+      }),
+      run: async (a) => {
+        const group = String(a.group ?? '');
+        const refs = Array.isArray(a.refs) ? a.refs.map((r) => String(r)) : [];
+        // allowSvg：知识库里绝大多数图是 SVG（实测 consul 1369/1370），必须服务端栅格化
+        return toRecordResult(await runScopedRead('ki_get_image', () =>
+          withTimeout(
+            executeGetImage({ scope, group, refs, allowSvg: true }),
+            TOOL_TIMEOUT.READ,
+            'ki_get_image',
+          )));
+      },
+    },
+    {
       name: 'ki_search',
       def: {
         type: 'function',
@@ -1038,13 +1105,26 @@ export async function startEventAnalysis(
     && existingDoc.draft.candidates.length > 0,
   );
   const hasManualEdits = existingDoc.draft?.editedAt !== undefined;
-  if ((hasUnhandledCandidates || hasManualEdits) && opts?.forceOverwrite !== true) {
+  /*
+   * 外部来源（2026-11-23 · REQ-20261123-009）：
+   * 正常数据下外部草稿必然命中 `hasUnhandledCandidates`（status=ready + candidates≥1），
+   * 这条独立判据是**防异常数据**（status/candidates 不符时仍能拦住），同时给前端一个
+   * 可分支的标记——文案必须说清「外部上传、覆盖不可恢复」，否则用户会以为自己跑的分析。
+   */
+  const hasExternalDraft = existingDoc.draft?.source === 'external';
+  if ((hasUnhandledCandidates || hasManualEdits || hasExternalDraft) && opts?.forceOverwrite !== true) {
     throw new GovernanceError(
       'REVISION_CONFLICT',
-      hasManualEdits
-        ? '这次分析有未处理的内容或人工修订：重新分析会覆盖结论与未确认点（已确认的代码位置不受影响），请确认后重试'
-        : '当前已有待确认的分析草稿，请先处理、丢弃或确认覆盖重新分析',
-      { ...(existingDoc.draft ? { runId: existingDoc.draft.runId } : {}), hasManualEdits },
+      hasExternalDraft
+        ? '当前结论由外部上传（MCP）：重新分析会整份覆盖且不可恢复（已确认的代码位置不受影响），请确认后重试'
+        : hasManualEdits
+          ? '这次分析有未处理的内容或人工修订：重新分析会覆盖结论与未确认点（已确认的代码位置不受影响），请确认后重试'
+          : '当前已有待确认的分析草稿，请先处理、丢弃或确认覆盖重新分析',
+      {
+        ...(existingDoc.draft ? { runId: existingDoc.draft.runId } : {}),
+        hasManualEdits,
+        hasExternalDraft,
+      },
     );
   }
 
@@ -1268,6 +1348,13 @@ async function executeAnalysisBackground(input: {
   const toolDefs: ToolDef[] = enabledEntries.map((e) => e.def);
   if (onDemandSkills.length > 0) toolDefs.push(analysisUseSkillToolDef());
 
+  /**
+   * 本次分析已消耗的图片张数（REQ-20261123-008 · B5）。
+   *
+   * 与对话链路同一个闸（`CHAT_BUDGET.maxImagesPerRun`）：分析也是一次生成，
+   * 上游无状态 ⇒ 历史图片会在**每一轮**请求里重传（token + 带宽 × 剩余轮数）。
+   */
+  let imagesUsedThisAnalysis = 0;
   const messages: ChatTurn[] = [];
   const systemParts = [
     analysisCfg.prompt.content.trim(),
@@ -1559,6 +1646,28 @@ async function executeAnalysisBackground(input: {
           continue;
         }
 
+        // ★ 图片累计闸（REQ-20261123-008 B5）：与对话链路同口径，超限直接拒并说清剩余额度
+        if (entry.name === 'ki_get_image') {
+          const want = Array.isArray(parsedArgs.refs) ? parsedArgs.refs.length : 1;
+          if (imagesUsedThisAnalysis + want > CHAT_BUDGET.maxImagesPerRun) {
+            const limitMsg = `本次分析已取图 ${imagesUsedThisAnalysis} 张，上限 ${CHAT_BUDGET.maxImagesPerRun} 张；`
+              + `剩余额度 ${Math.max(0, CHAT_BUDGET.maxImagesPerRun - imagesUsedThisAnalysis)} 张，本次要取 ${want} 张，已拒绝`;
+            const payload = serializeToolResponse({ error: limitMsg }, ANALYSIS_TOOL_RESPONSE_CHARS);
+            messages.push({ role: 'tool', tool_call_id: call.id, content: payload.text });
+            calls.push({
+              kind: 'tool',
+              name: entry.name,
+              label: '取图额度已用完',
+              ms: Math.max(0, nowFn() - t0),
+              note: limitMsg.slice(0, 80),
+              args: (call.arguments || '').slice(0, 300),
+              response: payload.text.slice(0, 2000),
+              responseChars: payload.text.length,
+            });
+            continue;
+          }
+        }
+
         const desc = entry.describe(parsedArgs);
         let resultObj: Record<string, unknown>;
         let callErr: string | undefined;
@@ -1594,11 +1703,27 @@ async function executeAnalysisBackground(input: {
           : ANALYSIS_WRITE_TOOL_NAMES.includes(entry.name)
             ? 'kb_write_result'
             : 'kb_doc';
-        const serialized = serializeToolResponse(resultObj, ANALYSIS_TOOL_RESPONSE_CHARS);
+        /*
+         * ★ 图片结果分流（REQ-20261123-008 B5）：必须在 `serializeToolResponse` **之前**把
+         * base64 抽走。否则 `JSON.stringify` 出来的字符串会撞穿 `ANALYSIS_TOOL_RESPONSE_CHARS`
+         * 被截断，截断后的 base64 不可解码 —— 模型拿到坏图，过程区也显示一堆乱码。
+         */
+        const imageResult = isToolImageResult(resultObj) ? resultObj : null;
+        const serialized = serializeToolResponse(
+          imageResult ? toToolImageSummary(imageResult) : resultObj,
+          ANALYSIS_TOOL_RESPONSE_CHARS,
+        );
+        const wrappedText = `<${tagWrap}>\n${serialized.text}\n</${tagWrap}>`;
+        if (imageResult) {
+          // 与对话链路同口径：先降级更早的图，保证任何时刻最多一条消息带图
+          demoteOlderImages(messages);
+          imagesUsedThisAnalysis += imageResult.images.length;
+        }
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: `<${tagWrap}>\n${serialized.text}\n</${tagWrap}>`,
+          // 图片以 parts 追加到**同一条** tool 消息（实测上游接受，模型确实读取其中的图）
+          content: imageResult ? toImageParts(imageResult, wrappedText) : wrappedText,
         });
         calls.push({
           kind: 'tool',

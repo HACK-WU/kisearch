@@ -25,8 +25,7 @@ import { transitionEvent } from '../src/lib/events/event-service.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { registerEventCreateTool } from '../src/lib/mcp-tools/event-create.js';
 import { registerEventDeleteTool } from '../src/lib/mcp-tools/event-delete.js';
-import { registerEventDocsTool } from '../src/lib/mcp-tools/event-docs.js';
-import { registerEventRefsTool } from '../src/lib/mcp-tools/event-refs.js';
+import { registerEventEditTool } from '../src/lib/mcp-tools/event-edit.js';
 import type { Relation } from '../src/lib/scoring.js';
 
 const scope = `mcp-event-tools-${Date.now()}`;
@@ -59,8 +58,7 @@ interface ToolResult { isError?: boolean; content: Array<{ type: string; text: s
 const server = new McpServer({ name: 'ki-event-tools-test', version: '0.0.0' });
 registerEventCreateTool(server);
 registerEventDeleteTool(server);
-registerEventDocsTool(server);
-registerEventRefsTool(server);
+registerEventEditTool(server);
 
 function tools(): Record<string, { handler: (args: unknown, extra: unknown) => Promise<ToolResult> }> {
   return (server as unknown as { _registeredTools: Record<string, { handler: (args: unknown, extra: unknown) => Promise<ToolResult> }> })
@@ -101,10 +99,10 @@ after(async () => {
 });
 
 describe('① 工具面', () => {
-  it('4 个工具都注册出来了，且都不在只读白名单', async () => {
+  it('3 个工具都注册出来了（docs/refs/set_stage 已并入 ki_event_edit），且都不在只读白名单', async () => {
     const { isReadOnlyTool } = await import('../src/lib/mcp-tools/tool-access.js');
     const names = Object.keys(tools()).sort();
-    assert.deepEqual(names, ['ki_event_create', 'ki_event_delete', 'ki_event_docs', 'ki_event_refs']);
+    assert.deepEqual(names, ['ki_event_create', 'ki_event_delete', 'ki_event_edit']);
     for (const name of names) {
       assert.equal(isReadOnlyTool(name), false, `${name} 不得进只读白名单`);
     }
@@ -143,32 +141,32 @@ describe('② ki_event_create', () => {
   });
 });
 
-describe('③ ki_event_docs', () => {
+describe('③ ki_event_edit members', () => {
   it('add → bound；remove → removed；解绑后再 remove → failed', async () => {
     const doc = seedDoc('MCP成员文档');
     const created = parse(await call('ki_event_create', { scope, title: '成员工具', type: 'et_1' }));
     const event = created.event.id as string;
 
-    const added = parse(await call('ki_event_docs', {
-      scope, event, action: 'add', docs: [{ group: GROUP, name: doc.text }],
+    const added = parse(await call('ki_event_edit', {
+      scope, event, action: 'members', docAction: 'add', docRefs: [{ group: GROUP, name: doc.text }],
     }));
     assert.equal(added.bound.length, 1);
 
-    const removed = parse(await call('ki_event_docs', {
-      scope, event, action: 'remove', docs: [{ group: GROUP, name: doc.text }],
+    const removed = parse(await call('ki_event_edit', {
+      scope, event, action: 'members', docAction: 'remove', docRefs: [{ group: GROUP, name: doc.text }],
     }));
     assert.equal(removed.removed.length, 1);
     assert.equal(removed.failed.length, 0);
 
-    const again = parse(await call('ki_event_docs', {
-      scope, event, action: 'remove', docs: [{ group: GROUP, name: doc.text }],
+    const again = parse(await call('ki_event_edit', {
+      scope, event, action: 'members', docAction: 'remove', docRefs: [{ group: GROUP, name: doc.text }],
     }));
     assert.equal(again.removed.length, 0);
     assert.equal(again.failed[0]?.code, 'DOC_NOT_FOUND');
   });
 });
 
-describe('④ ki_event_refs', () => {
+describe('④ ki_event_edit references', () => {
   it('add 与关联文档冲突 → skipped(already-associated)；add/remove 正常', async () => {
     const doc = seedDoc('引用冲突文档');
     const created = parse(await call('ki_event_create', {
@@ -176,20 +174,20 @@ describe('④ ki_event_refs', () => {
     }));
     const event = created.event.id as string;
 
-    const conflicted = parse(await call('ki_event_refs', {
-      scope, event, action: 'add', docs: [{ group: GROUP, name: doc.text }],
+    const conflicted = parse(await call('ki_event_edit', {
+      scope, event, action: 'references', docAction: 'add', docRefs: [{ group: GROUP, name: doc.text }],
     }));
     assert.equal(conflicted.added, 0);
     assert.equal(conflicted.skipped[0]?.reason, 'already-associated');
 
     const ref = seedDoc('正常引用');
-    const ok = parse(await call('ki_event_refs', {
-      scope, event, action: 'add', docs: [{ group: GROUP, name: ref.text }],
+    const ok = parse(await call('ki_event_edit', {
+      scope, event, action: 'references', docAction: 'add', docRefs: [{ group: GROUP, name: ref.text }],
     }));
     assert.equal(ok.added, 1, `参考文档应加入成功：${JSON.stringify(ok)}`);
 
-    const removed = parse(await call('ki_event_refs', {
-      scope, event, action: 'remove', docs: [{ group: GROUP, name: ref.text }],
+    const removed = parse(await call('ki_event_edit', {
+      scope, event, action: 'references', docAction: 'remove', docRefs: [{ group: GROUP, name: ref.text }],
     }));
     assert.equal(removed.removed.length, 1);
   });
@@ -273,7 +271,7 @@ describe('⑤ ki_event_delete', () => {
     assert.equal(res.isError, true);
     const body = parse(res);
     assert.equal(body.code, 'EVENT_FORCE_NOT_EMPTY');
-    assert.match(body.error, /ki_event_docs remove/);
+    assert.match(body.error, /ki_event_edit members remove/);
     assert.equal(body.details.members, 1);
   });
 

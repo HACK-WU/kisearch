@@ -16,7 +16,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 - 建前查重（`ki_event_list`），命中则挂证据不新建
 - **文档三分法**（§5）：产物挂 `docs`（改分类、随阶段）、证据挂 `refs`（不改属性）、独立知识不挂
 - 读详情（`ki_event_get`）：结论全文 / 未确认点 / 已确认位置 / 引用；`ki_event_list` 只有 120 字预览，**判断"解决了没有"必须用 get**
-- 收口（`ki_event_set_stage`）与召回（接手模块先查未收口）
+- 收口（`ki_event_edit(action=stage)`）与召回（接手模块先查未收口）
 - 降级：只读会话 / 无 scope / 无权限 / 类型重名 / 敏感信息
 - 每次上报必有一行对话回执
 
@@ -42,7 +42,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
   │                    └─ 无 → ki_event_create（docs? 产物 / refs? 证据，§5）
   └─ 例外：单点风格/命名、需用户先拍板的事 → 不建，对话说一句
 
-收尾必做：本次做完的事若对应某事件 → ki_event_set_stage 推到当前真实阶段
+收尾必做：本次做完的事若对应某事件 → ki_event_edit(action=stage) 推到当前真实阶段
 ```
 
 ---
@@ -89,7 +89,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 ① ki_event_type_list(scope)            # 首次用 / 不确定类型时；拿阶段链与 terminalAction
 ② ki_event_list(scope, q: 关键词, status: "open", limit: 10)   # 找同题（门 3）
 ③ ② 命中 → ki_event_get(event: "#N") 读详情，确认是不是同一件事
-     ├─ 同一件 → 补挂文档：产物 ki_event_docs / 证据 ki_event_refs（§5）   # 结束，不新建
+     ├─ 同一件 → 补挂文档：产物 ki_event_edit(action=members, docAction=add|remove) / 证据 ki_event_edit(action=references, docAction=add|remove)（§5）   # 结束，不新建
      └─ 不同件 → 走 ④（description 里注明「与 #N 相关但不同事」）
    ② 未命中 → 走 ④
 ④ ki_event_create(scope, title, type, description, docs?, refs?)   # 产物→docs，证据→refs（§5）
@@ -124,8 +124,8 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 
 | 工具 | 语义 | 对文档做了什么 | 典型文档 |
 |---|---|---|---|
-| `ki_event_docs` | **归属**：这份文档是这件事的产物 | 分类改成 `event`，可见性随阶段走 | debug 报告 / 需求报告 / 设计 / 复盘 / 验收报告 |
-| `ki_event_refs` | **引用**：这件事用得上这份已有知识 | 零改动，保持原分类与原档位 | 库里既有的背景文档、外部依据 |
+| `ki_event_edit(action=members, docAction=add|remove)` | **归属**：这份文档是这件事的产物 | 分类改成 `event`，可见性随阶段走 | debug 报告 / 需求报告 / 设计 / 复盘 / 验收报告 |
+| `ki_event_edit(action=references, docAction=add|remove)` | **引用**：这件事用得上这份已有知识 | 零改动，保持原分类与原档位 | 库里既有的背景文档、外部依据 |
 
 判据一句话：**「这件事收口之后，这份文档还有独立存在的意义吗？」** 没有 → 它是产物，挂 `docs`；有 → 它是引用，挂 `refs`。
 
@@ -139,7 +139,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 
 ### 同一篇不能既 `docs` 又 `refs`
 
-`ki_event_refs` 会拒与关联文档冲突的项（`REF_ALREADY_ASSOCIATED`）。要升级（refs → docs）就先 `ki_event_refs(action="remove")`，再 `ki_event_docs(action="add")`。
+`ki_event_edit(action=references, docAction=add|remove)` 会拒与关联文档冲突的项（`REF_ALREADY_ASSOCIATED`）。要升级（refs → docs）就先 `ki_event_edit(action="references", docAction="remove")`，再 `ki_event_edit(action="members", docAction="add")`。
 
 ### 成篇的产物文档走 `ki-upload`
 
@@ -152,9 +152,9 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 
 ```
 已有未收口事件（先用 ki_event_get 确认是不是同一件事，别只看标题）
-  ├─ 有产物文档    → ki_event_docs(action="add", event="#N", docs: [...])   # 改分类、随阶段（§5）
-  ├─ 有引用文档    → ki_event_refs(action="add", event="#N", docs: [...])   # 零改动（§5）
-  ├─ 阶段已推进    → ki_event_set_stage(event="#N", stage: "<下一阶段>", note: "<一句依据>")   # 推进一步，不跳阶
+  ├─ 有产物文档    → ki_event_edit(action="members", docAction="add", event="#N", docRefs=[...])   # 改分类、随阶段（§5）
+  ├─ 有引用文档    → ki_event_edit(action="references", docAction="add", event="#N", docRefs=[...])   # 零改动（§5）
+  ├─ 阶段已推进    → ki_event_edit(action="stage", event="#N", stage: "<下一阶段>", note: "<一句依据>")   # 推进一步，不跳阶
   └─ 发现判断错了  → 不要静默删；告知用户后按需 ki_event_delete（须事件已收口）
 回执：📮 已在 #37 跟踪，已补 1 篇证据
 ```
@@ -278,11 +278,11 @@ ki_event_list(scope, q: "<模块名>", status: "open", limit: 10)
 | 🔴 6 | 事件建到非目标 scope、或猜 scope 名 |
 | 🔴 7 | 静默写库、无对话回执 |
 | 🔴 8 | 上报后接管该问题，把当前任务丢了 |
-| 🔴 9 | 已修复却不 `ki_event_set_stage`（事件页停在中间阶段） |
+| 🔴 9 | 已修复却不 `ki_event_edit(action=stage)`（事件页停在中间阶段） |
 | 🔴 10 | 类型 / 阶段拿不准就建（类型不可改） |
 | 🔴 11 | 只读会话下反复重试上报 |
 | 🔴 12 | 在本 skill 里写死某个项目的源码路径、模块名或事件编号 |
-| 🔴 13 | **用 `force` 删除代替收口**——`force` 只服务"清理测试 / 废弃的空事件"；本次做完的事必须 `ki_event_set_stage` 推进，删掉不等于完成（事件页要能反映真实进度） |
+| 🔴 13 | **用 `force` 删除代替收口**——`force` 只服务"清理测试 / 废弃的空事件"；本次做完的事必须 `ki_event_edit(action=stage)` 推进，删掉不等于完成（事件页要能反映真实进度） |
 | 🔴 14 | 把产物文档留到推终态之后再挂（`EVENT_CLOSED`）；顺序必须是「先挂 docs，再推终态」 |
 
 ---

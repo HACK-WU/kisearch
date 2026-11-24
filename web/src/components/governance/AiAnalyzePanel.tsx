@@ -114,7 +114,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
     onUpdatedRef.current(next);
     if (resetPicked && next.draft) {
       setPicked(new Set(
-        next.draft.candidates.filter((c) => shouldDefaultCheckCandidate(c.confidence)).map((c) => c.id),
+        (next.draft.candidates ?? []).filter((c) => shouldDefaultCheckCandidate(c.confidence)).map((c) => c.id),
       ));
     }
   }, []);
@@ -277,18 +277,22 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
    */
   const roundCount = steps.filter((st) => st.name.startsWith('round-')).length;
   const callCount = steps.reduce((n, s) => n + (s.calls?.length ?? 0), 0);
-  const elapsedSec = ((draft?.stats.ms ?? 0) / 1000).toFixed(1);
+  const elapsedSec = ((draft?.stats?.ms ?? 0) / 1000).toFixed(1);
   const settingsFirst = shouldOpenAiSettingsForError(startError?.code ?? draft?.errorCode);
   const canceled = draft?.errorCode === 'ANALYSIS_CANCELED';
+  /** 外部上传（2026-11-23 · REQ-20261123-009）：没有分析过程，文案不能再落在「分析完成 / 未定位到」 */
+  const isExternal = draft?.source === 'external';
   const procTitle = starting || isRunning
     ? '正在分析关联文档与仓库源码…'
-    : canceled
-      ? (candidates.length > 0 ? `分析已停止 · 保留 ${candidates.length} 处候选` : '分析已停止')
-      : draft?.status === 'failed'
-        ? '分析未完成'
-        : candidates.length > 0
-          ? `分析完成 · 找到 ${candidates.length} 处候选`
-          : '分析完成 · 未定位到候选位置';
+    : isExternal
+      ? '外部上传 · 无分析过程'
+      : canceled
+        ? (candidates.length > 0 ? `分析已停止 · 保留 ${candidates.length} 处候选` : '分析已停止')
+        : draft?.status === 'failed'
+          ? '分析未完成'
+          : candidates.length > 0
+            ? `分析完成 · 找到 ${candidates.length} 处候选`
+            : '分析完成 · 未定位到候选位置';
 
   /**
    * 能否「继续分析」（2026-11-20）：后端 stat 断点文件得出，不能靠 status 猜 ——
@@ -342,7 +346,11 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
 
       {overwritePrompt ? (
         <div className="gov-ai-error">
-          <span>已有一次未处理的分析结果，重新分析会覆盖它（已确认的代码位置不受影响），是否继续？</span>
+          <span>
+            {isExternal
+              ? '当前结论由外部上传（MCP）：重新分析会整份覆盖且不可恢复（已确认的代码位置不受影响），是否继续？'
+              : '已有一次未处理的分析结果，重新分析会覆盖它（已确认的代码位置不受影响），是否继续？'}
+          </span>
           <div className="gov-ai-error__actions">
             <button type="button" className="gov-btn gov-btn--ghost gov-btn--sm" onClick={() => setOverwritePrompt(false)}>
               取消
@@ -356,7 +364,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                 void triggerStart(true);
               }}
             >
-              覆盖并重新分析
+              {isExternal ? '覆盖外部结论并重新分析' : '覆盖并重新分析'}
             </button>
           </div>
         </div>
@@ -376,7 +384,9 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
             <span className="gov-ai-proc__time">
               {isRunning
                 ? `已跑 ${steps.length} 步`
-                : `${steps.length} 步 · ${callCount} 次调用 · ${elapsedSec}s`}
+                : isExternal
+                  ? '无分析过程'
+                  : `${steps.length} 步 · ${callCount} 次调用 · ${elapsedSec}s`}
             </span>
             {!stick && isRunning ? <span className="gov-ai-proc__badge">有新步骤</span> : null}
             <span className="gov-ai-proc__toggle">
@@ -527,7 +537,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                   <div className="gov-ai-final__meta">
                     定位到 {candidates.length} 处候选
                     {pendingCandidates.length > 0 ? ` · 待确认 ${pendingCandidates.length} 处` : ' · 已全部确认'}
-                    {(draft?.unconfirmed.length ?? 0) > 0 ? ` · 未确认点 ${draft?.unconfirmed.length} 项` : ''}
+                    {(draft?.unconfirmed?.length ?? 0) > 0 ? ` · 未确认点 ${draft?.unconfirmed?.length ?? 0} 项` : ''}
                   </div>
                 </div>
               ) : null}
@@ -602,7 +612,13 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
           {isRunning
             ? '只读分析 · 可随时停止（已完成的步骤会保留）'
             : draft
-              ? `${draft.stats.turns} 轮工具调用 · 读取 ${draft.stats.filesRead} 个文件${confirmed.length ? ` · 已确认 ${confirmed.length} 处` : ''}`
+              ? isExternal
+                /*
+                 * 外部上传的候选位置**已直接写进 confirmed**（不再有待确认），
+                 * 所以这里只能报确认数；原来的「N 处候选待确认」是永远不成立的死分支。
+                 */
+                ? `外部上传${confirmed.length ? ` · 已确认 ${confirmed.length} 处` : ' · 无分析过程'}`
+                : `${draft.stats?.turns ?? 0} 轮工具调用 · 读取 ${draft.stats?.filesRead ?? 0} 个文件${confirmed.length ? ` · 已确认 ${confirmed.length} 处` : ''}`
               : '尚未开始'}
         </span>
         <span style={{ flex: 1 }} />

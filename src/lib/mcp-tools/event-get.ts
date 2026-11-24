@@ -60,11 +60,14 @@ export function registerEventGetTool(server: McpServer): void {
           ...detail,
           hint: [
             '成员与引用每条都带 (scope, group, name) 三元组，取正文直接调 ki_get_module_info，不要只按名字猜 group',
+            // 事件本身不含文档正文（只有成员/引用的三元组），图片清单挂在正文读取工具上；
+            // 在事件侧再算一遍会缺 group 锚点，属误导，故这里只做引导
+            '成员/参考文档里的图片不在本工具返回：先用 ki_get_module_info 读出该文档，其返回体的 images 给出清单与 ref，再调 ki_get_image 取图',
             'refs 的 visibility 指「被引文档自身」的档位（它可能绑在另一个未收口事件上而收窄），不是引用关系本身的可见性',
             '已确认位置与候选的 file 是相对 analysis.targetDir 的路径，两者一起才定位得到代码',
             detail.event.closed
               ? '事件已收口：不再接受流转（需在页面重新打开）；要追加文档请另建事件'
-              : '推进阶段用 ki_event_set_stage；挂证据用 ki_event_refs（不改文档可见性），不要用 ki_event_docs 挂分析材料',
+              : '推进阶段用 ki_event_edit stage；挂证据用 ki_event_edit references（不改文档可见性），不要用 ki_event_edit members 挂分析材料',
           ].join('；'),
         };
 

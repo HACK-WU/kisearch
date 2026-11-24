@@ -28,9 +28,9 @@
 | `ki_event_list` | — | `status`(open/closed/all) / `type` / `q` / `limit`≤100 / `offset` / `docs_preview_limit`≤10 / `locations_preview_limit`≤10 | 只读 |
 | `ki_event_get` | `event` | `members_limit` / `refs_limit` / `logs_limit` / `locations_limit` / `location_snippet_limit`（均 0 = 不返回该块） | 只读；**list 用来找，get 用来读**。返回描述全文、结论全文、未确认点、已确认位置、文档三元组（scope+group+name，可直接 `ki_get_module_info` 取正文）；过程与候选正文不返回 |
 | `ki_event_create` | `title` / `type` | `description`≤4000 / `stage` / `docs`≤50 / `refs`≤50 | 写事件 + 阶段日志（`by: 'ai'`） |
-| `ki_event_set_stage` | `event` / `stage` | `note` | 唯一的状态写工具；到终态按 `terminalAction` 处理成员文档 |
-| `ki_event_docs` | `event` / `action` / `docs` | `docs`≤50 | **add 会把文档分类改为 `event`，可见性随阶段走**；只用于产物文档，且必须在推终态之前 |
-| `ki_event_refs` | `event` / `action` / `docs` | `docs`≤50 | 只建引用；与关联文档冲突的项会被拒 |
+| `ki_event_edit(action=stage)` | `event` / `stage` | `note` | 唯一的状态写工具；到终态按 `terminalAction` 处理成员文档 |
+| `ki_event_edit(action=members)` | `event` / `action` / `docs` | `docs`≤50 | **add 会把文档分类改为 `event`，可见性随阶段走**；只用于产物文档，且必须在推终态之前 |
+| `ki_event_edit(action=references)` | `event` / `action` / `docs` | `docs`≤50 | 只建引用；与关联文档冲突的项会被拒 |
 | `ki_event_delete` | `event` / `doc_action` | `doc_action`: `wiki` \| `trash`；`force` + `confirm_title`（仅**无关联文档**的事件） | **事件须已收口**；清理测试空事件可 `force` + 标题逐字一致；有成员文档时拒绝（先解绑或先收口） |
 
 - `event` 两种写法都行：事件 id（`evt_…`）或 `#shortId`（如 `#37`）。
@@ -54,7 +54,7 @@
 | `REF_LIMIT_EXCEEDED` | refs > 50 | 同上 |
 | `EVENT_FORCE_CONFIRM_REQUIRED` | 传了 `force` 但没带 `confirm_title` | 按报错回显的标题原样传 |
 | `EVENT_FORCE_CONFIRM_MISMATCH` | `confirm_title` 与标题不一致（一条都没删） | 用报错里的真实标题重试 |
-| `EVENT_FORCE_NOT_EMPTY` | 事件还有关联文档，`force` 不适用 | 先 `ki_event_docs remove` 解绑，或走正常收口 |
+| `EVENT_FORCE_NOT_EMPTY` | 事件还有关联文档，`force` 不适用 | 先 `ki_event_edit(action=members) + docAction=remove` 解绑，或走正常收口 |
 | 403 权限 | 无 `knowledge.write` | 明确告知，不绕过 |
 | 工具不存在 | 只读会话（写工具不注册） | 列"应上报项"，不重试 |
 
@@ -84,7 +84,7 @@
 ```
 ① ki_event_list(status: "open", limit: 100)
 ② 逐条对照真实工作状态（项目台账 / git log / 报告目录）
-③ 已完成 → ki_event_set_stage 推到终态（先看 terminalAction 是否是 trash）
+③ 已完成 → ki_event_edit(action=stage) 推到终态（先看 terminalAction 是否是 trash）
 ④ 已废弃 → 在 description 补一句原因 + 推到终态说明"不做"；不静默删
 ⑤ 长期停在同一阶段 → 要么推进一步，要么写清"暂缓原因"
 ⑥ 清账后回一行：本次推进 N 条、发现状态失真 M 条

@@ -12,6 +12,15 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
   // 读工具（10）
   ki_search: 'knowledge.read',
   ki_get_module_info: 'knowledge.read',
+  /**
+   * 取图（REQ-20261123-008）：读 KB 里的图片字节，与读正文同档。
+   *
+   * ⚠️ 本表是**默认拒绝**白名单：新增工具漏登记 ⇒ `canUseTool` 恒 false ⇒
+   *    工具被 `tool-loop` 静默过滤，模型只会说"我没有这个工具"，不会报错。
+   *    新增 chat 工具必须同步 5 处：`CHAT_MCP_TOOLS`、`MCP_TOOL_GROUPS`、
+   *    `READ_ONLY_TOOL_NAMES`、本表、`operation-coordinator::READ_MCP_TOOLS`。
+   */
+  ki_get_image: 'knowledge.read',
   ki_group_list: 'knowledge.read',
   ki_scope_list: 'knowledge.read',
   ki_view_list: 'knowledge.read',
@@ -38,13 +47,12 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
   ki_edit_relation: 'knowledge.write',
   ki_group_create: 'knowledge.write',
   ki_delete_relation: 'knowledge.write',
-  ki_event_set_stage: 'knowledge.write',
   ki_group_delete_empty: 'knowledge.write',
-  // 事件 CRUD 与两类文档增删（REQ-20261116-004）
+  // 事件 CRUD 与文档/阶段编辑（REQ-20261116-004；2026-11-23 三个工具合并为 ki_event_edit）
   ki_event_create: 'knowledge.write',
   ki_event_delete: 'knowledge.write',
-  ki_event_docs: 'knowledge.write',
-  ki_event_refs: 'knowledge.write',
+  /** 事件编辑（REQ-20261123-009）：描述 / 结论上传 / 关联文档 / 参考文档 / 阶段，单值 action */
+  ki_event_edit: 'knowledge.write',
 };
 
 export const ALL_TOOL_NAMES: readonly string[] = Object.keys(TOOL_CAPABILITIES);
