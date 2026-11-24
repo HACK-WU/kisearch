@@ -200,6 +200,14 @@ export const GOVERNANCE_CODE_NUMBERS = {
    * 这里只保证它不被当成 `ANALYSIS_ASK_TIMEOUT` 显示成"回答超时，请重试"。
    */
   ANALYSIS_ASK_CANCELED: 1627,
+  /**
+   * 事件「预期效果」超长（2026-11-24）。
+   *
+   * 不与 `EVENT_DESCRIPTION_TOO_LONG`(1612) 共用：报错文案会把字段名写进去
+   * （「事件描述不得超过 4000 字」），共用会让用户在他填的是预期效果时看到「事件描述」，
+   * 以为系统记错了字段。
+   */
+  EVENT_EXPECTED_EFFECT_TOO_LONG: 1628,
 
   // ── 治理读路径视图聚合（REQ-20261120-001，1700-1799）──
   // ⚠ 不得塞进 1500-1599：契约测试断言「15xx 只放传输层错误」，

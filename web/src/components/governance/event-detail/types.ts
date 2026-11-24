@@ -53,6 +53,11 @@ export interface EventSummaryCardProps {
   busy: boolean;
   delConfirm: boolean;
   descEdit: { open: boolean; draft: string; saving: boolean };
+  /**
+   * 「预期效果」内联编辑态（2026-11-24）：形状与 `descEdit` 完全同构，
+   * 但**各自独立** —— 一个区域在编辑不影响另一个，保存也只提交自己那一栏。
+   */
+  expectEdit: { open: boolean; draft: string; saving: boolean };
   /** 阶段线 + 可见性提示条（页面渲染） */
   stageSlot?: ReactNode;
   /** C-15：未分析态入口引导（`draft === null && confirmed.length === 0`） */
@@ -67,6 +72,10 @@ export interface EventSummaryCardProps {
   onDescChange: (value: string) => void;
   onDescSave: () => void;
   onDescCancel: () => void;
+  onExpectEdit: () => void;
+  onExpectChange: (value: string) => void;
+  onExpectSave: () => void;
+  onExpectCancel: () => void;
 }
 
 export interface EventDocsCardProps {

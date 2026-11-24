@@ -36,6 +36,7 @@ import { removeAskFile } from './analysis-ask-store.js';
 import { getType, listTypes, resolveStageVisibility } from './type-service.js';
 import {
   EVENT_DESCRIPTION_MAX_CHARS,
+  EVENT_EXPECTED_EFFECT_MAX_CHARS,
   type EventRecord,
   type EventTypeRecord,
   type Visibility,
@@ -197,6 +198,8 @@ export interface CreateEventInput {
   title: string;
   /** 可选事件描述（REQ-20261113-003 · S-03） */
   description?: string;
+  /** 可选预期效果（2026-11-24）：修好之后应当看到什么 */
+  expectedEffect?: string;
   typeId: string;
   /**
    * 起始阶段 key（可选，缺省 = 首阶段）。
@@ -244,6 +247,26 @@ function normalizeEventDescription(raw: string | undefined): string | undefined 
   return trimmed || undefined;
 }
 
+/**
+ * 「预期效果」归一（2026-11-24）：与描述完全同构 —— `undefined` 保持「不改」，
+ * 超长抛自己的错误码（复用描述的错误码会让提示说「事件描述不得超过」，对象说错），
+ * `trim` 后为空串返回 `undefined`（= 清除）。
+ *
+ * 刻意不抽公共函数：两处只差常量与错误码，抽出去要传三个参数、还要把
+ * `GovernanceError` 的 code 放宽成 string，得不偿失。三处以上再抽。
+ */
+function normalizeExpectedEffect(raw: string | undefined): string | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (trimmed.length > EVENT_EXPECTED_EFFECT_MAX_CHARS) {
+    throw new GovernanceError(
+      'EVENT_EXPECTED_EFFECT_TOO_LONG',
+      `预期效果不得超过 ${EVENT_EXPECTED_EFFECT_MAX_CHARS} 字，实际 ${trimmed.length} 字`,
+    );
+  }
+  return trimmed || undefined;
+}
+
 /** 兼容入口：只要事件记录（既有测试与内部调用大量依赖这个形状） */
 export async function createEvent(scope: string, input: CreateEventInput): Promise<EventRecord> {
   return (await createEventWithBinding(scope, input)).event;
@@ -264,6 +287,7 @@ export async function createEventWithBinding(
     const title = input.title?.trim();
     if (!title) throw new GovernanceError('EVENT_NOT_FOUND', '事件标题不能为空');
     const description = normalizeEventDescription(input.description);
+    const expectedEffect = normalizeExpectedEffect(input.expectedEffect);
     const type = getType(scope, input.typeId);
     if (!type) {
       throw new GovernanceError('TYPE_NOT_FOUND', `事件类型「${input.typeId}」不存在`, {
@@ -318,6 +342,7 @@ export async function createEventWithBinding(
       scope,
       title,
       ...(description !== undefined ? { description } : {}),
+      ...(expectedEffect !== undefined ? { expectedEffect } : {}),
       typeId: type.id,
       stageKey: startStage.key,
       stageIndex: startIndex,
@@ -406,7 +431,7 @@ export async function createEventWithBinding(
 export async function updateEvent(
   scope: string,
   eventRef: string,
-  patch: { title?: string; description?: string; revision: number },
+  patch: { title?: string; description?: string; expectedEffect?: string; revision: number },
 ): Promise<EventRecord> {
   return withScopeWriteLock(scope, 'event-update', async () => {
     const event = mustFindEvent(scope, eventRef);
@@ -417,6 +442,14 @@ export async function updateEvent(
     const nextDesc = patch.description !== undefined
       ? normalizeEventDescription(patch.description)
       : event.description;
+    /*
+     * 三态与描述**必须逐字一致**（2026-11-24）：`undefined` = 不改 / 空串 = 清除 / 有值 = 写入。
+     * 不要照抄上面 title 的 `trim() || event.title`（那是「空串保原值」语义）—— 抄过来
+     * 用户就会清不掉预期效果：删空保存后刷新又回来了。
+     */
+    const nextExpected = patch.expectedEffect !== undefined
+      ? normalizeExpectedEffect(patch.expectedEffect)
+      : event.expectedEffect;
     const next: EventRecord = {
       ...event,
       title: nextTitle,
@@ -425,6 +458,8 @@ export async function updateEvent(
     };
     if (nextDesc !== undefined) next.description = nextDesc;
     else delete next.description;
+    if (nextExpected !== undefined) next.expectedEffect = nextExpected;
+    else delete next.expectedEffect;
     writeEvent(scope, next);
     return next;
   });

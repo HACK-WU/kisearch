@@ -11,13 +11,16 @@ import type { EventSummaryCardProps } from './types';
  * - 描述并入本卡（C-06），编辑态由父级 `descEdit` 承载（C-12：输入不丢焦点）。
  * - 未分析时给一行入口引导（C-15）——现状那句引导在「代码位置」空态里，改版后该段并入分析卡会消失。
  * - 描述编辑框高度随内容自适应（2026-11-24 用户反馈：读态整段展开，点「编辑」后塌成 4 行看不全）。
+ * - 「预期效果」区块（2026-11-24）与描述**结构同构**，编辑态由父级 `expectEdit` 承载：
+ *   两区各自独立（可同时开着）、各自提交（保存一栏不携带另一栏的字段）。
  */
 export function EventSummaryCard(props: EventSummaryCardProps) {
   const {
     event, typeName, stageName, memberCount, refCount, closed, pinned, canWrite, busy, delConfirm,
-    descEdit, stageSlot, showAnalyzeGuide,
+    descEdit, expectEdit, stageSlot, showAnalyzeGuide,
     onAnalyze, onTogglePin, onReopen, onDelete, onTransition,
     onDescEdit, onDescChange, onDescSave, onDescCancel,
+    onExpectEdit, onExpectChange, onExpectSave, onExpectCancel,
   } = props;
 
   const readOnlyTitle = canWrite ? undefined : '只读账号无法修改事件';
@@ -66,6 +69,42 @@ export function EventSummaryCard(props: EventSummaryCardProps) {
   useLayoutEffect(() => {
     if (descEdit.open) syncDescHeight();
   }, [descEdit.open, descEdit.draft, syncDescHeight]);
+
+  /**
+   * 「预期效果」编辑框高度跟随内容（2026-11-24）：与上面那套**逐行同构**，刻意复制而不抽 hook。
+   *
+   * 为什么不抽：`web/test/event-desc-edit-grow.test.mjs` 用正则逐字锁住了描述那套实现
+   * （先归零、补边框差、ResizeObserver 只比宽度），抽 hook 等于把已锁定的实现搬走，
+   * 只能改测试来适配 —— 那会让「编辑态塌成 4 行」这条历史缺陷失去原有守卫。
+   * 两处重复 25 行换两条独立可断言的守卫，划算；出现第三处时再抽。
+   */
+  const expectRef = useRef<HTMLTextAreaElement | null>(null);
+  const expectRoRef = useRef<ResizeObserver | null>(null);
+  const syncExpectHeight = useCallback(() => {
+    const ta = expectRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight + (ta.offsetHeight - ta.clientHeight)}px`;
+  }, []);
+  const bindExpect = useCallback((el: HTMLTextAreaElement | null) => {
+    expectRoRef.current?.disconnect();
+    expectRoRef.current = null;
+    expectRef.current = el;
+    if (!el) return;
+    syncExpectHeight();
+    if (typeof ResizeObserver === 'undefined') return;
+    let lastWidth = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === lastWidth) return;
+      lastWidth = el.clientWidth;
+      syncExpectHeight();
+    });
+    ro.observe(el);
+    expectRoRef.current = ro;
+  }, [syncExpectHeight]);
+  useLayoutEffect(() => {
+    if (expectEdit.open) syncExpectHeight();
+  }, [expectEdit.open, expectEdit.draft, syncExpectHeight]);
 
   return (
     <section className="gov-dcard gov-dcard--summary">
@@ -187,6 +226,49 @@ export function EventSummaryCard(props: EventSummaryCardProps) {
             <p className="gov-desc-text">{event.description}</p>
           ) : (
             <div className="gov-cell-muted">暂无描述 —— 补充现象与报错原文能明显提升 AI 分析的准确度</div>
+          )}
+        </div>
+
+        {/*
+          预期效果（2026-11-24）：与上方描述块**结构完全同构**（复用 `.gov-summary__desc` 的虚线分隔、
+          `.gov-desc-text` 的读态块、`.gov-textarea--fit` 的编辑框、`.gov-desc-edit__foot` 的按钮行），
+          因此两段自然形成「描述 ┄ 预期效果」两个视觉分区，样式零新增。
+          语义分工由 hint 与空态文案划开：描述装现象与证据，这里装修好之后应当看到什么。
+        */}
+        <div className="gov-summary__desc">
+          <div className="gov-summary__desc-head">
+            <span className="gov-summary__desc-title">预期效果</span>
+            <span className="gov-dcard__hint">会进入 AI 分析上下文</span>
+            <span style={{ flex: 1 }} />
+            {expectEdit.open ? null : (
+              <button type="button" className="gov-btn gov-btn--ghost gov-btn--sm" disabled={busy || !canWrite} title={readOnlyTitle} onClick={onExpectEdit}>
+                编辑
+              </button>
+            )}
+          </div>
+          {expectEdit.open ? (
+            <div className="gov-desc-edit">
+              <textarea
+                className="gov-textarea gov-textarea--fit"
+                rows={4}
+                maxLength={4000}
+                placeholder="修好之后应当看到什么、怎么算收口…"
+                value={expectEdit.draft}
+                autoFocus
+                ref={bindExpect}
+                onChange={(e) => onExpectChange(e.target.value)}
+              />
+              <div className="gov-desc-edit__foot">
+                <span className="gov-hint">{expectEdit.draft.trim().length} / 4000</span>
+                <span style={{ flex: 1 }} />
+                <button type="button" className="gov-btn gov-btn--sm" onClick={onExpectCancel}>取消</button>
+                <button type="button" className="gov-btn gov-btn--sm gov-btn--primary" disabled={busy || expectEdit.saving} onClick={onExpectSave}>保存</button>
+              </div>
+            </div>
+          ) : event.expectedEffect?.trim() ? (
+            <p className="gov-desc-text">{event.expectedEffect}</p>
+          ) : (
+            <div className="gov-cell-muted">暂无预期效果 —— 补充可核验的预期结果，收口时可对照</div>
           )}
         </div>
 

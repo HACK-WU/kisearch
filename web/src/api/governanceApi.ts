@@ -214,6 +214,8 @@ export interface EventView {
   shortId: number;
   title: string;
   description?: string;
+  /** 预期效果（2026-11-24）：修好之后应当看到什么 */
+  expectedEffect?: string;
   typeId: string;
   typeName?: string | null;
   /** 视图模式下：事件所属库（详情 / refs / analysis 都靠它定位） */
@@ -276,6 +278,7 @@ export function createEvent(
   args: {
     title: string;
     description?: string;
+    expectedEffect?: string;
     typeId: string;
     stageKey?: string;
     docs?: Array<{ group: string; name: string }>;
@@ -347,7 +350,8 @@ export function removeMember(
 export function updateEvent(
   scope: string,
   eventId: string,
-  patch: { title?: string; description?: string; revision: number },
+  /** `expectedEffect`：`undefined` = 不改 / 空串 = 清除（与 description 同一套三态） */
+  patch: { title?: string; description?: string; expectedEffect?: string; revision: number },
 ): Promise<{ ok: true; event: EventView }> {
   return req(`/api/governance/events/${encodeURIComponent(eventId)}`, {
     method: 'PATCH',

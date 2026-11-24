@@ -366,6 +366,15 @@ export function EventsPage(): JSX.Element {
     saving: false,
   });
   /**
+   * 「预期效果」内联编辑态（2026-11-24）：与描述各自独立（可同时开着、各自保存），
+   * 不复用同一个 state —— 合并会让「保存描述」顺手提交预期效果的草稿。
+   */
+  const [expectEdit, setExpectEdit] = useState<{ open: boolean; draft: string; saving: boolean }>({
+    open: false,
+    draft: '',
+    saving: false,
+  });
+  /**
    * 点开正文的文档（关联文档 / 参考文档）。null = 未打开。
    * 复用浏览页的 `ModuleDrawer`（抽屉态，S-07 §3.3「文档抽屉直接复用 ModuleDrawer」），
    * 不新造一个只读弹窗 —— 用户在这里看到的阅读器与浏览页一致（大纲 / 文档内查找 / 全屏）。
@@ -743,6 +752,8 @@ export function EventsPage(): JSX.Element {
   useEffect(() => {
     setDelConfirm(false);
     setDescEdit({ open: false, draft: '', saving: false });
+    // 切事件必须一起清：否则 A 的预期效果草稿会挂到 B 的编辑框里（两区各自独立，漏一个就串数据）
+    setExpectEdit({ open: false, draft: '', saving: false });
     if (activeId) void loadDetail(activeId);
     else { setDetail(null); setRefs([]); }
   }, [activeId, loadDetail]);
@@ -1664,6 +1675,7 @@ export function EventsPage(): JSX.Element {
                   busy={busy}
                   delConfirm={delConfirm}
                   descEdit={descEdit}
+                  expectEdit={expectEdit}
                   showAnalyzeGuide={!activeAnalysis?.draft && (activeAnalysis?.confirmed.length ?? 0) === 0}
                   stageSlot={(
                     <>
@@ -1730,6 +1742,21 @@ export function EventsPage(): JSX.Element {
                     }).finally(() => setDescEdit((s2) => (s2.open ? { ...s2, saving: false } : s2)));
                   }}
                   onDescCancel={() => setDescEdit({ open: false, draft: '', saving: false })}
+                  /*
+                   * 预期效果：与描述同构，但**各自提交**（不带 description 字段 ——
+                   * 带上会把用户此刻没在编辑的那一栏一起覆盖掉）。
+                   */
+                  onExpectEdit={() => setExpectEdit({ open: true, draft: active.expectedEffect ?? '', saving: false })}
+                  onExpectChange={(v) => setExpectEdit((s2) => ({ ...s2, draft: v }))}
+                  onExpectSave={() => {
+                    setExpectEdit((s2) => ({ ...s2, saving: true }));
+                    void run(async () => {
+                      await updateEvent(eventScope, active.id, { expectedEffect: expectEdit.draft, revision: active.revision });
+                      setExpectEdit({ open: false, draft: '', saving: false });
+                      return '已更新预期效果';
+                    }).finally(() => setExpectEdit((s2) => (s2.open ? { ...s2, saving: false } : s2)));
+                  }}
+                  onExpectCancel={() => setExpectEdit({ open: false, draft: '', saving: false })}
                 />
 
                 {/* AI 分析（默认不渲染：无草稿且无已确认位置时整卡不出现） */}

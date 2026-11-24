@@ -12,6 +12,7 @@ const LABELS: Record<string, string> = {
   members: '关联文档',
   refs: '参考文档',
   hasDescription: '事件描述',
+  hasExpectedEffect: '预期效果',
   calls: '工具调用',
   filesRead: '已读文件',
   newReads: '本轮新读',
@@ -37,6 +38,7 @@ const LABELS: Record<string, string> = {
 
 const VALUE_TEXT: Record<string, Record<string, string>> = {
   hasDescription: { yes: '有', no: '无' },
+  hasExpectedEffect: { yes: '有', no: '无' },
 };
 
 function valueText(key: string, value: unknown): string {

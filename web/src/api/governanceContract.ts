@@ -74,6 +74,8 @@ export interface EventListItem {
   scope: string;
   title: string;
   description?: string;
+  /** 预期效果（2026-11-24）：修好之后应当看到什么；空串不落盘，未填即缺省 */
+  expectedEffect?: string;
   typeId: string;
   /** 类型名；类型被删除时为 null */
   typeName: string | null;
@@ -731,6 +733,8 @@ export interface EventDetailEventDto {
   shortId: string;
   title: string;
   description: string | null;
+  /** 预期效果（2026-11-24）；null = 未填。必填（不用 `?`）：构造处漏写要让 tsc 报错 */
+  expectedEffect: string | null;
   closed: boolean;
   closedAt: number | null;
   /** 置顶时间；null = 未置顶 */

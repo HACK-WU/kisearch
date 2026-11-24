@@ -54,19 +54,28 @@ const CandidateInput = z.object({
   confidence: z.number().min(0).max(1).optional().describe('0~1；缺省 0.5'),
 });
 
-type Action = 'description' | 'analysis' | 'members' | 'references' | 'stage';
+/**
+ * 单值 action（2026-11-24 增 `expectedEffect`）。
+ *
+ * `expectedEffect` 与 `description` 是两个**独立的 action** 而不是合成一个「写正文类」：
+ * 两者都想改时调两次，符合本工具「一次只做一类、字段不匹配即报错」的既有纪律 ——
+ * 合并会让「只想改预期效果」的调用意外把描述清掉的风险出现（反之亦然）。
+ */
+type Action = 'description' | 'expectedEffect' | 'analysis' | 'members' | 'references' | 'stage';
 
 /** 每个 action 允许出现的字段（其余字段传了即报错，防"看起来都对但其实没生效"） */
 const ALLOWED_FIELDS: Record<Action, readonly string[]> = {
   description: ['description'],
+  expectedEffect: ['expectedEffect'],
   analysis: ['conclusion', 'chain', 'candidates', 'unconfirmed', 'dataFlow', 'targetDir', 'overwrite', 'skipInvalidCandidates', 'expectedRunId'],
   members: ['docRefs', 'docAction'],
   references: ['docRefs', 'docAction'],
   stage: ['stage', 'note'],
 };
 
+/** ⚠ 白名单：不登记在这里的字段，调用时会被 `assertActionShape` 直接判成调用方式错误 */
 const KNOWN_FIELDS = [
-  'description', 'conclusion', 'chain', 'candidates', 'unconfirmed', 'dataFlow', 'targetDir',
+  'description', 'expectedEffect', 'conclusion', 'chain', 'candidates', 'unconfirmed', 'dataFlow', 'targetDir',
   'overwrite', 'skipInvalidCandidates', 'expectedRunId', 'docRefs', 'docAction', 'stage', 'note',
 ] as const;
 
@@ -75,6 +84,8 @@ type EditArgs = {
   event: string;
   action: Action;
   description?: string;
+  /** 「预期效果」正文（action=expectedEffect 必填，≤4000 字） */
+  expectedEffect?: string;
   conclusion?: string;
   chain?: unknown[];
   candidates?: unknown[];
@@ -114,6 +125,15 @@ function assertActionShape(args: EditArgs): void {
   switch (args.action) {
     case 'description':
       if (!args.description || !args.description.trim()) badArgs('action=description 需要非空 description');
+      return;
+    case 'expectedEffect':
+      /*
+       * 与 description 同规矩：只收非空文本（清空走 Web 端，MCP 侧不提供「清空」语义 ——
+       * 空串在 HTTP 是「清除」，在工具调用里更像「我忘了填」，报错让调用方自己纠正）。
+       */
+      if (!args.expectedEffect || !args.expectedEffect.trim()) {
+        badArgs('action=expectedEffect 需要非空 expectedEffect');
+      }
       return;
     case 'analysis': {
       if (!Array.isArray(args.candidates) || args.candidates.length === 0) {
@@ -164,6 +184,40 @@ async function handleDescription(args: EditArgs) {
     chars: args.description!.trim().length,
     retried: result.retried,
     hint: `描述已更新（${args.description!.trim().length} 字）`,
+  });
+}
+
+/**
+ * 改「预期效果」（2026-11-24）：与 `handleDescription` 逐行同构 —— 内部取 revision，
+ * 冲突时重读重试一次。刻意不抽公共函数：两者只差字段名与提示语，抽出去要传四个参数，
+ * 而这段代码要跟 `updateEvent` 的三态语义对齐，保持"一眼能和上面比"更有价值。
+ */
+async function handleExpectedEffect(args: EditArgs) {
+  const write = async (retried: boolean) => {
+    const detail = getEventDetail(args.scope, { ref: args.event });
+    const rec = await withTimeout(
+      updateEvent(args.scope, args.event, { expectedEffect: args.expectedEffect!, revision: detail.event.revision }),
+      TOOL_TIMEOUT.WRITE,
+      'ki_event_edit',
+    );
+    return { rec, retried };
+  };
+  let result: { rec: Awaited<ReturnType<typeof updateEvent>>; retried: boolean };
+  try {
+    result = await write(false);
+  } catch (err) {
+    if (!(err instanceof GovernanceError) || err.code !== 'REVISION_CONFLICT') throw err;
+    result = await write(true);
+  }
+  return ok({
+    ok: true,
+    scope: args.scope,
+    event: { id: result.rec.id, shortId: `#${result.rec.shortId}` },
+    action: 'expectedEffect',
+    revision: result.rec.revision,
+    chars: args.expectedEffect!.trim().length,
+    retried: result.retried,
+    hint: `预期效果已更新（${args.expectedEffect!.trim().length} 字）`,
   });
 }
 
@@ -430,16 +484,19 @@ async function handleStage(args: EditArgs) {
 export function registerEventEditTool(server: McpServer): void {
   server.tool(
     'ki_event_edit',
-    '编辑事件：description=改描述 / analysis=上传结论与数据链路 / members=挂或解绑关联文档 / references=增删参考文档 / stage=流转阶段。'
+    '编辑事件：description=改描述 / expectedEffect=改预期效果（修好之后应当看到什么） / analysis=上传结论与数据链路 / members=挂或解绑关联文档 / references=增删参考文档 / stage=流转阶段。'
       + '一次只做一类（单值 action，字段不匹配即报错）；analysis 必须带 candidates。'
       + '注意：members 的 remove 只是解绑（文档仍可检索、不删除）；stage 到终态会按类型设定处理关联文档，trash 类型会把文档移入回收站（不可自动撤销）。',
     {
       scope: z.string().optional().default('default').describe('知识库名'),
       event: z.string().describe('事件 id（evt_…）或 #shortId（如 #3）'),
-      action: z.enum(['description', 'analysis', 'members', 'references', 'stage']).describe(
-        '要做的唯一一类操作：description / analysis / members / references / stage',
+      action: z.enum(['description', 'expectedEffect', 'analysis', 'members', 'references', 'stage']).describe(
+        '要做的唯一一类操作：description / expectedEffect / analysis / members / references / stage',
       ),
       description: z.string().optional().describe('[description] 事件描述，≤4000 字'),
+      expectedEffect: z.string().optional().describe(
+        '[expectedEffect] 预期效果（修好之后应当看到什么 / 怎么算收口），≤4000 字，会注入 AI 分析上下文',
+      ),
       conclusion: z.string().optional().describe('[analysis] 一句话结论（≤4000 字）'),
       chain: z.array(ChainNodeInput).optional().describe('[analysis] 因果链（≤5 节点，顺序即阅读顺序）'),
       candidates: z.array(CandidateInput).optional().describe('[analysis] 代码位置（必填，≥1；服务端逐条验真）'),
@@ -463,6 +520,8 @@ export function registerEventEditTool(server: McpServer): void {
         switch (a.action) {
           case 'description':
             return await handleDescription(a);
+          case 'expectedEffect':
+            return await handleExpectedEffect(a);
           case 'analysis':
             return await handleAnalysis(a);
           case 'members':

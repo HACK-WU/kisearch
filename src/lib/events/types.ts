@@ -50,6 +50,15 @@ export interface EventTypeRecord {
 export const EVENT_DESCRIPTION_MAX_CHARS = 4000;
 
 /**
+ * 事件「预期效果」的上限（2026-11-24）。
+ *
+ * 与描述同为 4000：两者是同一段叙事的两个面（现象/证据 vs 修好后应当是什么样），
+ * 用户在一处写长、另一处写短没有真实理由，分成两个数字只会让「为什么这个能写 4000、
+ * 那个只能写 2000」变成每次都要解释的问题。
+ */
+export const EVENT_EXPECTED_EFFECT_MAX_CHARS = 4000;
+
+/**
  * 事件类型描述的上限（2026-11-23 REQ-20261123-007）。
  * 与事件的 4000 字刻意不同：类型描述是「一句话说清装什么」，长到需要分段说明
  * 就说明该写进事件的 description。200 字约等于类型 tab 下方两行。
@@ -64,6 +73,17 @@ export interface EventRecord {
   title: string;
   /** 可选事件描述（REQ-20261113-003 · S-03）：纯文本/Markdown，≤ 4000 字 */
   description?: string;
+  /**
+   * 可选「预期效果」（2026-11-24）：修好之后应当看到什么 / 怎么算收口，≤ 4000 字。
+   *
+   * 与 `description` 的分工是**叙事位置**而不是形式：描述装「现象与证据」（报错原文、
+   * 复现条件、已排除方向），本字段装「可核验的预期结果」。分开存是为了让 AI 分析
+   * 能拿到「期望达成什么」而不是只看到「哪里坏了」，也让收口时有对照物。
+   *
+   * 与 `description` 一样会进 AI 分析上下文（主分析 + recall 预取 + 追问），
+   * 因此同样受 prompt 注入防护约束。
+   */
+  expectedEffect?: string;
   typeId: string;
   stageKey: string;
   /** 展示冗余：读时按 stageKey 反查重算，不在写入侧当作依据 */

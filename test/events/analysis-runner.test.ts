@@ -198,6 +198,8 @@ describe('S-04 异步分析 Pipeline', () => {
     const ev = await createEvent(scope, {
       title: '登录报错 TOKEN_MISSING',
       description: '移动端登录后偶发报错',
+      // 预期效果（2026-11-24）：验证它进 recall 画像与主 prompt 的独立块
+      expectedEffect: '修好后移动端连续 20 次登录都不再报 TOKEN_MISSING',
       typeId: 'et_1',
     });
     seedDoc('排查记录', '登录故障笔记');
@@ -327,6 +329,19 @@ describe('S-04 异步分析 Pipeline', () => {
     assert.equal(recallCalls[0]!.scope, scope, '预取必须落在事件所在库');
     assert.ok(recallCalls[0]!.task.includes('登录报错 TOKEN_MISSING'), '画像要带事件标题');
     assert.ok(recallCalls[0]!.task.includes('移动端登录后偶发报错'), '画像要带事件描述');
+    // 预期效果（2026-11-24）：画像与主 prompt 两处都要带上，否则等于字段白存
+    assert.ok(
+      recallCalls[0]!.task.includes('修好后移动端连续 20 次登录'),
+      '画像要带预期效果（它决定"该往哪找"，不只是描述）',
+    );
+    assert.ok(
+      seenFirstUserMessages[0]!.includes('<event_expected>'),
+      '预期效果必须作为独立标签块进 prompt（受注入防护声明约束）',
+    );
+    assert.ok(
+      seenFirstUserMessages[0]!.includes('修好后移动端连续 20 次登录'),
+      '主分析与追问共用这段上下文，正文不能丢',
+    );
     assert.ok(
       recallCalls[0]!.task.includes('排查记录 | 登录故障笔记'),
       '画像要带关联/参考文档的 group 路径与名称',

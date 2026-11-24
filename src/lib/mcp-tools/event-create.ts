@@ -29,7 +29,10 @@ export function registerEventCreateTool(server: McpServer): void {
     {
       scope: z.string().optional().default('default').describe('知识库名'),
       title: z.string().describe('事件标题（如「登录页白屏」）'),
-      description: z.string().optional().describe('事件描述（可选，会注入 AI 分析上下文，≤4000 字）'),
+      description: z.string().optional().describe('事件描述（可选，会注入 AI 分析上下文，≤4000 字；写现象与证据）'),
+      expectedEffect: z.string().optional().describe(
+        '预期效果（可选，会注入 AI 分析上下文，≤4000 字；写修好之后应当看到什么 / 怎么算收口）',
+      ),
       type: z.string().describe('事件类型：id（et_1）或名称（如「bug 排查」）；可先调 ki_event_type_list'),
       stage: z.string().optional().describe('起始阶段：key（st_1）或名称（如「排查中」）；缺省首阶段'),
       docs: z.array(DocRef).max(50).optional().describe('初始关联文档（≤50 篇）'),
@@ -58,6 +61,7 @@ export function registerEventCreateTool(server: McpServer): void {
           createEventWithBinding(args.scope, {
             title: args.title,
             ...(args.description !== undefined ? { description: args.description } : {}),
+            ...(args.expectedEffect !== undefined ? { expectedEffect: args.expectedEffect } : {}),
             typeId: type.id,
             ...(args.stage ? { stageKey: args.stage } : {}),
             ...(args.docs ? { docs: args.docs } : {}),

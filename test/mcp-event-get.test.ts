@@ -113,6 +113,7 @@ describe('② 结构完整性', () => {
       title: '详情结构',
       type: 'et_1',
       description: '这是一段足够长的描述，用来确认返回体没有被截断',
+      expectedEffect: '修好后这条断言应当通过',
       docs: [{ group: GROUP, name: doc.text }],
       refs: [{ group: GROUP, name: ref.text }],
     }));
@@ -124,6 +125,8 @@ describe('② 结构完整性', () => {
     assert.equal(body.scope, scope);
     assert.match(body.event.shortId, /^#\d+$/);
     assert.equal(body.event.description, '这是一段足够长的描述，用来确认返回体没有被截断');
+    // 预期效果（2026-11-24）：详情 event 块是**逐字段白名单**，漏加就静默读不到
+    assert.equal(body.event.expectedEffect, '修好后这条断言应当通过');
     assert.equal(body.event.closed, false);
 
     assert.equal(body.type.id, 'et_1');

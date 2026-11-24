@@ -72,6 +72,42 @@ describe('S-03 事件描述与分析存储契约', () => {
     );
   });
 
+  /*
+   * 预期效果（2026-11-24）：与描述同构但**必须独立**。
+   *
+   * 三条最容易写错的地方都锁在这里：
+   *   1) 只改描述时不得动预期效果（patch 里没传 ≠ 清空）；
+   *   2) 空白串要真 `delete` 字段（若照抄 title 的 `trim() || 原值`，用户永远清不掉）；
+   *   3) 超长报**自己的**错误码（复用 1612 会让提示说「事件描述不得超过」）。
+   */
+  it('①b 预期效果：创建 / 只改描述不动它 / 空白即清除 / 4001 字用自己的错误码', async () => {
+    const ev = await createEvent(scope, {
+      title: '预期效果三态',
+      description: '现象：偶发白屏',
+      expectedEffect: '修好后连续 20 次登录不再白屏',
+      typeId: 'et_1',
+    });
+    assert.equal(ev.expectedEffect, '修好后连续 20 次登录不再白屏');
+
+    const onlyDesc = await updateEvent(scope, ev.id, {
+      description: '现象：补充堆栈',
+      revision: ev.revision,
+    });
+    assert.equal(onlyDesc.expectedEffect, '修好后连续 20 次登录不再白屏', '没传的字段不能被清掉');
+
+    const cleared = await updateEvent(scope, ev.id, {
+      expectedEffect: '   ',
+      revision: onlyDesc.revision,
+    });
+    assert.equal(cleared.expectedEffect, undefined);
+    assert.equal('expectedEffect' in cleared, false, '清除要 delete 字段，不能留空串');
+
+    await assert.rejects(
+      () => updateEvent(scope, ev.id, { expectedEffect: 'x'.repeat(4001), revision: cleared.revision }),
+      (e: unknown) => e instanceof GovernanceError && e.code === 'EVENT_EXPECTED_EFFECT_TOO_LONG',
+    );
+  });
+
   it('② 草稿读写、runId 守卫、并发保留 confirmed[]、勾选确认与移除', async () => {
     const ev = await createEvent(scope, { title: '分析存储测试', typeId: 'et_1' });
     await writeDraftStart(scope, ev.id, {

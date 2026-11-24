@@ -285,6 +285,9 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
       shortId: `#${event.shortId}`,
       title: event.title,
       description: event.description ?? null,
+      // MCP `ki_event_get` 只认这里列出的字段（详情 DTO 是逐字段白名单）；
+      // HTTP 详情走 loadEventDetail 的 EventRecord 原形，不经过本块。
+      expectedEffect: event.expectedEffect ?? null,
       closed: isEventClosed(event),
       closedAt: event.closedAt,
       pinnedAt: event.pinnedAt ?? null,

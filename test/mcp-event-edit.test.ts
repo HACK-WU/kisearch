@@ -84,6 +84,19 @@ describe('互斥：一次只做一类', () => {
       name: 'description 不接受 dataFlow',
       args: { action: 'description', description: 'x', dataFlow: '步骤 A\n    ▼\n步骤 B' },
     },
+    {
+      // expectedEffect（2026-11-24）是独立 action：与 description 互斥，避免一次调用覆盖用户没在编辑的那栏
+      name: 'description 不接受 expectedEffect',
+      args: { action: 'description', description: 'x', expectedEffect: 'y' },
+    },
+    {
+      name: 'expectedEffect 不接受 description',
+      args: { action: 'expectedEffect', expectedEffect: 'x', description: 'y' },
+    },
+    {
+      name: 'expectedEffect 缺内容',
+      args: { action: 'expectedEffect' },
+    },
   ];
 
   for (const c of CASES) {

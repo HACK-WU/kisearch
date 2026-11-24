@@ -33,6 +33,9 @@ export function toEventListView(item: EventListItemView, scopeOf: string): Event
     scope: scopeOf,
     title: e.title,
     description: e.description,
+    // 无条件列出（即使 undefined）：契约守卫测试按 `f in view` 判「记录字段有没有进响应」，
+    // 用 `...(e.expectedEffect ? ... : {})` 条件展开会让无值场景判定为「漏产」而变红。
+    expectedEffect: e.expectedEffect,
     typeId: e.typeId,
     typeName: item.type?.name ?? null,
     stageKey: e.stageKey,

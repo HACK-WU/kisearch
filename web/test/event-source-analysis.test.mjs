@@ -308,6 +308,9 @@ describe('S-05c · 过程可观测（去重 + 工具明细）', () => {
     assert.match(stepMetricsSrc, /members: '关联文档'/, 'members → 关联文档');
     assert.match(stepMetricsSrc, /verified: '保留候选'/, 'verified → 保留候选');
     assert.match(stepMetricsSrc, /hasDescription: \{ yes: '有', no: '无' \}/, '布尔值要翻成中文');
+    // 预期效果（2026-11-24）：两栏都注入 prompt，指标层不能只暴露描述
+    assert.match(stepMetricsSrc, /hasExpectedEffect: '预期效果'/, '预期效果要有中文标签');
+    assert.match(stepMetricsSrc, /hasExpectedEffect: \{ yes: '有', no: '无' \}/, '布尔值要翻成中文');
   });
 
   it('追问区复用 AI 分析的展示与逻辑，不套对话气泡（2026-11-19）', () => {

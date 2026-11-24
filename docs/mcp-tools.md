@@ -20,7 +20,7 @@
 | `ki_lifecycle_list` | 列出文档分类（wiki / temp / event）与期限选项、分类预设，以及指定 group 的有效默认分类（只读） | `scope`、`group`（传了才回显该组默认分类，避免无界返回） |
 | `ki_event_list` | 列出事件：id / `#shortId` / 标题 / 类型 / 当前阶段 / 可见性 / 关联文档预览（只读；创建用 ki_event_create） | `scope`、`status`（`open` 默认 / `closed` / `all`）、`type`（先调 `ki_event_type_list` 取 id）、`q`、`limit`、`offset` |
 | `ki_event_type_list` | 列出事件类型及其阶段链（每阶段可见性）、收口动作与类型描述（只读，不能创建或修改类型）。选类型时看 `description`——它说明这类事件装什么 | `scope` |
-| `ki_event_get` | 读单条事件完整详情（只读）：描述全文 / 阶段链与当前可见性 / 关联文档 / 参考文档 / AI 分析结论（一句话总结 + 因果链 + 数据链路）与未确认点 / 已确认代码位置 / 阶段日志。**找事件用 ki_event_list，读事件用本工具**（list 只有 120 字结论预览与位置预览） | `event`（`evt_…` / `#3` / `3`）、`members_limit`、`refs_limit`、`logs_limit`、`locations_limit`、`location_snippet_limit`（均为 0 时该块不返回，仍给 `total`） |
+| `ki_event_get` | 读单条事件完整详情（只读）：描述全文 / 预期效果全文 / 阶段链与当前可见性 / 关联文档 / 参考文档 / AI 分析结论（一句话总结 + 因果链 + 数据链路）与未确认点 / 已确认代码位置 / 阶段日志。**找事件用 ki_event_list，读事件用本工具**（list 只有 120 字结论预览与位置预览） | `event`（`evt_…` / `#3` / `3`）、`members_limit`、`refs_limit`、`logs_limit`、`locations_limit`、`location_snippet_limit`（均为 0 时该块不返回，仍给 `total`） |
 | `ki_ask` | **模型消耗型**：让 ki 用它自己的模型 + 指定知识库回答一个问题，内部自动多轮检索再合成，返回答案与来源；默认每次全新问答，追问时把上次的 `contextId` 作为 `context_id` 传回（10 分钟内有效，每次交互顺延）。单次通常 5~30 秒，超 45 秒返回已生成的部分答案（`truncated=true`）。只读 Token 不可见 | `scope`（**必填**，单个具体库）、`question`、`background`（≤2000 字符，只对本轮生效）、`context_id` |
 | `ki_recall` | **开工前预取**（需要模型）：给任务画像 + 范围，由 ki 自己的模型多轮读正文后返回「值得先读的文档清单（含 why / evidence）+ 整体结论 summary + 判断不了的点 uncertainties」，0 篇是合法结论。未配置模型 / 未确认外发 / 模型不支持 tools 时**直接不可用**（不降级，文案引导改用 `ki_search`）。只读 Token **可用**（产出只有清单与判断，不写数据） | `scope`（**必填**，库名或视图，可多个）、`task`（≤2000 字）、`hints`（≤10 条强线索）、`exclude`（已读清单）、`limit`（默认 8） |
 
@@ -33,9 +33,9 @@
 | `ki_store` | 只写向量层单条文本 | `text`、`tags` |
 | `ki_bulk_store` | 只写向量层批量文本 | `input`（批量 JSON 文件路径） |
 | `ki_edit_relation` | 对大 Relation 多轮按行编辑；`finish` 后一次性更新索引 | `action`（edit/view/finish/cancel）、`scope`、`group`、`relation` |
-| `ki_event_create` | 创建事件，可同时挂关联文档与参考文档；`type` / `stage` 都接受 id/key 或名称 | `title`、`type`（id 或名称）、`stage`（可选）、`docs[]`（≤50）、`refs[]`（≤50） |
+| `ki_event_create` | 创建事件，可同时挂关联文档与参考文档；`type` / `stage` 都接受 id/key 或名称 | `title`、`description`（现象与证据，≤4000 字）、`expectedEffect`（修好之后应当看到什么，≤4000 字）、`type`（id 或名称）、`stage`（可选）、`docs[]`（≤50）、`refs[]`（≤50） |
 | `ki_event_delete` | 删除事件；必须指定关联文档去向。**未收口默认拒绝**（先用 `ki_event_edit` 的 `action=stage` 流转到终态） | `event`、`doc_action`（`wiki` 保留 / `trash` 进回收站，必填无默认）、`force`（可选，只对**无关联文档**的事件生效）、`confirm_title`（`force` 时必填，须与标题逐字一致） |
-| `ki_event_edit` | 事件编辑的唯一写工具，一次只做一类：改描述 / 上传结论 / 关联文档增删 / 参考文档增删 / 阶段流转。要点：关联文档 `remove` 是**解绑**（文档回长期保留、仍可检索，不删除）；阶段到终态会按类型设定的收口动作处理关联文档，`trash` 会移入回收站（可恢复，但不会自动撤销） | `event`、`action`（`description` / `analysis` / `members` / `references` / `stage`）、`description`、`conclusion`、`chain[]`、`candidates[]`（`analysis` 必带）、`unconfirmed[]`、`dataFlow`（`analysis`：多行文本树，≤40 行 / ≤3000 字；**不传 = 这份结论没有链路**，覆盖时原链路随之清空；超限整批拒绝）、`docRefs[]` + `docAction`（≤50）、`stage` + `note` |
+| `ki_event_edit` | 事件编辑的唯一写工具，一次只做一类：改描述 / 改预期效果 / 上传结论 / 关联文档增删 / 参考文档增删 / 阶段流转。要点：`description` 与 `expectedEffect` 是两个独立 action（一次只改一栏，避免误覆盖另一栏）；关联文档 `remove` 是**解绑**（文档回长期保留、仍可检索，不删除）；阶段到终态会按类型设定的收口动作处理关联文档，`trash` 会移入回收站（可恢复，但不会自动撤销） | `event`、`action`（`description` / `expectedEffect` / `analysis` / `members` / `references` / `stage`）、`description`、`expectedEffect`（≤4000 字）、`conclusion`、`chain[]`、`candidates[]`（`analysis` 必带）、`unconfirmed[]`、`dataFlow`（`analysis`：多行文本树，≤40 行 / ≤3000 字；**不传 = 这份结论没有链路**，覆盖时原链路随之清空；超限整批拒绝）、`docRefs[]` + `docAction`（≤50）、`stage` + `note` |
 
 ## 组织与删除
 

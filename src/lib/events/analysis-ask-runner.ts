@@ -81,6 +81,8 @@ const HISTORY_TURNS = 2;
 const HISTORY_Q_CHARS = 200;
 const HISTORY_A_CHARS = 400;
 const DESC_CHARS = 800;
+/** 预期效果进追问 prompt 的截断长度：与描述同量级，长文截断不影响「往哪修」的判断 */
+const EXPECTED_CHARS = 800;
 const DOCS_MAX = 20;
 const THINKING_EVENT_MAX = 500;
 const ANALYSIS_REQUEST_TIMEOUT_MS = 300_000;
@@ -202,6 +204,11 @@ export interface AskTargetEvent {
   title: string;
   description?: string | null;
   /**
+   * 预期效果（2026-11-24）。可选：旧调用方（测试 / 老事件）没有该字段，
+   * 缺省按「（空）」处理，不让追问因为新字段缺失而失败。
+   */
+  expectedEffect?: string | null;
+  /**
    * 事件类型 id（2026-11-20）：只用于把结论链的措辞对齐到本次分析的视角 ——
    * 卡面写「差距与成因」、喂给模型写「根本原因」会让模型顺着错词答。
    * 缺省（旧调用方 / 测试）按原模板 `fault` 处理。
@@ -295,6 +302,14 @@ function buildContext(args: {
     `<event>`,
     `标题：${event.title}`,
     event.description?.trim() ? `描述：${clip(event.description.trim(), DESC_CHARS)}` : '描述：（空）',
+    /*
+     * 预期效果与描述并列（2026-11-24）：追问「怎么验证修好了」时这是唯一依据。
+     * 标签里必须写「期望而非现状」—— 主分析 prompt 的块标题已自带这句定性，
+     * 追问这条只写裸字段名的话，模型容易把它当已发生的事实复述（challenger 补漏）。
+     */
+    event.expectedEffect?.trim()
+      ? `预期效果（期望而非现状，用于判断往哪修）：${clip(event.expectedEffect.trim(), EXPECTED_CHARS)}`
+      : '预期效果（期望而非现状）：（空）',
     `</event>`,
   ];
   lines.push('<attached_docs>');

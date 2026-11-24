@@ -943,6 +943,7 @@ export async function handleGovernanceRoutes(
         const outcome = await createEventWithBinding(scope, {
           title: String(b.title ?? ''),
           ...(typeof b.description === 'string' ? { description: b.description } : {}),
+          ...(typeof b.expectedEffect === 'string' ? { expectedEffect: b.expectedEffect } : {}),
           typeId: String(b.typeId ?? b.type_id ?? ''),
           ...(str(pick(b, 'stageKey', 'stage_key')) ? { stageKey: str(pick(b, 'stageKey', 'stage_key'))! } : {}),
           ...(Array.isArray(b.docs) ? { docs: b.docs as Array<{ group: string; name: string }> } : {}),
@@ -1094,6 +1095,7 @@ export async function handleGovernanceRoutes(
         const event = await updateEvent(scope, id, {
           ...(typeof b.title === 'string' ? { title: b.title } : {}),
           ...(typeof b.description === 'string' ? { description: b.description } : {}),
+          ...(typeof b.expectedEffect === 'string' ? { expectedEffect: b.expectedEffect } : {}),
           revision: num(b.revision) ?? -1,
         });
         return sendJson(res, 200, { ok: true, scope, event });
