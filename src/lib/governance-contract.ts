@@ -535,6 +535,11 @@ export interface AnalysisDraftDto {
   /** 结论因果链；旧数据为空数组（此时前端只渲染 conclusion 纯文本） */
   chain: ConclusionNodeDto[];
   /**
+   * 数据链路（2026-11-24）：多行文本树，前端等宽原样渲染。
+   * 键可缺 —— 旧结论 / 外部上传未提供时没有该键，表示「本次结论没有链路」。
+   */
+  dataFlow?: string;
+  /**
    * 运行中当前这一轮的思考实时片段（2026-11-18）：后端按 ~1s 节流增量写，轮结束 / 收尾时置 undefined。
    * 有值即表示「这一轮还在想」，前端用它渲染流式思考块（只在 running 期间出现）。
    */
@@ -598,6 +603,8 @@ export interface AnalysisAskTurnDto {
   proposal?: {
     conclusion: string;
     chain: ConclusionNodeDto[];
+    /** 数据链路（2026-11-24）：缺省 = 本条补丁不改链路（与「不传即保留」同口径） */
+    dataFlow?: string;
     reason: string;
     at: number;
   };
@@ -840,6 +847,11 @@ export interface AnalysisDraftSummaryDto {
   conclusion: string | null;
   /** 结论因果链；旧数据为空数组，前端回退渲染 `conclusion` 纯文本 */
   chain: ConclusionNodeDto[];
+  /**
+   * 数据链路（2026-11-24）：精简通道也要透出，否则 `ki_event_get` 读不到链路
+   * （本 DTO 是逐字段构造的白名单，见 `events/event-detail.ts`）。缺省 = 没有链路。
+   */
+  dataFlow?: string;
   unconfirmed: string[];
   commit: string | null;
   startedAt: number;

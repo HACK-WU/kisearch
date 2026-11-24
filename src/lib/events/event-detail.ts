@@ -323,6 +323,12 @@ export function getEventDetail(scope: string, options: EventDetailOptions): Even
           status: draft.status,
           conclusion: draft.conclusion ?? null,
           chain: Array.isArray(draft.chain) ? draft.chain : [],
+          /*
+           * 数据链路（2026-11-24 · REQ-20261124-001）：本对象是**逐字段白名单**，
+           * 不显式透出则 MCP `ki_event_get` 与详情通道都读不到链路（写进去了也白写）。
+           * 缺省不写键 = 本次结论没有链路。
+           */
+          ...(typeof draft.dataFlow === 'string' && draft.dataFlow ? { dataFlow: draft.dataFlow } : {}),
           unconfirmed: Array.isArray(draft.unconfirmed) ? draft.unconfirmed : [],
           commit: draft.commit ?? null,
           startedAt: draft.startedAt,
