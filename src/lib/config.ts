@@ -146,6 +146,8 @@ export interface McpHttpConfig {
   localAdmin?: boolean;
   /** 第三方上传 API 开关（默认 true；false = 关闭 /open/v1/import/*，其余一切不变） */
   uploadApi?: boolean;
+  /** 只读取件开关（缺省 true）：false 时 `/open/v1/asset|doc` 404（REQ-20261124-002） */
+  downloadApi?: boolean;
   /** 第三方上传单次请求体上限（字节，默认 512MB；见 open-api/constants.ts） */
   uploadMaxBytes?: number;
   /**
@@ -781,6 +783,8 @@ function parseAndExpand(configFile: string): KiConfig {
             : undefined,
           localAdmin: typeof h.localAdmin === 'boolean' ? h.localAdmin : undefined,
           uploadApi: typeof h.uploadApi === 'boolean' ? h.uploadApi : undefined,
+          // 同一条纪律：schema 加了字段必须在这里同步赋值，否则「配置写了、校验过了、消费端永远 undefined」
+          downloadApi: typeof h.downloadApi === 'boolean' ? h.downloadApi : undefined,
           uploadMaxBytes: h.uploadMaxBytes !== undefined ? Number(h.uploadMaxBytes) : undefined,
           // ⚠️ schema 加了字段必须在这里同步赋值，否则「配置写了、校验过了、消费端永远 undefined」
           //（`localAdmin` 曾长期静默失效就是这个成因，见 config-schema.ts 同处注释）

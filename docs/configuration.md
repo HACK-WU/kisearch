@@ -309,9 +309,10 @@ MCP HTTP 传输默认值（子字段挂在 `mcp.http` 下）。
 | `mcp.http.localAdmin` | `boolean` | `true` | 本机回环免登录。`false` = 本机访问也需登录（等价 `--no-local-admin`） |
 | `mcp.http.uploadApi` | `boolean` | `true` | 是否开放第三方程序上传接口（`/open/v1/import/*`）。`false` 时该前缀返回 404，Web 页面与 MCP 工具不受影响 |
 | `mcp.http.uploadMaxBytes` | `number` | `536870912`（512MB） | 第三方上传**单次请求体**总字节上限（1 ~ 4294967296）。与单文件上限 `import.maxFileSize` 是两回事 |
+| `mcp.http.downloadApi` | `boolean` | `true` | 是否开放第三方程序**取件**接口（`/open/v1/asset` 附件字节、`/open/v1/doc` 文档正文）。`false` 时这两个端点返回 404，`ping` 与 Web 页面看图的 `/api/*` 都不受影响。没有对应的 CLI 参数，改完需 `ki mcp restart` 生效 |
 | `mcp.http.publicUrl` | `string` | 无 | 浏览器访问本服务的对外地址，如 `https://ki.example.com/ki`（可含子路径）。配了之后，MCP 写文档的工具会在返回里给出「打开这篇文档」的完整链接，并按这里写的地址生成；不配则按请求里的主机名推导。经反向代理、容器端口映射、或部署在子路径下时填它；填错（非 http/https）只会告警并退回按主机名推导，不影响服务启动 |
 
-**优先级**：`mcp.http` 是**传输默认值**，实际生效顺序为 `--host/--port` CLI 参数 > `mcp.http.host/port` 配置 > 内置默认（`127.0.0.1` / `7423`）。即命令行参数优先于配置文件。上传开关同理：`--upload-api` / `--no-upload-api` > `mcp.http.uploadApi` > 上次运行时的状态 > 默认开启。
+**优先级**：`mcp.http` 是**传输默认值**，实际生效顺序为 `--host/--port` CLI 参数 > `mcp.http.host/port` 配置 > 内置默认（`127.0.0.1` / `7423`）。即命令行参数优先于配置文件。上传开关同理：`--upload-api` / `--no-upload-api` > `mcp.http.uploadApi` > 上次运行时的状态 > 默认开启。取件开关 `mcp.http.downloadApi` 只走配置（没有 CLI 参数），重启后生效。
 
 > `mcp.http.uploadMaxBytes` 写越界值（0、小数、超过 4GiB）会**启动即报错**并指出该字段，不会悄悄退回默认值。
 >

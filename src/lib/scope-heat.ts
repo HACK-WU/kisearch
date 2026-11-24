@@ -132,6 +132,8 @@ function expandViews(
     }
     cur.read += snap.read;
     cur.write += snap.write;
+    // 只读取件次数随视图摊分一起合并（REQ-20261124-002）：漏这一行会让 view 的 download 恒为 0
+    cur.download = (cur.download ?? 0) + (snap.download ?? 0);
     if (snap.lastUsedAt > cur.lastUsedAt) cur.lastUsedAt = snap.lastUsedAt;
     if (snap.firstSeen < cur.firstSeen) cur.firstSeen = snap.firstSeen;
   };

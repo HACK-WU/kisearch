@@ -148,6 +148,11 @@ export interface HttpServerOptions {
    * `ki mcp status` 与 `ki mcp restart` 读取。
    */
   uploadApi?: boolean;
+  /**
+   * 只读取件开关（`mcp.http.downloadApi`，缺省 true，REQ-20261124-002）。
+   * false 时 `/open/v1/asset` 与 `/open/v1/doc` 一律 404；`ping` / `events` 不受影响。
+   */
+  downloadApi?: boolean;
   /** 第三方上传单次请求体上限（字节，缺省 512MB）：只用于启动日志回显与后续路由限流 */
   uploadMaxBytes?: number;
   /**
@@ -611,6 +616,8 @@ export interface HttpAppOptions {
   maxSessions?: number;
   /** 第三方上传 API（`/open/v1/import/*`）开关，缺省 true（关闭只影响该前缀） */
   uploadApi?: boolean;
+  /** 只读取件开关（缺省 true）：false 时 `/open/v1/asset` 与 `/open/v1/doc` 404 */
+  downloadApi?: boolean;
   /** 第三方上传单次请求体上限（字节，缺省 512MB） */
   uploadMaxBytes?: number;
   /** 会话空闲超时毫秒（缺省 DEFAULT_SESSION_IDLE_MS） */
@@ -644,8 +651,10 @@ export interface McpHttpApp {
 export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
   const { authEnabled, token, allowedHosts, buildServer, advertiseAddr } = opts;
   const localAdmin = opts.localAdmin !== false;
-  // 第三方通道的两个生效值：开关决定 `/open/v1/import/*` 是否 404，上限供 ping 回显与后续路由限流
+  // 第三方通道的三个生效值：两个开关决定 `/open/v1/import/*`、`/open/v1/asset|doc` 是否 404，
+  // 上限供 ping 回显与后续路由限流（REQ-20261124-002 起读出口也有独立开关）
   const uploadApi = opts.uploadApi !== false;
+  const downloadApi = opts.downloadApi !== false;
   const uploadMaxBytes = opts.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
@@ -872,6 +881,7 @@ export function createMcpHttpServer(opts: HttpAppOptions): McpHttpApp {
         handleOpenApiRequest(req, res, url, {
           resolveTokenAuth,
           uploadApi,
+          downloadApi,
           uploadMaxBytes,
           config: openCfg,
         }),
@@ -1347,6 +1357,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
   const authEnabled = !isLoopbackHost(host);
   const token = opts.token;
   const uploadApi = opts.uploadApi !== false;
+  const downloadApi = opts.downloadApi !== false;
   const uploadMaxBytes = opts.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
   // 固定本实例的 lock 路径；即使运行期间配置文件发生身份漂移，退出时也必须
   // 清理启动时的 lock，而不能按新配置计算出另一条路径。
@@ -1391,6 +1402,7 @@ export async function startHttpMcpServer(opts: HttpServerOptions): Promise<void>
     allowedHosts,
     localAdmin,
     uploadApi,
+    downloadApi,
     uploadMaxBytes,
     buildServer,
     advertiseAddr: { host, port },

@@ -71,15 +71,66 @@ export function withUrl<T extends object>(result: T, url: string | undefined): T
   return url ? { ...result, url } : result;
 }
 
+/** 附件取址目标：`path` 即文档正文里的 `images[].ref`（或清单里的 `ref`） */
+export interface AssetTarget {
+  scope: string;
+  group: string;
+  path: string;
+}
+
+/** 附件双链接：`apiUrl` 给程序（需 Bearer）；`humanUrl` 给人（浏览器语义） */
+export interface AssetUrls {
+  apiUrl?: string;
+  humanUrl?: string;
+}
+
+/**
+ * 生成附件的两条取件链接（REQ-20261124-002 · S-04）。
+ *
+ * ═══ 为什么是两条，而不是复用 `docUrl` 一条 ═══
+ * - `apiUrl` 指向 `/open/v1/asset`：属**对外契约面**，`/open/v1` 是 Bearer-only
+ *   （`open-api/auth.ts` 明确不读 Cookie、回环也要带 Token）→ 浏览器直接打开必 401。
+ * - `humanUrl` 指向 `/api/asset`：浏览器语义（本机回环 local-admin 免登录；跨机需 Web 登录态），
+ *   它的存在只为「人想看一眼图」；**不构成对外契约面**，程序不要依赖它。
+ *
+ * 与 `docUrl` 共用取址逻辑，但**不要求 `webEnabled`**：API 端点只要知道主机就能拼，
+ * 与「有没有前端产物」无关（`requireWeb: false`）。
+ *
+ * 取不到可靠地址时返回 `{}`（调用方不得输出空串或占位地址）。
+ */
+export function assetUrls(target: AssetTarget, ctx: DocLinkContext, runtime?: WebRuntime): AssetUrls {
+  try {
+    const { scope, group, path: ref } = target;
+    if (!scope || !group || !ref) return {};
+    const resolved = resolveBase(ctx, runtime, { requireWeb: false });
+    if (!resolved) return {};
+    const build = (segment: string): string => {
+      const url = new URL(resolved.base);
+      url.pathname = `${resolved.basePath}${segment}`;
+      // 编码只走 URLSearchParams：ref 里的 `/`、中文、`#`、空格都由它处理
+      url.search = new URLSearchParams({ scope, group, path: ref }).toString();
+      return url.toString();
+    };
+    return { apiUrl: build('/open/v1/asset'), humanUrl: build('/api/asset') };
+  } catch {
+    return {};
+  }
+}
+
 /**
  * 解析取址根。**仅供单测**直接验证判据（生产代码经 `docUrl` 使用）。
  *
  * @param runtime 可选：覆盖进程级快照（仅测试用）
  */
-export function resolveBase(ctx: DocLinkContext, runtime?: WebRuntime): ResolvedBase | null {
+export function resolveBase(
+  ctx: DocLinkContext,
+  runtime?: WebRuntime,
+  opts: { requireWeb?: boolean } = {},
+): ResolvedBase | null {
   const rt = runtime ?? getWebRuntime();
-  // ① 没有前端页面就不可能有可打开的链接，连头都不用看
-  if (!rt.webEnabled) return null;
+  // ① 没有前端页面就不可能有可打开的**页面**链接，连头都不用看。
+  //    API 端点（`/open/v1/*`、`/api/*`）与前端产物无关，调用方传 `requireWeb: false` 跳过该门槛。
+  if (opts.requireWeb !== false && !rt.webEnabled) return null;
 
   // ② 显式覆盖：整段以配置为准（含子路径），不再看请求头
   if (rt.publicUrl) {

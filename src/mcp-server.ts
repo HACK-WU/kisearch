@@ -73,6 +73,8 @@ interface McpCliOptions {
   web: boolean;
   /** 第三方上传 API 开关（CLI > 配置 > 默认 true） */
   uploadApi: boolean;
+  /** 只读取件开关（配置 mcp.http.downloadApi，缺省 true；REQ-20261124-002） */
+  downloadApi: boolean;
   /** 第三方上传单次请求体上限（字节，配置 mcp.http.uploadMaxBytes 或内置默认） */
   uploadMaxBytes: number;
 }
@@ -198,13 +200,15 @@ function parseMcpArgs(args: string[]): McpCliOptions {
         '提示：stdio 模式没有 HTTP 服务，--upload-api / --no-upload-api 不生效；如需开关上传通道请用 ki mcp --http --daemon。\n',
       );
     }
-    return { http: false, host: '', port: 0, localAdmin: true, web, uploadApi: true, uploadMaxBytes: DEFAULT_UPLOAD_MAX_BYTES };
+    return { http: false, host: '', port: 0, localAdmin: true, web, uploadApi: true, downloadApi: true, uploadMaxBytes: DEFAULT_UPLOAD_MAX_BYTES };
   }
 
   const config = loadConfig();
   const httpCfg = config.mcp?.http ?? {};
   // 启动时没有「上次运行值」可言（那是 restart 的事），故只按 CLI > 配置 > 默认 解析
   const upload = resolveUploadApi({ cliArgs: args, configValue: httpCfg.uploadApi });
+  // 读出口没有 CLI flag（只走配置）：关闭是收紧动作，必须显式写 `downloadApi: false`
+  const downloadApi = httpCfg.downloadApi !== false;
   const uploadMaxBytes = httpCfg.uploadMaxBytes ?? DEFAULT_UPLOAD_MAX_BYTES;
 
   const host = getFlagValue(args, '--host') ?? httpCfg.host ?? DEFAULT_MCP_HTTP_HOST;
@@ -297,6 +301,7 @@ function parseMcpArgs(args: string[]): McpCliOptions {
     localAdmin,
     web,
     uploadApi: upload.uploadApi,
+    downloadApi,
     uploadMaxBytes,
   };
 }
@@ -1343,6 +1348,7 @@ export async function startMcpServer(): Promise<void> {
     localAdmin: opts.localAdmin,
     web: opts.web,
     uploadApi: opts.uploadApi,
+    downloadApi: opts.downloadApi,
     uploadMaxBytes: opts.uploadMaxBytes,
     // 文档链接的对外地址（REQ-20261123-003）：仅配置文件提供，无 CLI 参数——
     // 它与 `--web` 走 lock 延续的方式不同，配在 config 里 `ki mcp restart` 自然带上。

@@ -387,6 +387,14 @@ const CONFIG_SCHEMA: ConfigNode = {
              * 这正是 `localAdmin` 长期静默失效的成因（docs 曾声称配置可关，实际只有 CLI 生效）。
              */
             uploadApi: { type: 'boolean' },
+            /**
+             * 只读取件开关（REQ-20261124-002，缺省 true）：false 时 `/open/v1/asset`
+             * 与 `/open/v1/doc` 一律 404（不泄露接口存在性），`ping` / `events` 不受影响。
+             *
+             * ⚠️ 与 `uploadApi` 同一条纪律：本字段**必须在 `config.ts` 的 mcp.http 解析块里
+             * 同步赋值**，只加 schema 不赋值 = 配置永远读不到（`localAdmin` 的旧坑）。
+             */
+            downloadApi: { type: 'boolean' },
             /** 第三方上传单次请求体上限（字节，默认 512MB，上界 4GiB） */
             uploadMaxBytes: { type: 'number', validate: uploadMaxBytesRange },
             /**

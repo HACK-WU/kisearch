@@ -31,12 +31,19 @@ import {
   USAGE_RETENTION_DAYS,
 } from './constants.js';
 
-export type UsageKind = 'read' | 'write';
+export type UsageKind = 'read' | 'write' | 'download';
 
 /** 窗口聚合结果（S-02 消费） */
 export interface ScopeUsageSnapshot {
   read: number;
   write: number;
+  /**
+   * 只读取件（`/open/v1/asset|doc`）次数（REQ-20261124-002）。
+   *
+   * **可选**：视图摊分等快照构造点不必补，缺省视为 0。
+   * ★ 刻意不并入 `read`：heat 打分只用 read+write，下载不该把冷库刷热（Q2 拍板）。
+   */
+  download?: number;
   /** 窗口内最近一次调用（毫秒）；0 = 窗口内无调用 */
   lastUsedAt: number;
   /**
@@ -46,8 +53,13 @@ export interface ScopeUsageSnapshot {
   firstSeen: string;
 }
 
-/** `[read, write]` 二元组：比 `{read,write}` 省约 3 倍体积（162 scope × 90 天） */
-type DayBucket = [number, number];
+/**
+ * `[read, write, download]` 三元组。
+ *
+ * 第三位是 REQ-20261124-002 新增；**旧文件仍是二元组**，读取侧按 `bucket[2] ?? 0`
+ * 兼容（不改 `v`、不做迁移）。比 `{read,write,download}` 省约 3 倍体积（162 scope × 90 天）。
+ */
+type DayBucket = [number, number, number];
 
 interface ScopeRecord {
   firstSeen: string;
@@ -147,9 +159,10 @@ export function recordScopeUsage(scope: string, kind: UsageKind, at: number = Da
     }
 
     const day = formatLocalDate(at);
-    const bucket = entry.days.get(day) ?? [0, 0];
+    const bucket = entry.days.get(day) ?? [0, 0, 0];
     if (kind === 'read') bucket[0] += 1;
-    else bucket[1] += 1;
+    else if (kind === 'write') bucket[1] += 1;
+    else bucket[2] += 1;
     entry.days.set(day, bucket);
 
     if (at > entry.lastUsedAt) entry.lastUsedAt = at;
@@ -176,8 +189,9 @@ export function flushScopeUsage(): void {
       const rec = file.scopes[name] ?? { firstSeen: mem.firstSeen, lastUsedAt: 0, days: {} };
       if (mem.firstSeen < rec.firstSeen) rec.firstSeen = mem.firstSeen;
       for (const [day, bucket] of mem.days) {
-        const cur = rec.days[day] ?? [0, 0];
-        rec.days[day] = [cur[0] + bucket[0], cur[1] + bucket[1]];
+        const cur = rec.days[day] ?? [0, 0, 0];
+        // 旧文件是二元组：cur[2] 缺省 0，写入后升级为三元组（不迁移、不改 v）
+        rec.days[day] = [cur[0] + bucket[0], cur[1] + bucket[1], (cur[2] ?? 0) + (bucket[2] ?? 0)];
       }
       if (mem.lastUsedAt > rec.lastUsedAt) rec.lastUsedAt = mem.lastUsedAt;
       file.scopes[name] = rec;
@@ -193,8 +207,8 @@ export function flushScopeUsage(): void {
       const cur = s.entries.get(name);
       if (!cur) { s.entries.set(name, mem); continue; }
       for (const [day, bucket] of mem.days) {
-        const exist = cur.days.get(day) ?? [0, 0];
-        cur.days.set(day, [exist[0] + bucket[0], exist[1] + bucket[1]]);
+        const exist = cur.days.get(day) ?? [0, 0, 0];
+        cur.days.set(day, [exist[0] + bucket[0], exist[1] + bucket[1], (exist[2] ?? 0) + (bucket[2] ?? 0)]);
       }
       if (mem.lastUsedAt > cur.lastUsedAt) cur.lastUsedAt = mem.lastUsedAt;
       if (mem.firstSeen < cur.firstSeen) cur.firstSeen = mem.firstSeen;
@@ -229,18 +243,23 @@ export function readScopeUsage(
   for (const [name, rec] of Object.entries(file.scopes)) {
     let read = 0;
     let write = 0;
+    let download = 0;
     for (const [day, bucket] of Object.entries(rec.days)) {
       // YYYY-MM-DD 字典序 == 时间序，字符串比较即可
       if (day < cutoff) continue;
       read += bucket[0];
       write += bucket[1];
+      // 旧文件二元组：第三位缺省 0（不做迁移）
+      download += bucket[2] ?? 0;
     }
     out.set(name, {
       read,
       write,
+      download,
       // 窗口内一旦有调用，`rec.lastUsedAt` 必然也落在窗口内（它是「最近一次」），
       // 直接用精确毫秒值；不要用日桶 key 反推日期 —— 那会把它退化成「当天 0 点」。
-      lastUsedAt: read + write > 0 ? rec.lastUsedAt : 0,
+      // ★ 判活要含 download：只被下载过的库也应显示「最近使用」时间（heat 仍按 read+write 判）。
+      lastUsedAt: read + write + download > 0 ? rec.lastUsedAt : 0,
       firstSeen: rec.firstSeen,
     });
   }

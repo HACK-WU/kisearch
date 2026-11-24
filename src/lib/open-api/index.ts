@@ -19,17 +19,33 @@ import type { KiConfig } from '../config.js';
 import type { TokenAuth } from '../mcp-token.js';
 import { assertDaemonIdentityCurrent } from '../scope-collection.js';
 import { resolveOpenApiPrincipal, type OpenApiPrincipal } from './auth.js';
-import { OPEN_API_PREFIX, OPEN_API_UPLOAD_PATH } from './constants.js';
+import { OPEN_API_PREFIX, OPEN_API_READ_PATHS, OPEN_API_UPLOAD_PATH } from './constants.js';
 import { sendOpenApiError } from './respond.js';
 import { handleOpenApiPing } from './routes/ping.js';
 import { handleOpenApiImportStatus, handleOpenApiImportUpload } from './routes/import.js';
 import { handleOpenApiEvents } from './routes/events.js';
+/**
+ * 只读取件两端点（REQ-20261124-002 · S-02 / S-03）。
+ *
+ * 路由在**前置层**一次定死，两个 handler 先落骨架桩（返回 501）——
+ * 目的是让 S-02 / S-03 只填各自文件、互不碰本文件（并行批次的前提）。
+ * 开关 `downloadApi` 的拦截与 `isDownloadPath` 由 S-01 批补在本文件的开关段。
+ */
+import { handleOpenApiAsset } from './routes/asset.js';
+import { handleOpenApiDoc } from './routes/doc.js';
 
 /** 分发器依赖：全部由 `mcp-http.ts` 注入，本模块不自己去读配置/Token 存储 */
 export interface OpenApiContext {
   resolveTokenAuth: (token: string) => TokenAuth | undefined;
   /** 上传接口开关（false = `/open/v1/import/*` 404） */
   uploadApi: boolean;
+  /**
+   * 只读取件开关（false = `/open/v1/asset` 与 `/open/v1/doc` 404）。
+   *
+   * ★ 作用域仅限本通道：Web 侧 `/api/asset` 的浏览能力不受影响——
+   *   关闭它等于「停掉程序化取件」，不是「停掉所有读」（推演 P9）。
+   */
+  downloadApi: boolean;
   /** 单次请求体上限（字节） */
   uploadMaxBytes: number;
   config: KiConfig;
@@ -65,11 +81,29 @@ const ROUTES: OpenApiRoute[] = [
    * 与 ping 同侧（诊断入口不随写开关关闭）。
    */
   { method: 'GET', path: `${OPEN_API_PREFIX}/events`, handler: handleOpenApiEvents },
+  /**
+   * 只读取件（2026-11-24 · REQ-20261124-002）：附件原始字节 + 文档正文与附图清单。
+   *
+   * 两者**不属于上传通道**（`isUploadPath` 不覆盖它们），开关由独立的
+   * `downloadApi` 管（S-01 批落在下方开关段）。
+   * handler 现为骨架桩（501），S-02 / S-03 各自填充，不改本文件。
+   */
+  { method: 'GET', path: `${OPEN_API_PREFIX}/asset`, handler: handleOpenApiAsset },
+  { method: 'GET', path: `${OPEN_API_PREFIX}/doc`, handler: handleOpenApiDoc },
 ];
 
-/** 是否属于「上传通道」路径（开关只拦这里） */
+/** 是否属于「上传通道」路径（上传开关只拦这里） */
 export function isUploadPath(pathname: string): boolean {
   return pathname === OPEN_API_UPLOAD_PATH || pathname.startsWith(`${OPEN_API_UPLOAD_PATH}/`);
+}
+
+/**
+ * 是否属于「只读取件」路径（读开关只拦这里，2026-11-24 · REQ-20261124-002）。
+ *
+ * 精确匹配而非前缀：`/open/v1/asset-x` 这类未来路径不应被静默纳入。
+ */
+export function isDownloadPath(pathname: string): boolean {
+  return OPEN_API_READ_PATHS.includes(pathname);
 }
 
 /** 请求是否属于 `/open/v1` 命名空间（供 mcp-http.ts 做前缀分发） */
@@ -85,6 +119,14 @@ export async function handleOpenApiRequest(
 ): Promise<void> {
   // ① 开关：关闭时连鉴权都不做，直接按「路由不存在」回 404 —— 403 会泄露「接口存在但被关」
   if (!ctx.uploadApi && isUploadPath(url.pathname)) {
+    sendOpenApiError(res, 404, 'OPEN_API_NOT_FOUND', 'Not Found');
+    return;
+  }
+  /**
+   * 读出口同理，但**独立开关**：`downloadApi=false` 只关 `/open/v1/asset|doc`。
+   * 与上传开关并列而不是合并——写污染库、读是数据外流，运维需要能单独关其中一侧。
+   */
+  if (!ctx.downloadApi && isDownloadPath(url.pathname)) {
     sendOpenApiError(res, 404, 'OPEN_API_NOT_FOUND', 'Not Found');
     return;
   }

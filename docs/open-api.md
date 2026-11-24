@@ -1,4 +1,4 @@
-# 给外部程序的上传接口（`/open/v1`）
+# 给外部程序的接口（`/open/v1`）：上传与取件
 
 > **给谁看**：需要把文件推到远端 ki 的程序（AI Agent、CI 脚本、自建采集器），以及给它们签发 Token 的运维。
 > 客户端只需要 `curl` 与 `tar`，**不需要安装 ki**。
@@ -263,6 +263,47 @@ ki mcp status                      # 查看当前状态：uploadApi / uploadApiS
 
 `ki mcp status` 里的 `uploadApiSource` 说明这个值从哪来：`lock` = 运行中实例的真实值，`config` = 配置里写的，`default` = 都没设（默认开启）。如果实例当前没在运行，状态会按配置/默认显示「下次启动会怎样」，不会拿上一次残留的运行状态充数。
 
+### 下载文档与图片（只读）
+
+上传之外，同一通道也能把库里的**文档正文**与**附件（图片）**取出来。两个只读端点：
+
+| 端点 | 取什么 | 关键参数 |
+|------|--------|----------|
+| `GET /open/v1/doc` | 文档正文 + 文中图片清单（清单里每个 `ref` 就是下面要传的 `path`） | `scope`、`group`、`relation` |
+| `GET /open/v1/asset` | 附件原始字节 | `scope`、`group`、`path` |
+
+```bash
+# 取正文（返回 JSON：content 是正文，images 是附图清单）
+curl -H "Authorization: Bearer $KI_TOKEN" \
+  "http://127.0.0.1:7423/open/v1/doc?scope=prod&group=%E6%95%85%E9%9A%9C%E5%A4%8D%E7%9B%98&relation=%E7%99%BB%E5%BD%95%E8%B6%85%E6%97%B6"
+
+# 取图（返回二进制，直接落盘；path 里的 / 要编码成 %2F）
+curl -H "Authorization: Bearer $KI_TOKEN" \
+  "http://127.0.0.1:7423/open/v1/asset?scope=prod&group=%E6%95%85%E9%9A%9C%E5%A4%8D%E7%9B%98&path=shots%2Ftimeout.png" \
+  -o timeout.png
+```
+
+几条要知道的口径：
+
+- **视图名不能用**：`scope` 必须是真实库名——视图是多个库的检索范围，附件是按库存放的。
+- **`path` 整体编码**：`shots/timeout.png` 里的 `/` 必须写成 `%2F`，否则会被当成新的查询分隔。
+- **后缀白名单**：PNG / JPEG / GIF / WebP / SVG / ICO / BMP / AVIF。其它后缀一律 404。
+- **「文件不存在」与「格式不支持」返回同一个 404**（故意不区分，避免被用来探测目录结构）。
+- **不支持断点续传（`Range`）与 `ETag`**：单附件默认上限 5MB，一次整包拉取。
+- **只读 Token 也能下载**；它限制的是写入，不是读。
+
+关掉读出口（与上传开关**互不影响**）：
+
+```yaml
+mcp:
+  http:
+    downloadApi: false   # 默认 true；改完需重启服务（ki mcp restart）生效
+```
+
+关闭后 `/open/v1/asset` 与 `/open/v1/doc` 一律返回 404，`ping` 仍可用——它的 `capabilities.download` 会回显为 `false`，程序据此判断即可。
+
+> 关闭只作用于这一条通道：Web 页面看图的 `/api/*` 不受影响（它是既有能力，不属于本接口）。
+
 ### 常见错误码
 
 | HTTP | code | 含义与出路 |
@@ -281,6 +322,9 @@ ki mcp status                      # 查看当前状态：uploadApi / uploadApiS
 | 400 | `OPEN_API_EVENT_NOT_FOUND` | 指定的 `event` 不存在；`available` 列出可用的未收口事件（最多 5 个）。查询事件接口下该 code 的状态码是 **404** |
 | 400 | `OPEN_API_EVENT_CLOSED` | 该事件已收口，不能再挂新文档；改挂进行中的事件，或先在页面重开该事件 |
 | 400 | `OPEN_API_VIEW_NOT_WRITABLE` | 把知识视图当成库名了——视图是多库的检索范围，不能作为写入目标 |
+| 400 | `OPEN_API_VIEW_UNSUPPORTED` | 取件时传了视图名——附件按库存放，视图不能作为取件目标，改用成员库名 |
+| 403 | `OPEN_API_PATH_FORBIDDEN` | 附件路径非法或越界：`group` 含 `..`、`path` 带 `../`、或绝对路径 |
+| 404 | `OPEN_API_NOT_FOUND`（取件接口） | 文档 / 附件不存在、后缀不在白名单，或读出口被关闭（`downloadApi: false`） |
 | 400 | `OPEN_API_BAD_MULTIPART` | multipart 请求缺 boundary 或结构不完整（请用 `curl -F`，不要手拼请求体） |
 | 400 | `OPEN_API_ARCHIVE_UNSAFE` | 归档里有越界路径或链接文件，整包拒收且不落盘 |
 | 400 | `OPEN_API_ARCHIVE_TOO_LARGE` | 条目数/解包体积/压缩比超限，分批上传 |

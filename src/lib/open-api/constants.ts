@@ -38,6 +38,37 @@ export const MAX_UPLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 export const OPEN_API_UPLOAD_PATH = `${OPEN_API_PREFIX}/import`;
 
 /**
+ * 只读取件端点（2026-11-24 · REQ-20261124-002）：附件原始字节 + 文档正文与附图清单。
+ *
+ * 与 `OPEN_API_UPLOAD_PATH` 语义相反：`downloadApi` 关闭时这**两个**路径一律 404
+ * （不泄露接口存在性），`ping` / `events` 不受影响。
+ */
+export const OPEN_API_READ_PATHS: readonly string[] = [
+  `${OPEN_API_PREFIX}/asset`,
+  `${OPEN_API_PREFIX}/doc`,
+] as const;
+
+/**
+ * `/open/v1` 契约版本：**破坏性变更**才 +1，与 `package.json` 的发布版本解耦
+ * （否则每次发版都等于宣称契约变更，客户端无法据此判断兼容性）。
+ *
+ * 客户端口径：字段缺失视为 `0` = 不支持任何取件能力 → 报 `CONTRACT_TOO_OLD`。
+ */
+export const CONTRACT_VERSION = 1;
+
+/** `ping` 回显的能力位：客户端据此决定能不能取件、按什么上限分块 */
+export interface OpenApiCapabilities {
+  download: {
+    /** `GET /open/v1/asset` 是否可用 */
+    asset: boolean;
+    /** `GET /open/v1/doc` 是否可用 */
+    doc: boolean;
+  };
+  /** 单附件上限（与 `limits.maxAssetSize` 同源同值）；`null` = 该基准库未配置 */
+  maxAssetSize: number | null;
+}
+
+/**
  * 第三方 API 错误码（按子需求号段划分，防撞码）。
  *
  * 号段：S-01（命名空间与鉴权）10xx / S-02（流式接收与导入）11xx / S-03（开关）12xx。
@@ -59,6 +90,22 @@ export type OpenApiErrorCode =
   | 'OPEN_API_BAD_REQUEST'
   /** 把视图名当 scope 写入（400）：视图是只读的检索范围，不是可写落点 */
   | 'OPEN_API_VIEW_NOT_WRITABLE'
+  /**
+   * 把视图名当 scope 读取（400，2026-11-24 · REQ-20261124-002）：
+   * 视图在 MCP 侧可用、在取件侧不可寻址 —— 必须给区分性文案，
+   * 否则用户看到「文档不存在」会误判数据丢失（推演 P3）。
+   */
+  | 'OPEN_API_VIEW_UNSUPPORTED'
+  /**
+   * 附件路径越界（403）：group 段非法（`..` / `.` / 空段 / 绝对路径）或 ref 解析越出 assets 目录。
+   * 与 404 区分：403 表示「你给的路径本身不合法」，404 表示「路径合法但文件不在」。
+   */
+  | 'OPEN_API_PATH_FORBIDDEN'
+  /**
+   * 端点已注册但实现未就绪（501）。
+   * 仅出现在骨架期（REQ-20261124-002 前置层），S-02 / S-03 填充实现后不再返回。
+   */
+  | 'OPEN_API_NOT_IMPLEMENTED'
   // S-02 上传与导入（W6/W7 使用）
   | 'OPEN_API_UNSUPPORTED_CONTENT_TYPE'
   | 'OPEN_API_BAD_MULTIPART'

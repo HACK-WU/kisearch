@@ -1,14 +1,20 @@
 /**
- * 对外 MCP 通道的取图（REQ-20261123-008 · B6）
+ * 对外 MCP 通道的取图工具（REQ-20261123-008 · B6 → **REQ-20261124-002 · S-04 降级**）
  *
- * ═══ 守什么 ═══
- * 内部对话链路能看图 ≠ 外部 MCP 客户端能看图。这条链路上有三处会悄悄吃掉图片：
- *   ① 工厂把工具注册到**写块**（只读 Token 看不见）—— ki_get_image 必须在只读块；
- *   ② 只读 Token 的能力白名单漏登记（`TOOL_CAPABILITIES` 默认拒绝）；
- *   ③ 传输层对 content 做过滤或截断（本项目没有，但一旦有人加就会静默坏掉）。
+ * ═══ 这个文件在守什么（2026-11-24 起）═══
+ * B6 当时的断言是「`result.content` 里有 `{type:'image', data, mimeType}`」。协议层确实对
+ * （真 HTTP + 真 SDK 断言过，199KB base64、PNG 魔数正确），但**IDE 侧 MCP 客户端**把图片
+ * 转成 `image_url` 后不解码，反而把 base64 当文本注入并截断 → 模型拿不到图（事件 #90）。
  *
- * 这里走**真 HTTP + 真 MCP SDK + 真工具**：initialize 拿 sessionId → tools/call →
- * 断言 JSON-RPC `result.content` 里有 `{type:'image', data, mimeType}`。
+ * 消费方修不了，所以本层降级为 **text-only**：给清单 + 两条 HTTP 取件链接 + hint。
+ * 现在的回归锁相应变成：
+ *   ① 仍然只有 **text** content，**不再有 image part**（降级的全部意义）；
+ *   ② 清单字段完整（ref / mime / bytes）+ `apiUrl` / `humanUrl` 可解析；
+ *   ③ `hint` 必须说明「本通道不返回图片内容」并给替代路径；
+ *   ④ 零命中仍 `isError: true`（不能变成"成功但空"）。
+ *
+ * ⚠️ chat 面板不受本降级影响：它走 `chat/mcp-tool-registry.ts` → 执行层
+ * `asset-image.ts::executeGetImage`，不经过本协议适配层（回归见 `test/chat/tool-image.test.ts`）。
  *
  * 运行：`env -u NODE_OPTIONS -u BASH_ENV npx jiti test/mcp-get-image.test.ts`
  */
@@ -115,8 +121,16 @@ async function callTool(sid: string, name: string, args: Record<string, unknown>
   return JSON.parse(line!) as Record<string, unknown>;
 }
 
-describe('B6：对外 MCP 取图', () => {
-  it('tools/call ki_get_image 返回 text 摘要 + image content（base64）', async () => {
+interface DegradedSummary {
+  ok?: boolean;
+  count?: number;
+  images?: Array<{ ref?: string; mime?: string; bytes?: number; apiUrl?: string; humanUrl?: string }>;
+  hint?: string;
+  text?: string;
+}
+
+describe('S-04：对外 MCP 取图已降级为 text-only', () => {
+  it('tools/call ki_get_image 只返回 text（无 image part），且给清单 + 两条链接 + hint', async () => {
     const sid = await initialize();
     const payload = await callTool(sid, 'ki_get_image', { scope: SCOPE, group: GROUP, refs: ['shot.png'] });
 
@@ -124,25 +138,38 @@ describe('B6：对外 MCP 取图', () => {
     assert.ok(Array.isArray(result.content), 'result.content 必须是数组');
     const content = result.content!;
 
-    // ① 第一块是给模型/人看的摘要
-    const textPart = content.find((c) => c.type === 'text');
-    assert.ok(textPart, '应有 text 摘要');
-    assert.match(String(textPart!.text), /已读取 1 张图片/);
-    assert.match(String(textPart!.text), /shot\.png/);
+    // ① 降级的核心：不再有 image content
+    assert.equal(content.filter((c) => c.type === 'image').length, 0, '降级后不得再下发 image content');
 
-    // ② 必须有 image content，且是标准 MCP 形状（type/data/mimeType）
-    const imageParts = content.filter((c) => c.type === 'image');
-    assert.equal(imageParts.length, 1, `应有 1 个 image content，实际 ${imageParts.length}`);
-    const img = imageParts[0]!;
-    assert.equal(img.mimeType, 'image/png');
-    assert.equal(typeof img.data, 'string');
-    const b64 = String(img.data);
-    assert.ok(b64.length > 100, 'base64 载荷不能为空');
-    // 载荷必须是"纯 base64"——PNG 魔数的 base64 前缀 iVBORw0KGgo
-    assert.equal(b64.startsWith('iVBORw0KGgo'), true, '应是 PNG 的 base64 数据');
-    assert.equal(b64.includes('data:'), false, 'MCP image content 不带 data: 前缀');
+    // ② 只有一个 text part，且是可解析的 JSON 摘要
+    const textParts = content.filter((c) => c.type === 'text');
+    assert.equal(textParts.length, 1, `应只有 1 个 text part，实际 ${textParts.length}`);
+    const raw = String(textParts[0]!.text);
+    const summary = JSON.parse(raw) as DegradedSummary;
 
-    // ③ 不应被标成错误
+    assert.equal(summary.count, 1);
+    const img = summary.images?.[0];
+    assert.equal(img?.ref, 'shot.png');
+    assert.equal(img?.mime, 'image/png');
+    assert.ok((img?.bytes ?? 0) > 0);
+
+    // ③ 两条链接：apiUrl（/open/v1，对外契约）与 humanUrl（/api，浏览器可直开）
+    assert.ok(img?.apiUrl, '应有 apiUrl');
+    assert.ok(img?.humanUrl, '应有 humanUrl');
+    const api = new URL(img.apiUrl);
+    const human = new URL(img.humanUrl);
+    assert.equal(api.pathname, '/open/v1/asset');
+    assert.equal(human.pathname, '/api/asset');
+    assert.equal(api.searchParams.get('scope'), SCOPE);
+    assert.equal(api.searchParams.get('group'), GROUP);
+    assert.equal(api.searchParams.get('path'), 'shot.png');
+
+    // ④ hint 必须解释原因并给替代路径
+    assert.match(summary.hint ?? '', /不返回图片内容/);
+    assert.match(summary.hint ?? '', /humanUrl/);
+    assert.match(summary.hint ?? '', /ki-client asset get/);
+
+    // ⑤ 不是错误
     assert.notEqual(result.isError, true);
   });
 

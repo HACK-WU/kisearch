@@ -13,7 +13,7 @@ import type http from 'node:http';
 
 import { getScopeImportConfig } from '../../config.js';
 import { isScopeAuthorized } from '../../mcp-token.js';
-import { OPEN_API_PREFIX } from '../constants.js';
+import { CONTRACT_VERSION, OPEN_API_PREFIX, type OpenApiCapabilities } from '../constants.js';
 import { sendJson, sendOpenApiError } from '../respond.js';
 import type { OpenApiContext } from '../index.js';
 import type { OpenApiPrincipal } from '../auth.js';
@@ -50,6 +50,20 @@ export async function handleOpenApiPing(input: {
   sendJson(res, 200, {
     ok: true,
     api: OPEN_API_PREFIX.replace(/^\//, ''),
+    /**
+     * 契约版本（REQ-20261124-002）：只有**破坏性变更**才 +1。
+     * 客户端口径：字段缺失视为 0 = 不支持任何 v1 取件能力 → 报 `CONTRACT_TOO_OLD`。
+     */
+    contractVersion: CONTRACT_VERSION,
+    /**
+     * 能力位：客户端据此决定能不能取件、按什么上限分块。
+     * 一次给全 `asset` / `doc` 两项，避免后续加端点再改本响应形状。
+     */
+    capabilities: {
+      download: { asset: ctx.downloadApi, doc: ctx.downloadApi },
+      /** 与下方 limits.maxAssetSize 同源同值（0 表示该基准库未配置上限） */
+      maxAssetSize: importCfg?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE,
+    } satisfies OpenApiCapabilities,
     ...(principal.tokenId ? { tokenId: principal.tokenId } : {}),
     scopes: principal.scopes,
     readOnly: principal.readOnly,
