@@ -659,7 +659,7 @@ export interface DeleteEventInput {
    *   · 未收口事件的成员多半处于 hidden / fts-only，删除后要恢复可见性 → 得改索引；
    *   · `trash` 去向要搬回收站，而 `moveToTrash` 只写回收站条目、不摘索引；
    *   · 可见性与索引一旦不同步，就是「hidden 仍可召回」那一类静默故障。
-   * 有成员的场景有明确出路：先 `ki_event_docs remove` 解绑（文档回 wiki），再强制删；
+   * 有成员的场景有明确出路：先 `ki_event_edit members remove` 解绑（文档回 wiki），再强制删；
    * 或走正常收口（`applyTerminalAction` 会把文档与索引一起处理）。
    */
   force?: boolean;
@@ -709,7 +709,7 @@ export async function deleteEvent(scope: string, input: DeleteEventInput): Promi
         throw new GovernanceError(
           'EVENT_FORCE_NOT_EMPTY',
           `事件「#${event.shortId} ${event.title}」还有 ${members.length} 篇关联文档，force 只用于清理空事件；`
-            + '请先 ki_event_docs remove 解绑（文档回长期保留），或走正常收口后再删',
+            + '请先 ki_event_edit members remove 解绑（文档回长期保留），或走正常收口后再删',
           { members: members.length },
         );
       }

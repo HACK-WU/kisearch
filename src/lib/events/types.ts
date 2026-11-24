@@ -240,6 +240,15 @@ export interface ConclusionNode {
   branches?: string[];
 }
 
+/**
+ * 结论来源（2026-11-23 · REQ-20261123-009）。
+ *
+ * 缺省（`undefined`）= `'ai'`：历史文件没有该字段，读盘不做迁移、不写回，
+ * 前端 `draft.source ?? 'ai'` 判定。`'external'` 表示由 MCP 上传，无分析过程
+ * （`steps: []` / `stats` 全 0 / 不设 `editedAt`）。
+ */
+export type AnalysisSource = 'ai' | 'external';
+
 export interface AnalysisDraft {
   runId: string;
   bootId?: string;
@@ -280,6 +289,12 @@ export interface AnalysisDraft {
    * 因此该字段自然消失（= 修订标识在重新分析后清掉）。**只记时间不记人**（无 per-user 身份）。
    */
   editedAt?: number;
+  /** 结论来源（2026-11-23）；缺省 = 'ai'。外部上传**不设** `editedAt`，用它区分 */
+  source?: AnalysisSource;
+  /** 外部上传时间戳（ms）；仅 `source === 'external'` 出现 */
+  importedAt?: number;
+  /** 外部来源标识（如 MCP 客户端名）；仅 `source === 'external'` 出现，用于回读与排障 */
+  sourceClient?: string;
 }
 
 export interface ConfirmedCodeLocation {
