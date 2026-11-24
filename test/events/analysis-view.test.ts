@@ -164,3 +164,39 @@ describe('追问上下文措辞与卡面同源', () => {
     assert.equal(chainToLines(withRef, 'perf')[0], '- 瓶颈点：x（src/a.ts:12）；分支：条件 A');
   });
 });
+
+describe('数据链路（dataFlow）的视角语义（2026-11-24 · REQ-20261124-001）', () => {
+  it('四档 flowGuide 都非空且互不相同（自建类型落 generic 也有话说）', () => {
+    const guides = ANALYSIS_VIEWS.map((view) => viewProfile(view).flowGuide);
+    for (const [i, guide] of guides.entries()) {
+      assert.ok(guide.trim().length > 0, `${ANALYSIS_VIEWS[i]} 的 flowGuide 为空`);
+    }
+    assert.equal(new Set(guides).size, ANALYSIS_VIEWS.length, '四档链路语义应各不相同');
+  });
+
+  it('输出规范按视角注入对应语义（换视角就换说法，不混用）', () => {
+    for (const view of ANALYSIS_VIEWS) {
+      const tail = buildOutputTail(view);
+      assert.ok(tail.includes(viewProfile(view).flowGuide), `${view} 未注入自己的 flowGuide`);
+      const others = ANALYSIS_VIEWS.filter((v) => v !== view);
+      for (const other of others) {
+        assert.ok(!tail.includes(viewProfile(other).flowGuide), `${view} 的规范里混入了 ${other} 的链路语义`);
+      }
+    }
+  });
+
+  it('输出规范含 dataFlow 字段与降级句式（取不到不许编造）', () => {
+    const tail = buildOutputTail('fault');
+    assert.match(tail, /"dataFlow":/);
+    assert.match(tail, /未取到数据链路：已检查/);
+    assert.match(tail, /不要编造/);
+    // 换行必须要求转义：裸换行会让整份 JSON 解析失败（格式纠错重试只是兜底，不该常态触发）
+    assert.match(tail, /所有换行必须写成 \\n 转义/);
+  });
+
+  it('数据链路写法与 chain 的「一句话」口径相反：明确要求多行树', () => {
+    const tail = buildOutputTail('fault');
+    assert.match(tail, /每步一行/);
+    assert.match(tail, /3~15 步/);
+  });
+});

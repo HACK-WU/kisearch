@@ -59,14 +59,14 @@ type Action = 'description' | 'analysis' | 'members' | 'references' | 'stage';
 /** 每个 action 允许出现的字段（其余字段传了即报错，防"看起来都对但其实没生效"） */
 const ALLOWED_FIELDS: Record<Action, readonly string[]> = {
   description: ['description'],
-  analysis: ['conclusion', 'chain', 'candidates', 'unconfirmed', 'targetDir', 'overwrite', 'skipInvalidCandidates', 'expectedRunId'],
+  analysis: ['conclusion', 'chain', 'candidates', 'unconfirmed', 'dataFlow', 'targetDir', 'overwrite', 'skipInvalidCandidates', 'expectedRunId'],
   members: ['docRefs', 'docAction'],
   references: ['docRefs', 'docAction'],
   stage: ['stage', 'note'],
 };
 
 const KNOWN_FIELDS = [
-  'description', 'conclusion', 'chain', 'candidates', 'unconfirmed', 'targetDir',
+  'description', 'conclusion', 'chain', 'candidates', 'unconfirmed', 'dataFlow', 'targetDir',
   'overwrite', 'skipInvalidCandidates', 'expectedRunId', 'docRefs', 'docAction', 'stage', 'note',
 ] as const;
 
@@ -79,6 +79,8 @@ type EditArgs = {
   chain?: unknown[];
   candidates?: unknown[];
   unconfirmed?: string[];
+  /** 数据链路（多行文本树）：不传 = 这份结论没有链路（覆盖时清空原值） */
+  dataFlow?: string;
   targetDir?: string;
   overwrite?: boolean;
   skipInvalidCandidates?: boolean;
@@ -181,6 +183,7 @@ async function handleAnalysis(args: EditArgs) {
       ...(args.chain !== undefined ? { chain: args.chain } : {}),
       candidates: args.candidates,
       ...(args.unconfirmed !== undefined ? { unconfirmed: args.unconfirmed } : {}),
+      ...(args.dataFlow !== undefined ? { dataFlow: args.dataFlow } : {}),
       ...(args.targetDir !== undefined ? { targetDir: args.targetDir } : {}),
       ...(args.overwrite !== undefined ? { overwrite: args.overwrite } : {}),
       ...(args.skipInvalidCandidates !== undefined ? { skipInvalidCandidates: args.skipInvalidCandidates } : {}),
@@ -427,7 +430,7 @@ async function handleStage(args: EditArgs) {
 export function registerEventEditTool(server: McpServer): void {
   server.tool(
     'ki_event_edit',
-    '编辑事件：description=改描述 / analysis=上传结论 / members=挂或解绑关联文档 / references=增删参考文档 / stage=流转阶段。'
+    '编辑事件：description=改描述 / analysis=上传结论与数据链路 / members=挂或解绑关联文档 / references=增删参考文档 / stage=流转阶段。'
       + '一次只做一类（单值 action，字段不匹配即报错）；analysis 必须带 candidates。'
       + '注意：members 的 remove 只是解绑（文档仍可检索、不删除）；stage 到终态会按类型设定处理关联文档，trash 类型会把文档移入回收站（不可自动撤销）。',
     {
@@ -441,6 +444,9 @@ export function registerEventEditTool(server: McpServer): void {
       chain: z.array(ChainNodeInput).optional().describe('[analysis] 因果链（≤5 节点，顺序即阅读顺序）'),
       candidates: z.array(CandidateInput).optional().describe('[analysis] 代码位置（必填，≥1；服务端逐条验真）'),
       unconfirmed: z.array(z.string()).optional().describe('[analysis] 未确认点（≤20 条 × ≤300 字）'),
+      dataFlow: z.string().optional().describe(
+        '[analysis] 数据链路（多行文本树，≤40 行 / ≤3000 字）；不传表示这份结论没有链路',
+      ),
       targetDir: z.string().optional().describe('[analysis] 必须等于分析配置根目录'),
       overwrite: z.boolean().optional().describe('[analysis] 覆盖已有 AI 结论必须传 true（不可恢复）'),
       skipInvalidCandidates: z.boolean().optional().describe('[analysis] 剔除验真失败的位置（默认 false=整批失败）'),

@@ -19,6 +19,11 @@ import {
   REF_PATTERN,
   oneLine,
 } from './conclusion-chain.js';
+import {
+  DATA_FLOW_MAX_CHARS,
+  DATA_FLOW_MAX_LINES,
+  normalizeDataFlow,
+} from './data-flow.js';
 import type { ConclusionNode, ConclusionNodeKind } from './types.js';
 
 /**
@@ -37,7 +42,7 @@ export const MANUAL_LOCATION_WHY_MAX = 200;
 /** 单次请求最多手工新增几个位置（防一次贴一屏） */
 export const MANUAL_LOCATION_ADD_MAX = 20;
 
-export type EditField = 'conclusion' | 'chain' | 'unconfirmed' | 'confirmed' | 'candidates';
+export type EditField = 'conclusion' | 'chain' | 'unconfirmed' | 'confirmed' | 'candidates' | 'dataFlow';
 
 /** 一条可定位的校验错误；`index` 是该字段内的第几项（0 起） */
 export interface EditFieldError {
@@ -61,6 +66,11 @@ export interface DraftEditPayload {
   unconfirmed?: unknown;
   confirmedAdd?: unknown;
   confirmedUpdate?: unknown;
+  /**
+   * 数据链路（2026-11-24 · S03 §3.2）：只供**补丁采纳**走 PATCH 时带上，
+   * 编辑态 UI 不提供输入（H13）。`null` / 全空白 = 清空，省略 = 不改。
+   */
+  dataFlow?: string | null;
 }
 
 /** 校验通过后的规范化结果（只在 `errors.length === 0` 时使用） */
@@ -70,6 +80,8 @@ export interface NormalizedEdit {
   unconfirmed?: string[];
   confirmedAdd?: ManualLocationInput[];
   confirmedUpdate?: Array<{ id: string; why: string }>;
+  /** `null` = 显式清空（删键），`undefined` = 未提供（保留原值） */
+  dataFlow?: string | null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -77,7 +89,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 const EDIT_KEYS: ReadonlyArray<keyof DraftEditPayload> = [
-  'conclusion', 'chain', 'unconfirmed', 'confirmedAdd', 'confirmedUpdate',
+  'conclusion', 'chain', 'unconfirmed', 'confirmedAdd', 'confirmedUpdate', 'dataFlow',
 ];
 
 /**
@@ -309,6 +321,23 @@ export function validateDraftEdit(
     }
   }
 
+  if (payload.dataFlow !== undefined) {
+    /*
+     * **宽松口径**（S03 §3.2 / §7 决策）：这条路径只有补丁采纳在用（来源是模型），
+     * 超一行就整份拒掉会让补丁频繁失效 —— 所以走 `normalizeDataFlow` 截断，
+     * 并在末尾追加可见的「链路过长，已截断」提示行，而不是报错。
+     * 类型不对仍然报错：那不是"内容长了一点"，是调用方写错了。
+     */
+    if (payload.dataFlow === null) {
+      value.dataFlow = null;
+    } else if (typeof payload.dataFlow !== 'string') {
+      errors.push({ field: 'dataFlow', reason: '数据链路必须是字符串或 null' });
+    } else {
+      // 归一后为空（全空白）= 没有链路 ⇒ 清空，不落一个空串（前端会渲染出空块）
+      value.dataFlow = normalizeDataFlow(payload.dataFlow) ?? null;
+    }
+  }
+
   if (payload.chain !== undefined) validateChain(payload.chain, errors, value);
   if (payload.unconfirmed !== undefined) validateUnconfirmed(payload.unconfirmed, errors, value);
   if (payload.confirmedAdd !== undefined) validateConfirmedAdd(payload.confirmedAdd, errors, value);
@@ -349,6 +378,8 @@ export interface ExternalImportPayload {
   chain?: unknown;
   candidates: unknown;
   unconfirmed?: unknown;
+  /** 数据链路（2026-11-24 · S03 §3.3）：**不传 = 这份结论没有链路**（整篇覆盖 ⇒ 清空） */
+  dataFlow?: unknown;
 }
 
 export interface NormalizedExternalImport {
@@ -356,6 +387,41 @@ export interface NormalizedExternalImport {
   chain: ConclusionNode[];
   candidates: ExternalCandidateInput[];
   unconfirmed?: string[];
+  /** 缺省 = 本次上传没有链路（调用方**删键**，不是写 null） */
+  dataFlow?: string;
+}
+
+/**
+ * 外部入口的链路校验：**严格报错、绝不静默截断**（S03 §3.3 / §5）。
+ *
+ * 与 `validateDraftEdit` 的宽松口径刻意不同：那边来源是模型，超一行就整份拒绝会让补丁
+ * 频繁失效；这边是可对话的外部 AI，报错能被它自己纠正。若在这里截断，外部 AI 会以为
+ * 上传成功而链路已被砍掉一截。
+ *
+ * 行数 / 字数按**原始输入**量（归一只会变短，不会变长），`null` / 全空白视为「没有链路」。
+ */
+function validateExternalDataFlow(raw: unknown, errors: EditFieldError[]): string | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string') {
+    errors.push({ field: 'dataFlow', reason: '数据链路必须是字符串（多行文本树，用 \\n 换行）' });
+    return undefined;
+  }
+  const probe = raw.replace(/\r\n?/g, '\n').trim();
+  if (!probe) return undefined;
+  const lines = probe.split('\n').length;
+  if (lines > DATA_FLOW_MAX_LINES) {
+    errors.push({ field: 'dataFlow', reason: `数据链路共 ${lines} 行，超过上限 ${DATA_FLOW_MAX_LINES} 行` });
+    return undefined;
+  }
+  if (probe.length > DATA_FLOW_MAX_CHARS) {
+    errors.push({
+      field: 'dataFlow',
+      reason: `数据链路 ${probe.length} 字，超过上限 ${DATA_FLOW_MAX_CHARS} 字`,
+    });
+    return undefined;
+  }
+  // 通过后再归一（CRLF / 行尾空白 / 连续空行）：落盘形状必须与 AI 侧一致
+  return normalizeDataFlow(raw);
 }
 
 function validateExternalCandidates(raw: unknown, errors: EditFieldError[]): ExternalCandidateInput[] {
@@ -448,6 +514,7 @@ export function validateExternalImport(
   errors.push(...base.errors);
 
   const candidates = validateExternalCandidates(payload.candidates, errors);
+  const dataFlow = validateExternalDataFlow(payload.dataFlow, errors);
   const chain = base.value.chain ?? [];
   if (chain.length === 0) {
     errors.push({ field: 'chain', reason: '结论链至少需要 1 个节点（现象 → 原因 → 根因 → 影响 → 建议）' });
@@ -475,6 +542,7 @@ export function validateExternalImport(
       chain,
       candidates,
       ...(base.value.unconfirmed !== undefined ? { unconfirmed: base.value.unconfirmed } : {}),
+      ...(dataFlow ? { dataFlow } : {}),
     },
   };
 }

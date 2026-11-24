@@ -184,6 +184,54 @@ describe('S-03 事件描述与分析存储契约', () => {
     assert.equal(normalized.draft?.status, 'ready', '归一不得影响原有状态');
   });
 
+  it('③c 数据链路（2026-11-24）：旧文件无该键不补、脏值被清、合法值原样保留', () => {
+    const base = {
+      runId: 'r_flow',
+      status: 'ready' as const,
+      targetDir: '/tmp',
+      commit: null,
+      conclusion: '一句话',
+      chain: [],
+      candidates: [],
+      unconfirmed: [],
+      steps: [],
+      stats: { turns: 1, filesRead: 1, tokens: 10, ms: 20 },
+      startedAt: Date.now() - 10_000,
+      updatedAt: Date.now() - 10_000,
+    };
+    const wrap = (draft: Record<string, unknown>) => normalizeAnalysisDocForRead({
+      version: 1,
+      eventId: 'evt_flow',
+      draft: draft as never,
+      confirmed: [],
+      updatedAt: Date.now() - 10_000,
+    }, false);
+
+    /* 旧文件（无该键）→ 无该键，且不得为「无变化早退」而留下 undefined 之外的怪值 */
+    const legacy = wrap({ ...base });
+    assert.equal(legacy.draft?.dataFlow, undefined, '旧文件不该凭空长出链路');
+
+    /* 脏值（数字）→ 清掉。单写 `flow === rawFlow` 会误判为无变化而放行，故必须分两支判据 */
+    const dirty = wrap({ ...base, dataFlow: 123 });
+    assert.equal(dirty.draft?.dataFlow, undefined, '非法类型必须清掉，否则前端渲染对象直接抛错');
+
+    /* 空串 / 全空白 → 等同没有链路（不渲染空块） */
+    assert.equal(wrap({ ...base, dataFlow: '   ' }).draft?.dataFlow, undefined);
+
+    /* 合法多行 → 原样保留（含行首缩进与箭头，一个空格都不能少） */
+    const tree = 'a → b\n    ▼\nc';
+    assert.equal(wrap({ ...base, dataFlow: tree }).draft?.dataFlow, tree);
+
+    /* 合法且无需清洗 → 返回**原对象引用**（读盘路径依赖这个早退，否则每次读都造新对象） */
+    const doc = { version: 1 as const, eventId: 'evt_same', draft: { ...base, dataFlow: tree } as never, confirmed: [], updatedAt: Date.now() };
+    assert.equal(normalizeAnalysisDocForRead(doc, false), doc, '无变化时必须返回原引用');
+
+    /* 超限 → 截断 + 提示行 */
+    const long = Array.from({ length: 60 }, (_, i) => `s${i}`).join('\n');
+    const cut = wrap({ ...base, dataFlow: long }).draft?.dataFlow ?? '';
+    assert.ok(cut.endsWith('…（链路过长，已截断）'), '超行数上限必须截断并给提示行');
+  });
+
   it('④ ki_event_list 透出 codeLocationTotal 与 codeLocationsPreview；deleteEvent 清理 .analysis.json', async () => {
     const ev = await createEvent(scope, { title: '列表透出测试', typeId: 'et_1' });
     await writeDraftStart(scope, ev.id, {

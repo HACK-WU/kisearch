@@ -22,6 +22,7 @@ import { walWrite } from '../wal.js';
 import { withScopeWriteLock } from '../scope-write-lock.js';
 import { GovernanceError } from '../governance-errors.js';
 import { normalizeChain, pruneChainRefs } from './conclusion-chain.js';
+import { normalizeDataFlow } from './data-flow.js';
 import {
   hasEditFields,
   validateDraftEdit,
@@ -106,13 +107,24 @@ export function normalizeAnalysisDocForRead(
   const rawEditedAt = (d as { editedAt?: unknown }).editedAt;
   const editedAtOk = rawEditedAt === undefined
     || (typeof rawEditedAt === 'number' && Number.isFinite(rawEditedAt));
-  const normalized = conclusionOk && chainOk && editedAtOk
+  /*
+   * 数据链路（2026-11-24 · REQ-20261124-001）：与 `chain` 同为历史兼容点，但判据**必须分两支** ——
+   * `normalizeDataFlow` 对「非字符串」与「空串/全空白」都返回 undefined，单写 `flow === rawFlow`
+   * 会把 `dataFlow: 123` 误判为「无变化」，脏值原样留给前端（React 渲染对象会直接抛
+   * `Objects are not valid as a React child`）。
+   */
+  const rawFlow = (d as { dataFlow?: unknown }).dataFlow;
+  const flow = normalizeDataFlow(rawFlow);
+  const flowOk = flow === undefined ? rawFlow === undefined : flow === rawFlow;
+  const normalized = conclusionOk && chainOk && editedAtOk && flowOk
     ? d
     : {
       ...d,
       conclusion: conclusionOk ? d.conclusion : null,
       chain: chainOk ? d.chain : chain,
       ...(editedAtOk ? {} : { editedAt: undefined }),
+      // 写成 undefined 而不是删键：JSON.stringify 落盘时同样会丢掉该键，内存里也不会泄露脏值
+      ...(flowOk ? {} : flow === undefined ? { dataFlow: undefined } : { dataFlow: flow }),
     };
   const withNormalized = (draft: typeof d) => (normalized === d ? doc : { ...doc, draft });
 
@@ -256,6 +268,8 @@ export interface SaveDraftEditsArgs {
   unconfirmed?: unknown;
   confirmedAdd?: unknown;
   confirmedUpdate?: unknown;
+  /** 数据链路（2026-11-24 · S03 §3.2）：只供补丁采纳；省略 = 不动链路，`null`/全空白 = 清空 */
+  dataFlow?: string | null;
 }
 
 function assertRunIdMatch(current: string | null, expected: string | null | undefined): void {
@@ -443,6 +457,12 @@ export async function saveDraftEdits(
       ...(value.conclusion !== undefined ? { conclusion: value.conclusion } : {}),
       ...(value.chain !== undefined ? { chain: value.chain } : {}),
       ...(value.unconfirmed !== undefined ? { unconfirmed: value.unconfirmed } : {}),
+      /*
+       * 数据链路：`undefined` = 未提供 ⇒ 保留原值；`null` = 显式清空 ⇒ 写成 `undefined`
+       * （`walWrite` 走 JSON.stringify，该键会被丢掉，与读侧的 `normalizeDataFlow` 口径一致）。
+       * 不能写 `null`：契约是 `dataFlow?: string`，前端遇到 null 会当成"有链路"渲染空块。
+       */
+      ...(value.dataFlow !== undefined ? { dataFlow: value.dataFlow ?? undefined } : {}),
       // 不变量 3：有效写盘必设 editedAt；清空 liveThinking 避免留下永不结束的"思考中"
       editedAt: now,
       updatedAt: now,
@@ -477,6 +497,11 @@ export interface ExternalAnalysisInput {
   chain?: unknown;
   candidates: unknown;
   unconfirmed?: unknown;
+  /**
+   * 数据链路（2026-11-24 · S03 §3.3）：**整篇覆盖语义** —— 不传 = 这份结论明确没有链路，
+   * 覆盖后原值随之消失。与追问补丁的「不传即保留」正相反，别照抄那一边的判据。
+   */
+  dataFlow?: string;
   /** 传入时必须等于配置解析出的分析根目录（两个基准会让 ref 解析漂移） */
   targetDir?: string;
   commit?: string | null;
@@ -564,6 +589,7 @@ export async function saveExternalAnalysis(
     ...(input.chain !== undefined ? { chain: input.chain } : {}),
     candidates: input.candidates,
     ...(input.unconfirmed !== undefined ? { unconfirmed: input.unconfirmed } : {}),
+    ...(input.dataFlow !== undefined ? { dataFlow: input.dataFlow } : {}),
   });
   if (errors.length > 0) {
     throw new GovernanceError('ANALYSIS_EDIT_INVALID', errors[0]!.reason, { errors });
@@ -650,6 +676,12 @@ export async function saveExternalAnalysis(
       // 已全部转成 confirmed：留空 = 页面不再出现「待确认的代码位置」
       candidates: [],
       unconfirmed: value.unconfirmed ?? [],
+      /*
+       * 整篇覆盖：**不传就不带该键**（⇒ 旧链路消失）。这里刻意不写
+       * `dataFlow: value.dataFlow` —— 那会落一个 `undefined` 键，读侧虽能归一掉，
+       * 但 `draft` 的内存对象会与"从磁盘读回来"的形状不一致，测试和 diff 都会困惑。
+       */
+      ...(value.dataFlow ? { dataFlow: value.dataFlow } : {}),
       steps: [],
       stats: { turns: 0, filesRead: 0, tokens: 0, ms: 0 },
       startedAt: now,

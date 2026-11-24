@@ -311,3 +311,62 @@ describe('startEventAnalysis：有修订时重跑被拦（R-08）', () => {
     );
   });
 });
+
+/*
+ * 数据链路走 PATCH（2026-11-24 · S03 §3.2）：这条路径只有「采纳追问补丁」在用，
+ * 编辑态 UI 不开放（H13）。守三件事：
+ *   ① 传了 → 落盘（补丁采纳必须真能写进去，否则解析出来也白搭）；
+ *   ② 不传 → 保留原值（补丁缺省语义，与外部上传相反）；
+ *   ③ 口径是**宽松归一**：超限截断 + 提示行，不报错。
+ */
+describe('saveDraftEdits：数据链路（补丁采纳专用）', () => {
+  const flow = '页面打开 → 取表清单\n    ▼\n逐表查询';
+
+  it('⑱ 传 dataFlow → 落盘且能回读', async () => {
+    const ev = await createEvent(scope, { title: '链路写入', typeId: 'et_1' });
+    await seedDraft(ev.id, { dataFlow: '旧链路' });
+    const doc = await saveDraftEdits(scope, ev.id, { expectedRunId: 'run_seed', dataFlow: flow }, Date.now(), deps());
+    assert.equal(doc.draft?.dataFlow, flow);
+    assert.equal(readAnalysisDocRaw(scope, ev.id).draft?.dataFlow, flow);
+  });
+
+  it('⑲ 不传 dataFlow → 保留旧值（只改结论不该动链路）', async () => {
+    const ev = await createEvent(scope, { title: '链路保留', typeId: 'et_1' });
+    await seedDraft(ev.id, { dataFlow: flow });
+    const doc = await saveDraftEdits(scope, ev.id, { conclusion: '只换结论' }, Date.now(), deps());
+    assert.equal(doc.draft?.conclusion, '只换结论');
+    assert.equal(doc.draft?.dataFlow, flow, '不传 = 不改链路');
+  });
+
+  it('⑳ 传 null / 全空白 → 清空（键被删掉，不是写 null）', async () => {
+    const ev = await createEvent(scope, { title: '链路清空', typeId: 'et_1' });
+    await seedDraft(ev.id, { dataFlow: flow });
+    const doc = await saveDraftEdits(scope, ev.id, { dataFlow: '   \n  ' }, Date.now(), deps());
+    assert.equal(doc.draft?.dataFlow, undefined);
+    assert.equal('dataFlow' in (readAnalysisDocRaw(scope, ev.id).draft as object), false, '落盘后不该留空串 / null');
+
+    await seedDraft(ev.id, { dataFlow: flow, runId: 'run_second' });
+    const cleared = await saveDraftEdits(scope, ev.id, { dataFlow: null, expectedRunId: 'run_second' }, Date.now(), deps());
+    assert.equal(cleared.draft?.dataFlow, undefined);
+  });
+
+  it('㉑ 超 40 行 / 超 3000 字 → 宽松截断 + 提示行（不报错，补丁才不至于整份失效）', async () => {
+    const ev = await createEvent(scope, { title: '链路截断', typeId: 'et_1' });
+    await seedDraft(ev.id);
+    const long = Array.from({ length: 60 }, (_, i) => `第 ${i + 1} 步`).join('\n');
+    const doc = await saveDraftEdits(scope, ev.id, { dataFlow: long }, Date.now(), deps());
+    const saved = doc.draft?.dataFlow ?? '';
+    assert.equal(saved.split('\n').length, 41);
+    assert.match(saved, /已截断/);
+  });
+
+  it('㉒ 非字符串 → 报错（这是调用方写错，不是"内容长了一点"）', async () => {
+    const ev = await createEvent(scope, { title: '链路类型错', typeId: 'et_1' });
+    await seedDraft(ev.id, { dataFlow: flow });
+    await assert.rejects(
+      () => saveDraftEdits(scope, ev.id, { dataFlow: 123 as never }, Date.now(), deps()),
+      isCode('ANALYSIS_EDIT_INVALID'),
+    );
+    assert.equal(readAnalysisDocRaw(scope, ev.id).draft?.dataFlow, flow, '报错时旧值不动');
+  });
+});

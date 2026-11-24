@@ -23,6 +23,7 @@
  */
 import { CONCLUSION_MAX_CHARS, validateDraftEdit } from './analysis-edit.js';
 import { oneLine } from './conclusion-chain.js';
+import { normalizeDataFlow } from './data-flow.js';
 import { viewProfile, type AnalysisView } from './analysis-view.js';
 import type { AskProposal, ConclusionNode } from './types.js';
 
@@ -32,9 +33,14 @@ export type { AskProposal };
 export const PATCH_FENCE_LANG = 'ki-conclusion-patch';
 
 export type ProposalDiffBlock = {
-  block: 'conclusion' | 'chain';
+  /**
+   * `dataFlow`（2026-11-24 · S03）：链路改动**不铺全文**，只给「行数 + 首行」摘要 ——
+   * 一棵 40 行的树塞进弹框会把人淹掉，而用户真正要判断的是「改的是哪一段」。
+   * 看不清时再展开（S03 Q1 保留的升级口）。
+   */
+  block: 'conclusion' | 'chain' | 'dataFlow';
   kind: '改' | '增' | '删';
-  /** 展示用摘要（chain 用节点文本，不走 kind 词表） */
+  /** 展示用摘要（chain 用节点文本，dataFlow 用「N 行 · 首行」，不走 kind 词表） */
   before?: string;
   after?: string;
 };
@@ -202,11 +208,19 @@ export function extractProposal(answer: string): {
         ? { branches: n.branches.filter((b): b is string => typeof b === 'string').map(oneLine).filter(Boolean) }
         : {}),
     }));
+  /*
+   * 数据链路（2026-11-24 · S03 §3.1）：**缺省不改**。
+   * 归一交给 `normalizeDataFlow`（非字符串 / 全空白 → `undefined`），归一后为空就**不写进
+   * patch** —— 若写成 `dataFlow: undefined` 之外的任何值，采纳时会把旧链路整段清掉，
+   * 而模型只是"这轮没提链路"。
+   */
+  const dataFlow = normalizeDataFlow(obj.dataFlow);
   return {
     answer: scrubPatch(stripped),
     patch: {
       conclusion,
       chain,
+      ...(dataFlow ? { dataFlow } : {}),
       reason: typeof obj.reason === 'string' ? oneLine(obj.reason).slice(0, 200) : '',
     },
   };
@@ -255,7 +269,11 @@ function sameNode(a: ConclusionNode | undefined, b: ConclusionNode | undefined):
  * 避免"只差空格"也弹框。
  */
 export function diffProposal(
-  current: { conclusion: string | null; chain: ConclusionNode[] },
+  /**
+   * 当前草稿。`dataFlow` **可缺**（旧结论 / 外部上传未提供）：缺 = 当前没有链路，
+   * 此时补丁带了链路就是一次「增」，弹框只显示待写入的摘要。
+   */
+  current: { conclusion: string | null; chain: ConclusionNode[]; dataFlow?: string },
   patch: AskProposal,
 ): ProposalDiff {
   const blocks: ProposalDiffBlock[] = [];
@@ -275,5 +293,33 @@ export function diffProposal(
     else if (a) blocks.push({ block: 'chain', kind: '删', before: oneLine(a.text) });
   }
 
+  /*
+   * 链路：`patch.dataFlow === undefined` 表示**本补丁不改链路**（不是清空），直接跳过；
+   * 有值时按**整串**比较（换行有语义，不能像 conclusion 那样 `oneLine` 压平）。
+   */
+  if (patch.dataFlow !== undefined && patch.dataFlow !== (current.dataFlow ?? '')) {
+    const beforeFlow = flowSummary(current.dataFlow);
+    blocks.push({
+      block: 'dataFlow',
+      kind: '改',
+      ...(beforeFlow ? { before: beforeFlow } : {}),
+      after: flowSummary(patch.dataFlow) ?? '',
+    });
+  }
+
   return { changed: blocks.length > 0, blocks };
+}
+
+/**
+ * 链路摘要：`N 行 · 首行`（首行过长再截断）。
+ *
+ * 不铺全文是刻意的（S03 §3.1 / Q1）：弹框里 40 行树会挤掉结论差异，而用户此刻
+ * 需要的是"链路变没变、从哪一段开始变"。**保留首行的行首缩进**，树的形状才看得出来。
+ */
+function flowSummary(text: string | undefined): string | undefined {
+  if (!text) return undefined;
+  const lines = text.split('\n');
+  const head = lines[0] ?? '';
+  const shown = head.length > 48 ? `${head.slice(0, 48)}…` : head;
+  return `${lines.length} 行 · ${shown}`;
 }

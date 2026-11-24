@@ -79,6 +79,11 @@ describe('互斥：一次只做一类', () => {
       name: 'description 缺内容',
       args: { action: 'description' },
     },
+    {
+      // dataFlow（2026-11-24）只属于 analysis：混到别的 action 上必须当场拒绝
+      name: 'description 不接受 dataFlow',
+      args: { action: 'description', description: 'x', dataFlow: '步骤 A\n    ▼\n步骤 B' },
+    },
   ];
 
   for (const c of CASES) {
@@ -90,4 +95,27 @@ describe('互斥：一次只做一类', () => {
       assert.match(text, /action=|未知 action|必须|需要|不接受/, `错误文案要能指导纠正：${text}`);
     });
   }
+});
+
+/*
+ * 数据链路（2026-11-24 · REQ-20261124-001 · S03 §3.3）：字段登记面。
+ * 这里只能断言"参数层放行"——业务语义由 `analysis-store-external.test.ts`
+ * 的「不传即清空 / 超限报错」覆盖（本文件不需要真实 scope）。
+ */
+describe('dataFlow 只属于 analysis', () => {
+  it('analysis 带 dataFlow → 不被参数层拒绝（错误来自业务层，而非"不接受这些字段"）', async () => {
+    const res = await call({
+      scope: 'no-such-scope',
+      event: 'evt_nope',
+      action: 'analysis',
+      conclusion: '一句话结论',
+      chain: [{ kind: 'root', text: '根因' }],
+      candidates: [{ file: 'a.ts', line: 1, why: 'w' }],
+      dataFlow: '步骤 A\n    ▼\n步骤 B',
+    });
+    const body = parse(res);
+    assert.equal(body.ok, false, '事件不存在，业务层必然失败');
+    const text = String(body.error ?? body.message ?? '');
+    assert.ok(!text.includes('不接受'), `dataFlow 必须被 analysis 接受，却被参数层拦了：${text}`);
+  });
 });

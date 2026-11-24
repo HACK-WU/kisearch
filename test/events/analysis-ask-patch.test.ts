@@ -250,5 +250,84 @@ describe('JSON 永不泄漏（兜底擦除 & 多块/空正文）', () => {
   });
 });
 
+/*
+ * 数据链路（2026-11-24 · REQ-20261124-001 · S03 §3.1）：
+ * 守「补丁不传 dataFlow = 保留旧值」这条缺省语义 —— 它和外部上传（不传 = 清空）正相反，
+ * 写错一边就会让用户每次追问都丢链路，或让模型每轮被迫重抄一遍树。
+ */
+describe('dataFlow：补丁缺省不改 + 摘要不铺全文', () => {
+  const flow = ['前端打开「链路状态」页 → transfer_latest_msg', '    ▼', 'table_ids = 全部表的 set'].join('\n');
+  const patchWith = (extra: Record<string, unknown>): string =>
+    '```ki-conclusion-patch' + JSON.stringify({ conclusion: '新结论', chain: [{ kind: 'root', text: '根因' }], ...extra }) + '```';
+
+  it('带了 dataFlow → 归一后写进 patch（换行保留）', () => {
+    const r = extractProposal(patchWith({ dataFlow: flow }));
+    assert.equal(r.patch?.dataFlow, flow);
+    // 非字符串 / 空串都不能冒充链路
+    assert.equal(typeof r.patch?.dataFlow, 'string');
+  });
+
+  it('CRLF + 行尾空白 → 归一，换行数不变的一处不含 \\r', () => {
+    const r = extractProposal(patchWith({ dataFlow: '步骤 A  \r\n    ▼\r\n步骤 B' }));
+    assert.equal(r.patch?.dataFlow, '步骤 A\n    ▼\n步骤 B');
+  });
+
+  it('**不带 dataFlow → patch 里没有该键**（这条就是"不传 = 保留旧链路"）', () => {
+    const r = extractProposal(patchWith({}));
+    assert.ok(r.patch);
+    assert.equal('dataFlow' in (r.patch as object), false);
+    assert.equal(r.patch!.dataFlow, undefined);
+  });
+
+  it('dataFlow 非字符串 / 空串 / 全空白 → 都不写进 patch（不当作"清空"）', () => {
+    for (const bad of [123, null, [], '', '   \n  \n ']) {
+      const r = extractProposal(patchWith({ dataFlow: bad }));
+      assert.ok(r.patch, `dataFlow=${JSON.stringify(bad)} 不该让整份补丁失效`);
+      assert.equal(r.patch!.dataFlow, undefined, `dataFlow=${JSON.stringify(bad)} 应被忽略`);
+    }
+  });
+
+  it('超过 40 行 → 归一截断并追加提示行（补丁不因此失效）', () => {
+    const long = Array.from({ length: 45 }, (_, i) => `第 ${i + 1} 步`).join('\n');
+    const r = extractProposal(patchWith({ dataFlow: long }));
+    assert.ok(r.patch?.dataFlow);
+    const lines = r.patch!.dataFlow!.split('\n');
+    assert.equal(lines.length, 41, '40 行内容 + 1 行截断提示');
+    assert.match(lines[40]!, /已截断/);
+  });
+
+  it('diffProposal：链路变了 → 一块「N 行 · 首行」，不铺全文', () => {
+    const d = diffProposal(
+      { conclusion: '新结论', chain: [{ kind: 'root', text: '根因' }], dataFlow: '旧首行\n旧第二行' },
+      { conclusion: '新结论', chain: [{ kind: 'root', text: '根因' }], dataFlow: flow, reason: '' },
+    );
+    assert.equal(d.blocks.length, 1);
+    assert.equal(d.blocks[0]!.block, 'dataFlow');
+    assert.equal(d.blocks[0]!.kind, '改');
+    assert.equal(d.blocks[0]!.before, '2 行 · 旧首行');
+    assert.equal(d.blocks[0]!.after, '3 行 · 前端打开「链路状态」页 → transfer_latest_msg');
+    assert.ok(!d.blocks[0]!.after!.includes('\n'), '摘要里不能塞多行全文');
+  });
+
+  it('diffProposal：补丁没带链路 / 与当前完全相同 → 不产生链路块（不打扰）', () => {
+    const cur = { conclusion: '新结论', chain: [{ kind: 'root' as const, text: '根因' }], dataFlow: flow };
+    const noField = diffProposal(cur, { conclusion: '新结论', chain: cur.chain, reason: '' });
+    assert.deepEqual(noField.blocks, []);
+
+    const same = diffProposal(cur, { conclusion: '新结论', chain: cur.chain, dataFlow: flow, reason: '' });
+    assert.deepEqual(same.blocks, []);
+  });
+
+  it('diffProposal：当前没有链路（旧结论）→ 只给 after，before 缺省', () => {
+    const d = diffProposal(
+      { conclusion: '新结论', chain: [{ kind: 'root', text: '根因' }] },
+      { conclusion: '新结论', chain: [{ kind: 'root', text: '根因' }], dataFlow: flow, reason: '' },
+    );
+    assert.equal(d.blocks[0]!.block, 'dataFlow');
+    assert.equal(d.blocks[0]!.before, undefined);
+    assert.equal(d.blocks[0]!.after, '3 行 · 前端打开「链路状态」页 → transfer_latest_msg');
+  });
+});
+
 
 

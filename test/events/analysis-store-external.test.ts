@@ -336,3 +336,65 @@ describe('边界', () => {
     assert.equal(readAnalysisDocRaw(scope, 'evt_nope_external').draft, null);
   });
 });
+
+/*
+ * 数据链路（2026-11-24 · REQ-20261124-001 · S03 §3.3 / §5）：
+ * 外部上传是**整篇覆盖**语义 —— 不传 = 这份结论没有链路（清空），且超限严格报错。
+ * 这两条都与追问补丁相反（那边不传 = 保留、超限截断），所以必须各有用例钉住。
+ */
+describe('数据链路：不传即清空 + 超限报错', () => {
+  const flow = '前端打开「链路状态」页 → transfer_latest_msg\n    ▼\ntable_ids = 全部表的 set';
+
+  it('㉒ 带 dataFlow → 落盘并能回读（CRLF 归一）', async () => {
+    const id = await newEvent();
+    const out = await upload(id, { dataFlow: flow.replace(/\n/g, '\r\n') });
+    assert.equal(out.doc.draft?.dataFlow, flow);
+    assert.equal(readAnalysisDocRaw(scope, id).draft?.dataFlow, flow);
+  });
+
+  it('㉓ **覆盖时不传 dataFlow → 旧链路消失**（清空，不保留）', async () => {
+    const id = await newEvent();
+    await seedDraft(id, { dataFlow: '第一版链路' });
+    assert.equal(readAnalysisDocRaw(scope, id).draft?.dataFlow, '第一版链路');
+
+    const out = await upload(id, { overwrite: true });
+    assert.equal(out.doc.draft?.dataFlow, undefined, '整篇覆盖 ⇒ 不传即没有链路');
+    assert.equal(
+      'dataFlow' in (readAnalysisDocRaw(scope, id).draft as object),
+      false,
+      '必须删键，不能留 null / undefined 键',
+    );
+  });
+
+  it('㉔ 超过 40 行 → 整批拒绝（ANALYSIS_EDIT_INVALID），旧值不动', async () => {
+    const id = await newEvent();
+    await seedDraft(id, { dataFlow: '第一版链路' });
+    const tooMany = Array.from({ length: 41 }, (_, i) => `第 ${i + 1} 步`).join('\n');
+    await assert.rejects(
+      () => upload(id, { overwrite: true, dataFlow: tooMany }),
+      isCode('ANALYSIS_EDIT_INVALID'),
+    );
+    assert.equal(readAnalysisDocRaw(scope, id).draft?.dataFlow, '第一版链路', '被拒的请求不该改动任何内容');
+  });
+
+  it('㉕ 超过 3000 字 → 整批拒绝（不静默截断）', async () => {
+    const id = await newEvent();
+    await seedDraft(id, { dataFlow: '第一版链路' });
+    const tooLong = Array.from({ length: 30 }, () => '字'.repeat(120)).join('\n'); // 30 行 × 120 字 = 3600+
+    await assert.rejects(
+      () => upload(id, { overwrite: true, dataFlow: tooLong }),
+      isCode('ANALYSIS_EDIT_INVALID'),
+    );
+    assert.equal(readAnalysisDocRaw(scope, id).draft?.dataFlow, '第一版链路');
+  });
+
+  it('㉖ 非字符串 / 全空白 → 非字符串报错，全空白按"没有链路"处理', async () => {
+    const id = await newEvent();
+    await assert.rejects(
+      () => upload(id, { dataFlow: 123 }),
+      isCode('ANALYSIS_EDIT_INVALID'),
+    );
+    const blank = await upload(id, { dataFlow: '   \n\n  ' });
+    assert.equal(blank.doc.draft?.dataFlow, undefined, '全空白等于没有链路，不该落空串');
+  });
+});

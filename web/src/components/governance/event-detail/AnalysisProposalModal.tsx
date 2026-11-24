@@ -47,7 +47,8 @@ export function AnalysisProposalModal(props: AnalysisProposalModalProps): JSX.El
                 {blocks.map((b, i) => (
                   <div className="gov-pdiff__row" key={`${b.block}-${b.kind}-${i}`}>
                     <span className={`gov-pdiff__kind gov-pdiff__kind--${b.kind === '改' ? 'edit' : b.kind === '增' ? 'add' : 'del'}`}>
-                      {b.block === 'conclusion' ? '总结' : '节点'}·{b.kind}
+                      {/* 链路的差异只给「N 行 · 首行」摘要（后端 `flowSummary`），不铺全文 */}
+                      {b.block === 'conclusion' ? '总结' : b.block === 'chain' ? '节点' : '链路'}·{b.kind}
                     </span>
                     <span className="gov-pdiff__text">
                       {b.before ? <del>{b.before}</del> : null}

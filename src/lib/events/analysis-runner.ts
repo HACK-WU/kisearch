@@ -62,6 +62,7 @@ import {
   type AnalysisView,
 } from './analysis-view.js';
 import { normalizeChain, pruneChainRefs } from './conclusion-chain.js';
+import { normalizeDataFlow } from './data-flow.js';
 // 4000 硬上限的唯一来源：解析兜底与保存校验共用，避免两处各写一个数字
 import { CONCLUSION_MAX_CHARS } from './analysis-edit.js';
 import { clearResume, readResume, writeResume, type ResumeState } from './analysis-resume.js';
@@ -368,6 +369,7 @@ export function buildOutputTail(view: AnalysisView): string {
   "chain": [
 ${chainSample}
   ],
+  "dataFlow": "第一跳 → 第二跳\\n    ▼\\n第三跳（能指认就写 src/a.ts:128）\\n    ▼\\n用户看到的现象",
   "candidates": [
     {
       "file": "相对目标根目录的文件路径，如 src/auth/guard.ts",
@@ -388,7 +390,15 @@ ${chainSample}
    完全没定位到时 chain 输出空数组，不要为了凑格式编节点。${parallelHint}
 7. 正文（conclusion / chain / branches）里提到代码位置时，一律用反引号包住**相对路径**，有行号就写成
    \`src/a.ts:128\`：前端会把能对上已验证位置的反引号片段渲染成**可点开**的代码位置，写成裸文本就只是普通文字。
-   ref 字段可选（只放最相关的一处），正文里提到的其他位置照常写反引号即可。`;
+   ref 字段可选（只放最相关的一处），正文里提到的其他位置照常写反引号即可。
+8. **dataFlow（数据链路）**：用文字树描述这次问题的执行路径，是 chain 之外的第 6 段内容。
+   - 3~15 步，每步一行；行间用 \`▼\` 表示流向，分叉用 \`├─\` / \`└─\`；缩进只用空格（不能用 tab）；每行 ≤100 字。
+   - 能指认位置就直接写 \`相对路径:行号\` 纯文本（不必出自 candidates，前端不会把它渲染成可点胶囊）。
+   - 本视角的链路语义：${p.flowGuide}。
+   - 它是 JSON 字符串：**所有换行必须写成 \\n 转义**，不要写成裸换行，也不要加 \`\`\` 围栏。
+   - **取不到就降级，不要编造**：证据不足以画出完整路径时写
+     \`未取到数据链路：已检查 <方向1>、<方向2>；缺 <关键证据>。可追问「<一句具体取证动作>」\`
+     —— 这与第 3 条「空结果是正确结论」同一取向，比编一条看似合理的链路有用得多。`;
 }
 
 /* ── 分析前知识库预取（2026-11-19）────────────────────────
@@ -999,6 +1009,8 @@ function parseJsonSummary(text: string): {
   chain: ReturnType<typeof normalizeChain>;
   candidates: Array<{ file: string; line: number; endLine?: number; why: string; confidence: number }>;
   unconfirmed: string[];
+  /** 数据链路（2026-11-24）：归一后的多行文本；模型没给 / 不可信 → undefined（不写键） */
+  dataFlow?: string;
 } | null {
   const cleaned = text
     .trim()
@@ -1049,7 +1061,12 @@ function parseJsonSummary(text: string): {
     const unconfirmed = Array.isArray(parsed.unconfirmed)
       ? parsed.unconfirmed.map((u) => String(u ?? '').trim()).filter(Boolean)
       : [];
-    return { conclusion, chain, candidates, unconfirmed };
+    /*
+     * 数据链路（2026-11-24 · REQ-20261124-001）：**不做 oneLine 压平** —— 换行是树的结构，
+     * 归一只做清洗与截断（见 data-flow.ts）。空串 / 非字符串 → undefined，落盘时不写键。
+     */
+    const dataFlow = normalizeDataFlow(parsed.dataFlow);
+    return { conclusion, chain, candidates, unconfirmed, ...(dataFlow ? { dataFlow } : {}) };
   } catch {
     return null;
   }
@@ -1933,6 +1950,11 @@ async function executeAnalysisBackground(input: {
        * 直接落库会留下点开是空的胶囊（见 pruneChainRefs 注释）。
        */
       chain: pruneChainRefs(parsed?.chain ?? [], verifiedCandidates),
+      /*
+       * 数据链路（2026-11-24）：**显式覆盖**——`...cur` 会带上上一轮的旧链路，
+       * 本轮模型没给就必须清空（重跑后残留旧树比没有更糟）。
+       */
+      dataFlow: parsed?.dataFlow,
       candidates: verifiedCandidates,
       unconfirmed: [...new Set(unconfirmed)],
       steps: [...steps],

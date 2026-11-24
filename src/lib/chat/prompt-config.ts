@@ -850,6 +850,7 @@ candidates 为空是**正常交付**。不允许为了"有输出"把疑似提级
 - conclusion 与 chain 里都不出现 candidates 之外的位置
 - unconfirmed 写的是「缺什么证据」，不是「可能 / 也许」
 - candidates 为空时，conclusion 必须说明已排查哪些方向，chain 可以是空数组
+- dataFlow（数据链路）取不到时，按【系统输出与安全规范】给的降级句式写，不要为了凑格式编造节点
 
 约束：只读。不修改文件，不执行命令，不臆造未在事件、文档或源码中出现的信息。`;
 

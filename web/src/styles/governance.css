@@ -2775,6 +2775,72 @@
   width: 10px; height: 1px; background: var(--gov-rail);
 }
 
+/* ════════ 数据链路树（2026-11-24 · REQ-20261124-001 · 与未确认点同级）════════
+   形态来源：`CodeWikiHub/kisearch/requirements/2026-11-24-事件分析数据链路/demo/ui/data-flow-tree/index.html` 段 C（逐条搬入）。
+   三块并列的层级语义：
+     · 分析结论（紫）   = AI 的判断；
+     · 数据链路（中性底 + 左 3px 紫竖条，本段）= 客观路径，同样出自 AI，但比结论轻一档；
+     · 未确认点（琥珀） = 证据缺口。
+   与 `.gov-unconfirmed` 同一套视觉语法（浅底 + 左竖条 + 上方纯文字标题），单开一块、
+   **不嵌在紫色结论壳内**。树用等宽 + `white-space: pre` 保空白：箭头与分叉由模型输出，
+   前端不复刻图形；窄了横滑、绝不折行（折行会把树读成散文），溢出了必须显式提示「可横滑」。 */
+.gov-datalink {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: var(--ki-space-3);
+  border-radius: var(--ki-radius-sm);
+  background: color-mix(in srgb, var(--ki-color-text-subtle) 8%, var(--ki-color-surface));
+  border-left: 3px solid color-mix(in srgb, var(--ki-color-purple) 35%, transparent);
+}
+.gov-datalink__head { display: flex; align-items: baseline; gap: 8px; }
+.gov-datalink__title { font-size: 11px; font-weight: 700; letter-spacing: .05em; color: var(--ki-color-purple); }
+.gov-datalink__meta { font-size: 10.5px; color: var(--ki-color-text-subtle); white-space: nowrap; }
+.gov-datalink__meta::before { content: "·"; margin-right: 6px; color: var(--ki-color-border); }
+/* 横向溢出时才提示（窄栏 / 长行）：树被裁掉一半却不说，用户会以为内容就这些 */
+.gov-datalink[data-overflow] .gov-datalink__meta::after {
+  content: " · ↔ 可横滑";
+  color: var(--ki-color-text-subtle);
+}
+.gov-datalink__copy {
+  margin-left: auto; flex: none; align-self: center;
+  padding: 2px 8px; border: 1px solid var(--ki-color-border); border-radius: 5px;
+  background: var(--ki-color-surface); color: var(--ki-color-text-subtle);
+  font: inherit; font-size: 11px; line-height: 1.4; cursor: pointer;
+  transition: border-color 120ms, color 120ms;
+}
+.gov-datalink__copy:hover { border-color: var(--ki-color-purple); color: var(--ki-color-purple); }
+.gov-datalink__copy[data-state="success"] { color: var(--ki-color-success); border-color: var(--ki-color-success); }
+.gov-datalink__copy:focus-visible { outline: 2px solid var(--ki-color-focus); outline-offset: 1px; }
+
+/* 纵向：8~10 步的树约 300~400px，默认完整展开不裁（裁掉会让「最后一步」看不见，
+   等于把「链路」最关键的那一跳藏起来）；超过 520px 才滚动，避免撑爆卡片 */
+.gov-datalink__scroll { overflow-x: auto; overflow-y: auto; max-height: 520px; }
+.gov-datalink__tree {
+  margin: 0; padding: 0;
+  font-family: var(--ki-font-mono);
+  font-size: 11.5px; line-height: 1.95;
+  white-space: pre;                /* ★ 树形靠空白，禁折行 */
+  color: var(--ki-color-text);
+  tab-size: 4;
+}
+.gov-datalink__scroll::-webkit-scrollbar { height: 8px; width: 8px; }
+.gov-datalink__scroll::-webkit-scrollbar-thumb {
+  background: var(--ki-color-border-strong); border-radius: 999px;
+}
+
+/* 降级态：与正常态同壳，只换语气（保住「区块必在」的承诺）。
+   没取到时不该继续用 AI 产出的紫 —— 整块退成中性，只把「未取到」三字标琥珀。 */
+.gov-datalink.is-empty {
+  background: color-mix(in srgb, var(--ki-color-bg) 70%, var(--ki-color-surface));
+  border-left-color: color-mix(in srgb, var(--ki-color-text-subtle) 30%, transparent);
+}
+.gov-datalink.is-empty .gov-datalink__title { color: var(--ki-color-text-subtle); }
+/* 嵌在**已有纵向滚动容器**里时（AI 分析面板的过程区 `gov-ai-embed__scroll` 只有
+   240~360px）不再自己纵向滚动：两层滚动条会让「鼠标在树上滚的是内层、滚到底还得滚外层」 */
+.gov-datalink--nested .gov-datalink__scroll { overflow-y: visible; max-height: none; }
+
+.gov-datalink__empty { margin: 0; font-size: var(--ki-font-size-sm); line-height: 1.85; color: var(--ki-color-text-muted); }
+.gov-datalink__empty strong { color: var(--ki-color-warning); font-weight: 700; }
+
 /* ── 悬浮代码块：portal + fixed，贴在胶囊下方（空间不足翻上方）── */
 .gov-peek {
   position: fixed; z-index: 80;

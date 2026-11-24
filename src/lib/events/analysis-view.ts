@@ -63,6 +63,13 @@ export interface ViewProfile {
   wide: boolean;
   /** `conclusion` 一句话的撰写口径 */
   summaryGuide: string;
+  /**
+   * 本视角「数据链路」（`dataFlow`）该画成什么样（2026-11-24 · REQ-20261124-001）。
+   *
+   * **只换语义、不换格式**：树怎么写（箭头 / 缩进 / 转义 / 降级句式）的唯一权威在
+   * `buildOutputTail` 第 8 条。这里一句话只说"这条路径关心哪几个节点、要标出什么"。
+   */
+  flowGuide: string;
   /** 喂给模型的定位语（替代用户提示词里那句「软件问题」） */
   locateGuide: string;
 }
@@ -89,6 +96,7 @@ const PROFILES: Readonly<Record<AnalysisView, ViewProfile>> = {
     rail: true,
     wide: false,
     summaryGuide: '根因是什么、影响多大、往哪修',
+    flowGuide: '故障传播链 —— 触发条件 → 出错的那一跳 → 暴露给用户的现象，并标出哪一跳是根因',
     locateGuide: '为一条已登记的软件问题找出可被证实的代码位置与成因',
   },
   perf: {
@@ -100,6 +108,7 @@ const PROFILES: Readonly<Record<AnalysisView, ViewProfile>> = {
     rail: true,
     wide: false,
     summaryGuide: '现状多差、瓶颈在哪、优化后能回到什么量级',
+    flowGuide: '耗时 / 排队链路 —— 入口 → 各跳（能量化就写耗时占比或数据量）→ 出口，并标出瓶颈那一跳',
     locateGuide: '为一条性能优化事件找出可被证实的瓶颈点与成因（瓶颈点比「为什么会写成这样」更重要）',
   },
   change: {
@@ -111,6 +120,7 @@ const PROFILES: Readonly<Record<AnalysisView, ViewProfile>> = {
     rail: false,
     wide: true,
     summaryGuide: '目标是什么、落在哪几处、需要连带改什么',
+    flowGuide: '改动落点链路 —— 页面 → 接口 → 服务 → 表，并标出本次要改的那几跳',
     locateGuide: '为一条需求实现事件找出改动落点与波及面（不是找故障成因）',
   },
   generic: {
@@ -122,6 +132,7 @@ const PROFILES: Readonly<Record<AnalysisView, ViewProfile>> = {
     rail: false,
     wide: true,
     summaryGuide: '查到了什么、影响什么、建议往哪走',
+    flowGuide: '相关调用链 —— 谁在用 → 怎么用 → 受影响面',
     locateGuide: '为一条已登记的事件找出相关的代码依据与影响（不必强求因果）',
   },
 };

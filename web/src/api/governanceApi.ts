@@ -825,6 +825,11 @@ export function saveEventAnalysisEdits(
     expectedRunId?: string | null;
     conclusion?: string | null;
     chain?: ConclusionNode[];
+    /**
+     * 数据链路（2026-11-24）：只由「采纳追问补丁」传；编辑态 UI 不提供输入。
+     * 省略 = 不动链路，`null` = 清空。
+     */
+    dataFlow?: string | null;
     unconfirmed?: string[];
     confirmed?: {
       add?: Array<{ file: string; line: number; endLine?: number; why: string }>;
@@ -919,7 +924,8 @@ export interface AskStep {
 
 /** 补丁差异块（S03）：块级展示，不做全文对照 */
 export interface AskProposalDiffBlock {
-  block: 'conclusion' | 'chain';
+  /** `dataFlow`（2026-11-24）：链路只给「N 行 · 首行」摘要，不铺全文 */
+  block: 'conclusion' | 'chain' | 'dataFlow';
   kind: '改' | '增' | '删';
   before?: string;
   after?: string;
@@ -938,7 +944,11 @@ export interface AskProposalEvent {
   reason?: string;
   reasons?: string[];
   diff?: { changed: boolean; blocks: AskProposalDiffBlock[] };
-  patch?: { conclusion: string; chain: ConclusionNode[]; reason: string };
+  /**
+   * `dataFlow`（2026-11-24）：缺省 = **本条补丁不改链路**。
+   * ⚠️ 采纳时必须把它一起带进 `PATCH /analysis` 的 body —— 只解析不传 = 白解析。
+   */
+  patch?: { conclusion: string; chain: ConclusionNode[]; dataFlow?: string; reason: string };
 }
 
 export type AskProgressEvent =
@@ -998,7 +1008,7 @@ export async function askEventAnalysisStream(
             turn?: AnalysisAskTurn; message?: string; code?: string;
             turnId?: string; valid?: boolean; reason?: string; reasons?: string[];
             diff?: { changed: boolean; blocks: AskProposalDiffBlock[] };
-            patch?: { conclusion: string; chain: ConclusionNode[]; reason: string };
+            patch?: { conclusion: string; chain: ConclusionNode[]; dataFlow?: string; reason: string };
           };
           if (payload.type === 'delta') onDelta(payload.text ?? '');
           else if (payload.type === 'step' && payload.step && onEvent) onEvent({ type: 'step', step: payload.step });

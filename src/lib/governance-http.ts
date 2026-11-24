@@ -1288,6 +1288,12 @@ export async function handleGovernanceRoutes(
             ...(has('conclusion') ? { conclusion: b.conclusion as string | null } : {}),
             ...(has('chain') ? { chain: b.chain } : {}),
             ...(has('unconfirmed') ? { unconfirmed: b.unconfirmed } : {}),
+            /*
+             * 数据链路（2026-11-24 · S03 §3.2）：接口**接受**该字段（补丁采纳靠它落盘），
+             * 但编辑态 UI 不提供输入 —— 结论与链路都不可人工手改（H13）。
+             * 用 `has` 判在场：省略 = 不动链路，`null` = 显式清空。
+             */
+            ...(has('dataFlow') ? { dataFlow: b.dataFlow as string | null } : {}),
             ...(confirmed.add !== undefined ? { confirmedAdd: confirmed.add } : {}),
             ...(confirmed.update !== undefined ? { confirmedUpdate: confirmed.update } : {}),
           });

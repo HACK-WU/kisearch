@@ -35,6 +35,7 @@ import { serializeToolResponse } from '../chat/retrieval/tool-response.js';
 import { GovernanceError } from '../governance-errors.js';
 import { inferAnalysisView, resolveKindLabel, viewProfile } from './analysis-view.js';
 import { chainToLines } from './conclusion-chain.js';
+import { DATA_FLOW_MAX_CHARS, DATA_FLOW_MAX_LINES } from './data-flow.js';
 import {
   isAnalysisActive,
   readNormalizedAnalysisDoc,
@@ -257,6 +258,14 @@ function buildContext(args: {
   if (conclusionBody) {
     lines.push('<conclusion>', clip(conclusionBody, CONCLUSION_CHARS), '</conclusion>');
   }
+  /*
+   * 数据链路（2026-11-24 · S03 §3.1）：提示词要求模型「结论变了必须同时给新链路，
+   * 链路没变就不要写该字段」—— 不把当前链路喂进来，模型根本没法判断"变没变"，
+   * 只能每轮重写一遍（噪音）或干脆不给（漏改）。换行原样保留，别 `oneLine` 压平。
+   */
+  if (draft.dataFlow) {
+    lines.push('<data_flow>', clip(draft.dataFlow, DATA_FLOW_MAX_CHARS), '</data_flow>');
+  }
   if (cands.length) {
     lines.push('<candidates>');
     for (const c of cands) {
@@ -452,11 +461,17 @@ export async function askEventAnalysis(
        */
       ' 若这轮回答意味着**分析结论本身应当修改**，请在正文之后另起一行，输出且仅输出一个围栏块：',
       '```ki-conclusion-patch',
-      '{"conclusion":"一句话总结","chain":[{"kind":"symptom","text":"节点文本"}],"reason":"一句话说明改了什么"}',
+      '{"conclusion":"一句话总结","chain":[{"kind":"symptom","text":"节点文本"}],"dataFlow":"步骤 A\\n    ▼\\n步骤 B","reason":"一句话说明改了什么"}',
       '```',
       ` 补丁的硬要求：chain 的 kind **只能**取这几个值：${patchKinds}（不要自造 root_cause / fix_suggestion 之类的名字）；`,
       ' 最多 5 个节点、每节点不超过 200 字（分支 branches 只能挂 root）；',
       'conclusion 不能为空（不要用补丁把结论清空）；结论没有变化时**不要**输出该块。',
+      /*
+       * 链路缺省语义（2026-11-24 · S03 §3.1）：**不写 = 保留旧链路**。
+       * 必须说清这一点，否则模型会以为"不给我就等于要我删掉"，每轮都重写一遍树。
+       */
+      ` 若结论变了，**必须同时给出新的数据链路**（dataFlow：多行文本树，用 \\n 表示换行，≤${DATA_FLOW_MAX_LINES} 行 / ≤${DATA_FLOW_MAX_CHARS} 字，缩进用空格）；`
+        + '数据链路没有变化时**不要**写 dataFlow 字段（不写 = 保留原来的链路）。',
     ].join('');
 
     const messages: ChatTurn[] = [
@@ -673,7 +688,13 @@ export async function askEventAnalysis(
         proposalView = { valid: false, reason: reasons[0]!, reasons };
       } else {
         const diff = diffProposal(
-          { conclusion: analysis.draft?.conclusion ?? null, chain: analysis.draft?.chain ?? [] },
+          {
+            conclusion: analysis.draft?.conclusion ?? null,
+            chain: analysis.draft?.chain ?? [],
+            // 带上当前链路：否则补丁里没写 dataFlow 时无法判断"链路其实没变"，
+            // 会出现一条只有结论差异的 diff（正确），以及无法识别"误写了一遍相同链路"
+            ...(analysis.draft?.dataFlow ? { dataFlow: analysis.draft.dataFlow } : {}),
+          },
           extracted.patch,
         );
         if (diff.changed) {

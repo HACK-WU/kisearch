@@ -465,6 +465,21 @@ describe('追问补丁覆盖结论（S03 · 批 5）', () => {
   it('前端：流式事件能解析 proposal', () => {
     assert.ok(apiSrc.includes("payload.type === 'proposal'"));
   });
+
+  /*
+   * 数据链路（2026-11-24 · REQ-20261124-001 · S03 §3.1/§3.2）：
+   * 最易漏的一步不是解析，是**采纳时忘了带** —— 解析出来了但 body 里没有该字段，
+   * 后端按"不改链路"处理，用户看到补丁写"已改链路"却什么都没变。
+   */
+  it('数据链路：解析 → 采纳带进 body → PATCH 白名单三处都认 dataFlow', () => {
+    assert.ok(patchSrc.includes('normalizeDataFlow'), '补丁解析必须复用统一归一（不要自写）');
+    assert.ok(
+      askSrc.includes('dataFlow: p.patch.dataFlow'),
+      '采纳补丁时要把 dataFlow 带进 PATCH body（只解析不传 = 不落盘）',
+    );
+    assert.match(httpSrc, /has\('dataFlow'\)/, 'PATCH /analysis 白名单要收该字段');
+    assert.ok(modalSrc.includes("'链路'"), '弹框要给链路差异一个可读标签');
+  });
 });
 
 
