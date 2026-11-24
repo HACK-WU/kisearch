@@ -85,6 +85,9 @@ const RULES: Rule[] = [
   // 文档删除（2026-11-13）：写操作，与写入/移动同级。预检也走同一路由（body.dryRun），
   // 因为它读的是「这篇文档的当前状态」，与 `knowledge.read` 的语义不同（且调用方一定有写权限）。
   exact('POST', '/doc/delete', 'permission', 'knowledge.write'),
+  // 图集（REQ-20261120-003 S-06）：分片上传与卸载都属写入；scope 判定在 handler 内按 body/query 做
+  exact('POST', '/atlas/package', 'permission', 'knowledge.write'),
+  exact('DELETE', '/atlas/package', 'permission', 'knowledge.write'),
   exact('POST', '/import/upload', 'permission', 'knowledge.write'),
   exact('POST', '/import/run', 'permission', 'knowledge.write'),
   exact('POST', '/import/preflight', 'permission', 'knowledge.write'),

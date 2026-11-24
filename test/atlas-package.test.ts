@@ -208,7 +208,46 @@ test('⑭ meta.json 损坏 → status.exists=false（不把异常抛给页面）
   assert.equal(st.exists, false, '损坏的 meta 视为未安装，页面走空态而不是报错');
 });
 
-test('⑮ 单条目解压后超预算 → 1403，且在解压前就拒（防 bomb）', () => {
+test('⑮ 包内无 meta.json 时，从烘焙产物内嵌 config 取元信息', () => {
+  // 这正是 pack_atlas.py --zip 的产物形态：只有 atlas.html + MANIFEST.txt
+  const html = '<!DOCTYPE html><html><head><script id="demo-config" type="application/json">'
+    + '{"title":"真实标题","branch":"master","baseline":"cb2a16c7",'
+    + '"generated_at":"2026-11-24T11:45:00+08:00","pages":{"a":{},"b":{}},"baked":true}'
+    + '</script></head><body>x</body></html>';
+  const { meta } = installPackage(SCOPE, buildZip([{ name: 'atlas.html', data: html }]));
+  assert.equal(meta.title, '真实标题', '标题不能退化成库名');
+  assert.equal(meta.baseline, 'cb2a16c7', '基线不能退化成 -');
+  assert.equal(meta.generatedAt, '2026-11-24T11:45:00+08:00', '应认下划线命名 generated_at');
+  assert.equal(meta.viewCount, 2, '图数由 pages 数量推出');
+});
+
+test('⑯ meta.json 只给 title 时，baseline/生成时间仍从内嵌 config 补上（合并而非二选一）', () => {
+  const html = '<!DOCTYPE html><html><head><script id="demo-config" type="application/json">'
+    + '{"title":"标题甲","branch":"master","baseline":"bb11cc22",'
+    + '"generated_at":"2026-11-20T09:00:00+08:00","pages":{"only":{}},"baked":true}'
+    + '</script></head><body>x</body></html>';
+  const zip = buildZip([
+    { name: 'atlas.html', data: html },
+    { name: 'meta.json', data: '{"title":"标题乙"}' },
+  ]);
+  const { meta } = installPackage(SCOPE, zip);
+  assert.equal(meta.title, '标题乙', 'meta.json 的显式字段优先');
+  assert.equal(meta.baseline, 'bb11cc22', '缺的字段要能从内嵌 config 补');
+  assert.equal(meta.viewCount, 1);
+});
+
+test('⑰ 内嵌 config 在大包深处（偏移 >512KB）也能取到', () => {
+  // 模拟 archify 多图：head 前塞 600 KB 填充，config 被推到后面
+  const padding = `<!--${'x'.repeat(600 * 1024)}-->`;
+  const html = '<!DOCTYPE html><html><head>' + padding
+    + '<script id="demo-config" type="application/json">{"title":"深包标题","baseline":"dd33ee44","baked":true}</script>'
+    + '</head><body>x</body></html>';
+  const { meta } = installPackage(SCOPE, buildZip([{ name: 'atlas.html', data: html }]));
+  assert.equal(meta.title, '深包标题', '不能被固定窗口截断丢掉');
+  assert.equal(meta.baseline, 'dd33ee44');
+});
+
+test('⑱ 单条目解压后超预算 → 1403，且在解压前就拒（防 bomb）', () => {
   // 51 MB 的 'a' 压成几十 KB：zip 体积检查放行，靠「解压前按声明大小预判」拦下
   const big = Buffer.alloc(51 * 1024 * 1024, 0x61);
   const zip = buildZip([{ name: 'atlas.html', data: big }], 8);

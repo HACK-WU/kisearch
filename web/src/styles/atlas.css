@@ -49,6 +49,82 @@
   flex: 0 0 auto;
 }
 
+/* 状态栏右侧动作组（重新上传 / 卸载）：不参与 flex 换行挤压，始终贴右 */
+.atlas-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 8px;
+}
+
+.atlas-hint__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* 上传弹窗：固定遮罩 + 居中盒子（一期刻意不用全站通用 modal，避免与治理弹窗耦合） */
+.atlas-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(23, 33, 28, 0.36);
+}
+
+.atlas-dialog__box {
+  width: min(520px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border-radius: 10px;
+  background: var(--ki-surface, #fff);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  font-size: 13px;
+}
+
+.atlas-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.atlas-dialog__row code,
+.atlas-dialog__err code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--ki-line, #e3e6e2);
+  background: var(--ki-surface-sunken, #f4f6f4);
+  font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
+.atlas-dialog__tip {
+  color: var(--ki-text-muted, #6b7770);
+}
+
+.atlas-dialog__err {
+  color: var(--ki-danger, #b4241c);
+}
+
+.atlas-dialog__progress {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--ki-surface-sunken, #f4f6f4);
+  font-variant-numeric: tabular-nums;
+}
+
+.atlas-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
 /* iframe 占满剩余高度；内部滚动交给图集自己，页面不再套滚动条 */
 .atlas-frame {
   flex: 1 1 auto;

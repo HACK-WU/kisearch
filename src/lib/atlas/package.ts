@@ -94,6 +94,41 @@ const str = (v: unknown, fallback = ''): string => (typeof v === 'string' && v.t
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
 
 /**
+ * 从烘焙产物内嵌的 config JSON 提取元信息。
+ *
+ * 为什么需要它：`pack_atlas.py --zip` 只打 `atlas.html + MANIFEST.txt`，**不带 meta.json**
+ * （实测：上传后标题变成库名、基线变成 `-@-`）。而烘焙后的 config 本来就内联在 html 里，
+ * 从它取 title/branch/baseline 既零成本又永不与内容不同步——比要求生成侧额外带一份
+ * meta.json 更可靠（少一处可能不同步的副本）。
+ *
+ * 只在文件前 512 KB 内找：config 一定在 head 附近，不必为元信息扫完整个大包。
+ */
+function readEmbeddedMeta(html: Buffer): Record<string, unknown> | null {
+  /**
+   * 用 indexOf 定位标记，而不是「只扫前 N KB」：每张 archify 图会在 head 注入约 90 KB
+   * base64 字体，6 图包的 config 会被推到 1 MB 之后（本仓实测：254 KB 的包已在偏移 107 KB，
+   * 按 512 KB 窗口取，图一多就会静默取不到元信息）。
+   */
+  const marker = Buffer.from('<script id="demo-config"');
+  let at = html.indexOf(marker);
+  if (at < 0) at = html.indexOf(Buffer.from('type="application/json"'));
+  const start = at >= 0 ? at : 0;
+  const win = html.subarray(start, Math.min(html.length, start + 2 * 1024 * 1024)).toString('utf8');
+  const m = win.match(/<script[^>]*id="demo-config"[^>]*>([\s\S]*?)<\/script>/i)
+    ?? win.match(/<script[^>]*type="application\/json"[^>]*>([\s\S]*?)<\/script>/i);
+  if (!m) return null;
+  try {
+    const parsed = JSON.parse(m[1]) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 生成侧用下划线命名（generated_at），平台用驼峰；两处都要认 */
+const FIELD_ALIAS: Record<string, string> = { generatedAt: 'generated_at' };
+
+/**
  * 安装一个图集包：校验 → 归档旧版 → 原子替换 → 写 meta。
  *
  * @param scope 目标库（调用方需自行保证库存在且非只读；内核只负责包与文件）
@@ -110,19 +145,30 @@ export function installPackage(scope: string, zipBuf: Buffer, opts: InstallOptio
   }
   validateEntryHtml(html, entryName);
 
-  const inner = readInnerMeta(zip);
+  /**
+   * 元信息合并（不是二选一）：包内 meta.json 覆盖内嵌 config 的同名字段（前者是显式声明），
+   * 但缺失的字段各取所长——只给 title 的 meta.json 不该把 baseline 一起吞掉。
+   */
+  const fileMeta = readInnerMeta(zip);
+  const embedded = readEmbeddedMeta(html);
+  const inner = fileMeta || embedded ? { ...(embedded ?? {}), ...(fileMeta ?? {}) } : null;
   const pick = <K extends keyof NonNullable<InstallOptions['meta']>>(k: K): string => {
-    const fromInner = str(inner?.[k as string]);
+    const fromInner = str(inner?.[k as string]) || str(inner?.[FIELD_ALIAS[k as string] ?? '']);
     if (fromInner) return fromInner;
     const fromOpt = opts.meta?.[k];
     return typeof fromOpt === 'string' ? fromOpt : '';
   };
+  // 图数：config 里没有 viewCount 字段，用 pages 的数量推（比留空更有用）
+  const pages = inner?.pages;
+  const viewCount = num(inner?.viewCount)
+    ?? (pages && typeof pages === 'object' ? Object.keys(pages as Record<string, unknown>).length : undefined)
+    ?? opts.meta?.viewCount;
   const meta: AtlasMeta = {
     title: pick('title') || scope,
     branch: pick('branch') || '-',
     baseline: pick('baseline') || '-',
     generatedAt: pick('generatedAt') || new Date().toISOString(),
-    viewCount: num(inner?.viewCount) ?? opts.meta?.viewCount,
+    viewCount,
     entries: zip.entries,
     size: html.length,
     packageSize: zipBuf.length,

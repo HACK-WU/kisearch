@@ -361,6 +361,52 @@ export async function getAtlasStatus(scope: string): Promise<AtlasStatusResponse
   return req<AtlasStatusResponse>(`/api/atlas/status?scope=${encodeURIComponent(scope)}`);
 }
 
+/** 单片 base64 大小：2 MB 原文，base64 后约 2.7 MB，远低于服务端 uploadMaxBytes */
+const ATLAS_CHUNK_BYTES = 2 * 1024 * 1024;
+
+/**
+ * 分片上传图集包（S-06 §3.4）。
+ *
+ * 分片而不是一次 POST：整包 base64 会同时压垮服务端请求体上限与前端内存；
+ * 分片还能让「失败重试同一 uploadId」天然续传（服务端按 batchIndex 落盘）。
+ */
+export async function uploadAtlasPackage(
+  scope: string,
+  file: File,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<AtlasStatusResponse & { archived?: boolean }> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const total = Math.max(1, Math.ceil(bytes.length / ATLAS_CHUNK_BYTES));
+  const uploadId = `u${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  let last: AtlasStatusResponse & { archived?: boolean } = { ok: true, exists: false };
+
+  for (let i = 0; i < total; i++) {
+    const slice = bytes.subarray(i * ATLAS_CHUNK_BYTES, (i + 1) * ATLAS_CHUNK_BYTES);
+    // 分段 fromCharCode：直接 apply 整个 2 MB 数组会触发参数个数上限
+    let bin = '';
+    for (let k = 0; k < slice.length; k += 8192) {
+      bin += String.fromCharCode(...slice.subarray(k, k + 8192));
+    }
+    last = await req<AtlasStatusResponse & { archived?: boolean }>('/api/atlas/package', {
+      method: 'POST',
+      body: JSON.stringify({
+        scope,
+        uploadId,
+        batchIndex: i,
+        batchCount: total,
+        files: [{ name: `part-${i}`, content: btoa(bin) }],
+      }),
+    });
+    onProgress?.(i + 1, total);
+  }
+  return last;
+}
+
+/** 卸载当前图集（archive/ 保留，可回滚） */
+export async function deleteAtlasPackage(scope: string): Promise<{ ok: boolean; removed: boolean }> {
+  return req<{ ok: boolean; removed: boolean }>(`/api/atlas/package?scope=${encodeURIComponent(scope)}`, { method: 'DELETE' });
+}
+
 /**
  * 探活端点 `/healthz`（免鉴权，MCP 单例探活同源）。
  *

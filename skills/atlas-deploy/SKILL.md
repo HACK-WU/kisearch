@@ -63,6 +63,10 @@ python3 <project-atlas>/scripts/pack_atlas.py <图集目录> dist/ --zip
 | 条目 ≤ 50 个 | `unzip -l dist/atlas.zip` | `ATLAS_UNSUPPORTED_ZIP`(1407) |
 
 > **不要手工 zip 一个目录**：`pack_atlas.py` 会做 build + check + 字体去重 + 内联，手工打包必然缺内联步骤。
+>
+> **不需要额外附 `meta.json`**：标题 / 分支 / 基线 commit / 生成时间由平台从烘焙产物内嵌的
+> config（`<script id="demo-config">`）自动提取，比另带一份 meta.json 更可靠（不会与内容不同步）。
+> 早期手工打包才需要 meta.json，现已不是必需。
 
 ## 3. 上传
 

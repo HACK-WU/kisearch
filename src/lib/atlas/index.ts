@@ -5,6 +5,8 @@
  * 不在入口层重复实现校验（设计 S01 §3.3：校验链只有一份）。
  */
 export { installPackage, readStatus, readEntry, removePackage } from './package.js';
+export { receiveChunk, cleanupStaleUploads, STALE_UPLOAD_MS } from './upload.js';
+export type { ChunkPayload, ChunkResult } from './upload.js';
 export { AtlasError, ATLAS_CODES, atlasCodeName, atlasHttpStatus, describeAtlasError } from './errors.js';
 export type { AtlasCodeKey } from './errors.js';
 export { entryPath, packageZipPath, metaPath, archiveDir, atlasDir } from './paths.js';

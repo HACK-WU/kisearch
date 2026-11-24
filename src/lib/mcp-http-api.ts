@@ -174,7 +174,9 @@ import { withTimeoutFallback } from './timeout.js';
 // 上传逐条校验的单一实现（与事件参考文档上传共用；放独立模块避免 governance 反向依赖成环）
 import { sanitizeFileName, validateUploadFile, type UploadFilePolicy } from './import-upload-policy.js';
 // 图集（REQ-20261120-003）：HTTP 层只做鉴权与转发，校验/落盘全在 src/lib/atlas/ 内核
-import { AtlasError, atlasCodeName, atlasHttpStatus, readEntry, readStatus } from './atlas/index.js';
+import { AtlasError, atlasCodeName, atlasHttpStatus, readEntry, readStatus, receiveChunk, removePackage } from './atlas/index.js';
+// 图集写接口要判「库存在」，与 CLI 同一判据（store 是底层模块，不会反向依赖本文件）
+import { scopeDirExists } from './store.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -1538,6 +1540,13 @@ export async function handleApiRequest(
       );
       return;
     }
+    // ── 图集写接口（S-06）：分片上传 + 卸载。scope 一律从 body/query 取后再判权，
+    // 且必须套 scope 写锁（并发上传会互相覆盖 archive）。──
+    if (p === '/atlas/package' && (req.method === 'POST' || req.method === 'DELETE')) {
+      if (req.method === 'POST') await handleAtlasPackagePost(req, res, authScopes, requestConfig);
+      else await handleAtlasPackageDelete(res, url, authScopes, requestConfig);
+      return;
+    }
     if (p === '/doc/list' && req.method === 'GET') {
       // 文档列表不打开 zvec，只读 relations-cache/local KB。
       // REQ-20261009-003 S-01：以 `read` 类型入队——只与「元数据提交窗口」互斥，
@@ -2186,6 +2195,83 @@ async function handleAtlasView(res: http.ServerResponse, scope: string): Promise
       'Cache-Control': 'no-cache',
     });
     res.end(buf);
+  } catch (err) {
+    sendAtlasError(res, err);
+  }
+}
+
+/**
+ * POST /api/atlas/package —— 分片上传（S-06 §3.2）
+ *
+ * scope **必须**从 body 取：验证阶段实测过「从 query 取 scope」会让只读库的写请求
+ * 用错作用域通过校验（demo-verify 报告 A1）。因此越权判定也放在读 body 之后。
+ */
+async function handleAtlasPackagePost(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  authScopes: string[] | null,
+  requestConfig: ReturnType<typeof loadConfig>,
+): Promise<void> {
+  let body: { scope?: unknown; uploadId?: unknown; batchIndex?: unknown; batchCount?: unknown; meta?: unknown; files?: unknown };
+  try {
+    body = (await readJsonBody(req)) ?? {};
+  } catch {
+    sendJson(res, 400, { ok: false, code: 'ATLAS_PACKAGE_INVALID', error: '请求体不是合法 JSON' });
+    return;
+  }
+
+  const rawScope = typeof body.scope === 'string' && body.scope.trim() ? body.scope.trim() : 'default';
+  if (authScopes !== null && !scopeAllowed(authScopes, rawScope)) {
+    rejectScopeViolation(res, rawScope, '/atlas/package');
+    return;
+  }
+  const scope = resolveScope(requestConfig, rawScope);
+  // 库必须已存在：否则 mkdirSync(recursive) 会为拼错的 scope 名凭空建出
+  // `<kb>/<scope>/.atlas/.upload/`（实测：HTTP 202 表示接片成功，但库是刚被创建的空壳）。
+  // 与 CLI `requireWritableScope` 用同一判据（scopeDirExists），两端口径一致。
+  if (!scopeDirExists(scope)) {
+    sendJson(res, 404, { ok: false, code: 'SCOPE_NOT_FOUND', error: `库 ${scope} 不存在（尚未初始化）`, hint: '先建库，或改用已存在的 --scope' });
+    return;
+  }
+  if (rejectIfScopeReadonly(res, scope, 'http:/api/atlas/package')) return;
+
+  try {
+    const result = await withScopeWriteLock(scope, 'atlas-upload', async () => receiveChunk({
+      scope,
+      uploadId: String(body.uploadId ?? ''),
+      batchIndex: Number(body.batchIndex ?? 0),
+      batchCount: Number(body.batchCount ?? 1),
+      files: Array.isArray(body.files) ? (body.files as { name?: string; content: string }[]) : [],
+    }, { uploadedBy: 'http:web', ...(body.meta && typeof body.meta === 'object' ? { meta: body.meta as Record<string, string> } : {}) }));
+
+    if (!result.done || !result.install) {
+      // 未收完（含中间片丢失）：202 + 已收片数，客户端继续发
+      sendJson(res, 202, { ok: true, received: result.received, of: result.of });
+      return;
+    }
+    sendJson(res, 200, { ok: true, exists: true, ...result.install.meta, archived: result.install.archived });
+  } catch (err) {
+    sendAtlasError(res, err);
+  }
+}
+
+/** DELETE /api/atlas/package?scope= —— 卸载当前版本（archive/ 保留） */
+async function handleAtlasPackageDelete(
+  res: http.ServerResponse,
+  url: URL,
+  authScopes: string[] | null,
+  requestConfig: ReturnType<typeof loadConfig>,
+): Promise<void> {
+  const rawScope = url.searchParams.get('scope') || 'default';
+  if (authScopes !== null && !scopeAllowed(authScopes, rawScope)) {
+    rejectScopeViolation(res, rawScope, '/atlas/package');
+    return;
+  }
+  const scope = resolveScope(requestConfig, rawScope);
+  if (rejectIfScopeReadonly(res, scope, 'http:/api/atlas/package')) return;
+  try {
+    const removed = await withScopeWriteLock(scope, 'atlas-remove', async () => removePackage(scope));
+    sendJson(res, 200, { ok: true, removed });
   } catch (err) {
     sendAtlasError(res, err);
   }
