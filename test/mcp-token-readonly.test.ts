@@ -43,11 +43,9 @@ const WRITE_TOOLS = [
   'ki_sync_relation',
   'ki_bulk_sync_relation',
   'ki_edit_relation',
-  'ki_event_set_stage',
   'ki_event_create',
   'ki_event_delete',
-  'ki_event_docs',
-  'ki_event_refs',
+  'ki_event_edit',
   'ki_group_create',
   'ki_group_delete_empty',
   'ki_delete_relation',
@@ -169,11 +167,12 @@ describe('updateToken：scope 与访问模式可独立修改', () => {
 // ─────────────────────────────────────────────
 
 describe('READ_ONLY_TOOL_NAMES：名单内容', () => {
-  it('恰好 11 个读工具，与写工具互不重叠', () => {
+  it('恰好 12 个读工具，与写工具互不重叠', () => {
     assert.deepEqual(
       [...READ_ONLY_TOOL_NAMES].sort(),
       [
-        'ki_event_get', 'ki_event_list', 'ki_event_type_list', 'ki_get_module_info', 'ki_group_list',
+        // `ki_get_image`（REQ-20261123-008）是读工具：只读 Token 应能取图（不写任何文件）
+        'ki_event_get', 'ki_event_list', 'ki_event_type_list', 'ki_get_image', 'ki_get_module_info', 'ki_group_list',
         'ki_lifecycle_list', 'ki_recall', 'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list',
       ],
     );

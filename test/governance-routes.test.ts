@@ -97,7 +97,7 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
 ];
 
 const READ_TOOLS = ['ki_lifecycle_list', 'ki_event_list', 'ki_event_type_list'];
-const WRITE_TOOLS = ['ki_event_set_stage'];
+const WRITE_TOOLS = ['ki_event_edit'];
 const FORBIDDEN_CREATE_TOOLS = ['ki_event_create', 'ki_lifecycle_create', 'ki_event_type_create', 'ki_event_delete', 'ki_event_type_write'];
 
 describe('① 路由权限登记（漏一条就是 404）', () => {
@@ -175,24 +175,25 @@ describe('③ MCP 工具四处登记', () => {
 
   it('工厂里 4 个工具都注册了，且写工具在 readOnly 分支内', () => {
     const src = fs.readFileSync(path.join(ROOT, 'src/lib/mcp-server-factory.ts'), 'utf8');
-    for (const fn of ['registerLifecycleListTool', 'registerEventListTool', 'registerEventTypeListTool', 'registerEventSetStageTool']) {
+    for (const fn of ['registerLifecycleListTool', 'registerEventListTool', 'registerEventTypeListTool', 'registerEventEditTool']) {
       assert.ok(src.includes(`${fn}(server)`), `${fn} 未被调用`);
     }
     // 判"调用"而不是"标识符"：import 行在文件顶部，天然出现在 readOnly 分支之前
     const readBlock = src.slice(0, src.indexOf('if (!readOnly)'));
     const writeBlock = src.slice(src.indexOf('if (!readOnly)'));
-    assert.equal(readBlock.includes('registerEventSetStageTool(server)'), false, '写工具注册必须在 readOnly 分支内');
-    assert.ok(writeBlock.includes('registerEventSetStageTool(server)'), '写工具注册必须在 readOnly 分支内');
+    assert.equal(readBlock.includes('registerEventEditTool(server)'), false, '写工具注册必须在 readOnly 分支内');
+    assert.ok(writeBlock.includes('registerEventEditTool(server)'), '写工具注册必须在 readOnly 分支内');
   });
 
   /**
-   * A20 在 REQ-20261116-004 之后调整：**事件**的创建/删除与文档增删已开放（4 个工具），
+   * A20 在 REQ-20261116-004 之后调整：**事件**的创建/删除与编辑已开放（3 个工具；
+   * 2026-11-23 文档增删 / 阶段流转 / 上传结论 / 改描述合并为 `ki_event_edit`），
    * 其余创建/删除类治理工具仍不得存在（`ki_lifecycle_create` / `ki_event_type_create` 等）。
    * 断言仍双向：白名单外的必须不存在，白名单内的必须真的存在（防止只删断言不落实现）。
    */
-  const ALLOWED_EVENT_TOOLS = ['ki_event_create', 'ki_event_delete', 'ki_event_docs', 'ki_event_refs'];
+  const ALLOWED_EVENT_TOOLS = ['ki_event_create', 'ki_event_delete', 'ki_event_edit'];
 
-  it('A20：只开放 4 个事件工具，其余创建 / 删除类治理工具不存在', () => {
+  it('A20：只开放 3 个事件工具，其余创建 / 删除类治理工具不存在', () => {
     const toolFiles = fs.readdirSync(path.join(ROOT, 'src/lib/mcp-tools')).map((f) => fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools', f), 'utf8')).join('\n');
     for (const forbidden of FORBIDDEN_CREATE_TOOLS) {
       if (ALLOWED_EVENT_TOOLS.includes(forbidden)) continue;
@@ -218,7 +219,7 @@ describe('④ 工具名与路由路径一致（防"改了名没改表"）', () =
     const src = fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/lifecycle-list.ts'), 'utf8')
       + fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/event-list.ts'), 'utf8')
       + fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/event-type-list.ts'), 'utf8')
-      + fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/event-set-stage.ts'), 'utf8');
+      + fs.readFileSync(path.join(ROOT, 'src/lib/mcp-tools/event-edit.ts'), 'utf8');
     for (const tool of [...READ_TOOLS, ...WRITE_TOOLS]) {
       assert.ok(src.includes(`'${tool}'`), `工具文件里找不到 ${tool}`);
     }
