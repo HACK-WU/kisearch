@@ -9488,3 +9488,37 @@ select.ki-chat-cfg__ta--select {
   border-radius: var(--ki-radius-tag);
   color: var(--ki-color-primary); font-size: 10px; line-height: 14px;
 }
+
+/* ─── 会话图片（REQ-20261123-006）──────────────────────────
+ * 待发缩略图行（composer）与已发送气泡内的图。
+ * 两处都用 `object-fit: cover` 固定尺寸：用户上传的截图长宽比差异极大，
+ * 不定高会让一排放出参差不齐的高度、把输入区顶掉。 */
+.ki-chat-imgbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 12px 0;
+}
+.ki-chat-imgbar__item {
+  position: relative; width: 56px; height: 56px;
+  border-radius: 8px; overflow: hidden;
+  border: 1px solid var(--ki-color-border-strong);
+  background: var(--ki-color-bg-subtle, transparent);
+}
+.ki-chat-imgbar__item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.ki-chat-imgbar__item button {
+  position: absolute; top: 2px; right: 2px;
+  width: 16px; height: 16px; padding: 0; line-height: 1;
+  display: grid; place-items: center;
+  border: none; border-radius: 999px; cursor: pointer;
+  background: rgba(0, 0, 0, .55); color: #fff; font-size: 10px;
+}
+.ki-chat-imgbar__item button:hover { background: rgba(0, 0, 0, .75); }
+.ki-chat-imgbar__count {
+  font-size: var(--ki-font-size-xs); color: var(--ki-color-text-muted);
+}
+.ki-chat-msg__imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.ki-chat-msg__imgs a { display: block; line-height: 0; }
+.ki-chat-msg__imgs img {
+  max-width: 160px; max-height: 120px;
+  border-radius: 8px; border: 1px solid var(--ki-color-border-strong);
+  display: block;
+}

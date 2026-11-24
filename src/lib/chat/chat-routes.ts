@@ -48,6 +48,7 @@ import {
   CHAT_REF_TOTAL_MAX,
   CHAT_SKILLS_MAX,
   type ChatEvent,
+  type ChatImageRef,
   type ChatMessage,
   type ChatProgressStep,
   type ChatRef,
@@ -85,6 +86,12 @@ import {
   replaceLastAssistant,
   truncateAfterAndEdit,
   undoCompaction,
+  // 会话图片（REQ-20261123-006）：字节落 assets，会话 JSON 只存元数据
+  ConversationImageInvalidError,
+  saveConversationImage,
+  readConversationImage,
+  statConversationImage,
+  deleteConversationImage,
 } from './chat-store.js';
 import { projectNextContextChars, runToolLoop } from './retrieval/tool-loop.js';
 import { summarizeForCompaction } from './compaction.js';
@@ -193,11 +200,32 @@ function sendErr(
   sendJson(res, status, { ok: false, error, code, ...(details ? { details } : {}) });
 }
 
-function readJsonBody(req: IncomingMessage): Promise<unknown> {
+/**
+ * 读 JSON 请求体。
+ *
+ * `maxBytes` 是**可选的硬上限**（REQ-20261123-006）：图片上传走 base64 内联，
+ * 一张 4MB 图 ≈ 5.3MB 请求体，而此前本函数**无任何字节上限** —— 一个超大请求
+ * 可以把进程内存吃满。缺省不设限，保持既有调用方行为不变。
+ */
+function readJsonBody(req: IncomingMessage, maxBytes?: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
+    let total = 0;
+    let aborted = false;
+    req.on('data', (c: Buffer) => {
+      if (aborted) return;
+      total += c.length;
+      if (maxBytes !== undefined && total > maxBytes) {
+        aborted = true;
+        // 拒绝后继续排空在途数据（不排空会让连接挂住、客户端看到超时而非 413）
+        req.resume();
+        reject(new ChatApiError(413, 'API_ERROR', `请求体超过上限（${Math.round(maxBytes / 1024)}KB）`));
+        return;
+      }
+      chunks.push(c);
+    });
     req.on('end', () => {
+      if (aborted) return;
       const raw = Buffer.concat(chunks).toString('utf-8').trim();
       if (!raw) return resolve({});
       try {
@@ -464,9 +492,17 @@ export async function handleChatRoutes(
       if (method === 'DELETE') { await handleConversationCompactUndo(res, segs[1]!, ctx); return true; }
     }
 
-    // ── API-09/10 图片：本期不实现（T13 后置 V2）──
+    // ── API-09/10 会话图片（REQ-20261123-006；此前是 V1 的硬 404 占位）──
+    if (segs.length === 3 && segs[0] === 'conversations' && segs[2] === 'images' && method === 'POST') {
+      await handleConversationImageUpload(req, res, segs[1]!, ctx);
+      return true;
+    }
+    if (segs.length === 4 && segs[0] === 'conversations' && segs[2] === 'images') {
+      if (method === 'GET') { await handleConversationImageRead(res, segs[1]!, segs[3]!, ctx); return true; }
+      if (method === 'DELETE') { await handleConversationImageDelete(res, segs[1]!, segs[3]!, ctx); return true; }
+    }
     if (segs.length >= 3 && segs[0] === 'conversations' && segs[2] === 'images') {
-      sendErr(res, 404, 'NOT_FOUND', '图片能力本期未实现（后置 V2）');
+      sendErr(res, 405, 'METHOD_NOT_ALLOWED', `图片接口不支持 ${method}`);
       return true;
     }
 
@@ -1322,6 +1358,208 @@ function unusableSkillIds(ids: readonly string[] | undefined): string[] {
  * · 前置：会话非生成中，否则 409 `CONVERSATION_GENERATING`
  * · 事件序见 `chat-contract.ts` 的 `CHAT_EVENT_ORDER_RULES`
  */
+
+// ─────────────────────────────────────────────────────────────
+// API-09/10 会话图片（REQ-20261123-006）
+// ─────────────────────────────────────────────────────────────
+
+
+/** `data:image/png;base64,…` 形式的解析（前端 FileReader 直接产出这种） */
+const DATA_URL_RE = /^data:([\w/+.-]+);base64,([\s\S]+)$/;
+
+/**
+ * 按**魔数**判定真实格式 —— 不信任客户端给的 mime，也不看文件名后缀。
+ *
+ * 为什么必须这样：`.exe` 改名 `.png` 再带一个 `Content-Type: image/png` 就能骗过类型检查，
+ * 而畸形字节送进上游只会换回一句看不懂的 400（实测 SVG 就是这样被拒的）。
+ */
+function sniffUserImageMime(buf: Buffer): 'image/png' | 'image/jpeg' | 'image/webp' | null {
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return 'image/png';
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return 'image/jpeg';
+  if (
+    buf.length >= 12
+    && buf.subarray(0, 4).toString('latin1') === 'RIFF'
+    && buf.subarray(8, 12).toString('latin1') === 'WEBP'
+  ) return 'image/webp';
+  return null;
+}
+
+/** 图片相关的生效开关与上限（配置缺省时给需求默认值） */
+function imagePolicy(): { supported: boolean; maxBytes: number; maxCount: number } {
+  const llm = loadConfig().llm;
+  return {
+    supported: llm?.supportsImages === true,
+    maxBytes: llm?.maxImageBytes ?? CHAT_BUDGET.maxImageBytes,
+    maxCount: llm?.maxImagesPerMessage ?? CHAT_BUDGET.maxImagesPerMessage,
+  };
+}
+
+/**
+ * 解析并校验请求体里的图片引用（REQ-20261123-006）。
+ *
+ * 形状：`images?: string[] | Array<{ id: string }>`（前端传 id 最省事）。
+ * 三道校验缺一不可：
+ *   ① 张数 ≤ `llm.maxImagesPerMessage`（默认 4）；
+ *   ② 每张**真实存在**于该会话 —— 否则消息里会挂上永远取不到图的死引用；
+ *   ③ 去重 —— 同一张图被点两次不该发两遍（白付一次 image_tokens）。
+ */
+async function parseImages(
+  scope: string,
+  convId: string,
+  body: { images?: unknown },
+): Promise<ChatImageRef[]> {
+  if (body.images === undefined || body.images === null) return [];
+  if (!Array.isArray(body.images)) {
+    throw new ChatApiError(400, CHAT_ERROR_CODES.MESSAGE_INVALID, 'images 必须是数组');
+  }
+  const policy = imagePolicy();
+  if (body.images.length > policy.maxCount) {
+    throw new ChatApiError(
+      400,
+      CHAT_ERROR_CODES.IMAGE_COUNT_EXCEEDED,
+      `单条消息最多 ${policy.maxCount} 张图片（当前 ${body.images.length} 张）`,
+    );
+  }
+  if (body.images.length > 0 && !policy.supported) {
+    throw new ChatApiError(
+      400,
+      CHAT_ERROR_CODES.IMAGE_UNSUPPORTED,
+      '当前模型未开启读图能力（llm.supportsImages），图片不会被发送',
+    );
+  }
+
+  const out: ChatImageRef[] = [];
+  const seen = new Set<string>();
+  for (const item of body.images) {
+    const id = typeof item === 'string'
+      ? item
+      : (item !== null && typeof item === 'object' && typeof (item as { id?: unknown }).id === 'string'
+        ? (item as { id: string }).id
+        : '');
+    if (!id) throw new ChatApiError(400, CHAT_ERROR_CODES.IMAGE_INVALID, 'images 里每一项都要有 id');
+    if (seen.has(id)) continue;
+    const found = await statConversationImage(scope, convId, id);
+    if (!found) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.IMAGE_INVALID, `图片 ${id} 不存在或已被清理，请重新上传`);
+    }
+    seen.add(id);
+    out.push({ id, mime: found.mime, bytes: found.bytes });
+  }
+  return out;
+}
+
+/**
+ * API-09 `POST /api/chat/conversations/:id/images` —— 上传一张图片。
+ *
+ * body：`{ data: string }`，接受 `data:image/png;base64,…` 或纯 base64（后缀/mime 一律不信）。
+ * 返回：`{ ok:true, image: ChatImageRef }` —— **不回传字节**（前端用 GET 自己取）。
+ *
+ * ★ 上传阶段**不检查张数**：张数是"单条消息"的语义，只有发送时才知道这一轮带几张。
+ *   上传阶段的失败面只保留三类：模型不支持 / 格式非法 / 超字节。
+ */
+export async function handleConversationImageUpload(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/images`, res);
+  if (!hit) return;
+
+  const policy = imagePolicy();
+  if (!policy.supported) {
+    // 早失败：不然用户传完、写进消息，发送时才被拦，白折腾一遍
+    throw new ChatApiError(
+      400,
+      CHAT_ERROR_CODES.IMAGE_UNSUPPORTED,
+      '当前模型未开启读图能力（llm.supportsImages），图片不会被发送。请联系管理员开启后重试',
+    );
+  }
+
+  // base64 放大 4/3，再留 1MB 给 JSON 外壳
+  const body = (await readJsonBody(req, Math.ceil((policy.maxBytes * 4) / 3) + 1024 * 1024)) as {
+    data?: unknown;
+  };
+  const raw = typeof body.data === 'string' ? body.data.trim() : '';
+  if (!raw) throw new ChatApiError(400, CHAT_ERROR_CODES.IMAGE_INVALID, '缺少图片数据（body.data）');
+
+  const matched = DATA_URL_RE.exec(raw);
+  const b64 = matched ? matched[2]! : raw;
+  const buf = Buffer.from(b64, 'base64');
+  // `Buffer.from(_, 'base64')` 对非法字符是**静默忽略**，所以要靠长度与魔数兜底
+  if (buf.byteLength < 8) {
+    throw new ChatApiError(400, CHAT_ERROR_CODES.IMAGE_INVALID, '图片数据不是合法 base64');
+  }
+  if (buf.byteLength > policy.maxBytes) {
+    throw new ChatApiError(
+      400,
+      CHAT_ERROR_CODES.IMAGE_TOO_LARGE,
+      `单张图片不得超过 ${Math.round(policy.maxBytes / 1024 / 1024)}MB（当前 ${(buf.byteLength / 1024 / 1024).toFixed(1)}MB）`,
+    );
+  }
+
+  const mime = sniffUserImageMime(buf);
+  if (!mime) {
+    throw new ChatApiError(
+      400,
+      CHAT_ERROR_CODES.IMAGE_INVALID,
+      '不是可识别的位图（仅支持 PNG / JPEG / WebP）；SVG 与其它格式会被模型服务直接拒绝',
+    );
+  }
+
+  try {
+    const image = await saveConversationImage(hit.scope, id, buf, mime);
+    sendOk(res, 201, { image });
+  } catch (err) {
+    if (err instanceof ConversationImageInvalidError) {
+      throw new ChatApiError(400, CHAT_ERROR_CODES.IMAGE_INVALID, err.message);
+    }
+    throw err;
+  }
+}
+
+/**
+ * `GET /api/chat/conversations/:id/images/:imgId` —— 取图片字节（前端缩略图 / 点击放大）。
+ *
+ * 与 `/api/asset` 的区别：那是知识库资产（只读、可按文档路径定位），
+ * 这里是**会话私有**图片（必须走会话授权），两者不能互相替代。
+ */
+export async function handleConversationImageRead(
+  res: ServerResponse,
+  id: string,
+  imgId: string,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/images/${imgId}`, res);
+  if (!hit) return;
+
+  const found = await readConversationImage(hit.scope, id, imgId);
+  if (!found) {
+    throw new ChatApiError(404, CHAT_ERROR_CODES.MESSAGE_NOT_FOUND, '图片不存在或已被清理');
+  }
+  res.writeHead(200, {
+    'Content-Type': found.mime,
+    'Content-Length': String(found.buffer.byteLength),
+    // 会话图片是私有内容：只允许浏览器私有缓存，不进 CDN / 共享代理
+    'Cache-Control': 'private, max-age=3600',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(found.buffer);
+}
+
+/** `DELETE /api/chat/conversations/:id/images/:imgId` —— 删除一张待发图片（幂等） */
+export async function handleConversationImageDelete(
+  res: ServerResponse,
+  id: string,
+  imgId: string,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/images/${imgId}`, res);
+  if (!hit) return;
+  const removed = await deleteConversationImage(hit.scope, id, imgId);
+  sendOk(res, 200, { removed });
+}
+
 export async function handleConversationMessages(req: IncomingMessage, res: ServerResponse, id: string, ctx: ChatRouteContext): Promise<void> {
   // ① 定位会话 + 越权校验（授权范围内查不到 → 404）
   const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/messages`, res);
@@ -1333,6 +1571,8 @@ export async function handleConversationMessages(req: IncomingMessage, res: Serv
   const refs = parseRefs(body);
   // `/` 斜杠点名的 skill（可选）：形状校验在此，可用性在 runGeneration 前置判（2026-11-12）
   const skillIds = parseSkillIds(body);
+  // 本轮上传的图片（可选）：张数 / 存在性 / 去重在此校验（REQ-20261123-006）
+  const images = await parseImages(hit.scope, id, body as { images?: unknown });
 
   // ② 生成前置（P4 隐私 / CHAT_DISABLED / P5 会话忙）
   const ready = requireGenerationReady(res, ctx, id);
@@ -1345,6 +1585,7 @@ export async function handleConversationMessages(req: IncomingMessage, res: Serv
     mode: 'append-user',
     refs,
     skillIds,
+    ...(images.length > 0 ? { images } : {}),
     capabilities: ctx.capabilities,
   });
 }
@@ -1389,10 +1630,12 @@ export async function handleMessageEdit(req: IncomingMessage, res: ServerRespons
   const hit = await resolveConversationInScopes(ctx, id, `/conversations/${id}/messages/${msgId}`, res);
   if (!hit) return;
 
-  const body = (await readJsonBody(req)) as { text?: unknown; skills?: unknown };
+  const body = (await readJsonBody(req)) as { text?: unknown; skills?: unknown; images?: unknown };
   const text = requireMessageText(body);
   // 编辑重发同样可能改动 `/` 点名：缺省 = 保留原消息的 skills，显式空数组 = 清空
   const skillIds = parseSkillIds(body);
+  // 图片同样：缺省 = 保留原消息的 images（Q-A 复用原图），显式数组 = 覆盖（空数组 = 清空）
+  const images = body.images === undefined ? undefined : await parseImages(hit.scope, id, body);
 
   const ready = requireGenerationReady(res, ctx, id);
   if (!ready) return;
@@ -1414,6 +1657,7 @@ export async function handleMessageEdit(req: IncomingMessage, res: ServerRespons
     mode: 'edit',
     msgId,
     skillIds,
+    ...(images !== undefined ? { images } : {}),
     capabilities: ctx.capabilities,
   });
 }
@@ -1440,6 +1684,13 @@ interface GenerationSpec {
    *   否则用户停用一个 skill 后，所有带过它的老会话都无法重新生成）。
    */
   skillIds?: string[];
+  /**
+   * 本轮上传的图片（REQ-20261123-006）。
+   *
+   * · `append-user` / `edit`：由请求体给出（已存在校验 + 张数校验）；
+   * · `regenerate`：**不消费本字段** —— 从落盘的末条 user 读回（Q-A 拍板：复用原图）。
+   */
+  images?: ChatImageRef[];
 }
 
 /**
@@ -1502,6 +1753,8 @@ async function runGeneration(
       ...(spec.refs && spec.refs.length > 0 ? { refs: spec.refs } : {}),
       // `/` 点名随消息落盘 → 重新生成 / 编辑重发能复用同一轮语义（2026-11-12）
       ...(effectiveSkillIds.length > 0 ? { skills: effectiveSkillIds } : {}),
+      // 图片元数据随消息落盘：刷新后回显缩略图、重新生成时复用原图（Q-A）
+      ...(spec.images && spec.images.length > 0 ? { images: spec.images } : {}),
     });
   } else if (mode === 'edit') {
     const badSkills = unusableSkillIds(spec.skillIds);
@@ -1513,7 +1766,7 @@ async function runGeneration(
       );
     }
     // skills 传 undefined ⇒ 保留原消息上的（旧客户端）；传数组 ⇒ 覆盖（空数组 = 用户删掉了 `/名称`）
-    const r = await truncateAfterAndEdit(scope, convId, spec.msgId!, spec.userText, spec.skillIds);
+    const r = await truncateAfterAndEdit(scope, convId, spec.msgId!, spec.userText, spec.skillIds, spec.images);
     discardedCount = r.discardedCount;
     convAfterPrep = r.conv;
     const edited = r.conv.messages.find((m) => m.id === spec.msgId);

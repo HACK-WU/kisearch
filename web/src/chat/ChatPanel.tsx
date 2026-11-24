@@ -50,8 +50,11 @@ import {
   patchConversation,
   undoCompactConversation,
   ChatApiError,
+  // 会话图片（REQ-20261123-006）：上传 / 删除 / 渲染地址
+  uploadConversationImage,
+  conversationImageUrl,
 } from '@/api/chatApi';
-import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatMessage, type ChatProgressStep, type ChatRef, type ChatToolArgsDisplay, type ContextCharsParts, type ConversationSummary, type PromptSkill, type SourceRef } from '@/api/chatContract';
+import { CHAT_REF_MAX_COUNT, CHAT_REF_TOTAL_MAX, type ChatConfigOk, type ChatImageRef, type ChatMessage, type ChatProgressStep, type ChatRef, type ChatToolArgsDisplay, type ContextCharsParts, type ConversationSummary, type PromptSkill, type SourceRef } from '@/api/chatContract';
 import { ComposerMirror } from './ComposerMirror';
 import { SkillSlashMenu } from './SkillSlashMenu';
 import { applySkillToken, filterSkills, hasSlashToken, parseSkillTokenIds, slashTriggerAt, splitSkillSegments } from './skillSlash';
@@ -153,6 +156,24 @@ const CHAT_PAGE_SIDE_MIN_VIEWPORT = 1024;
 const MAX_SEND_CHARS = 20000;
 
 /**
+ * 单条消息最多几张图片（REQ-20261123-006）。
+ *
+ * 与后端 `llm.maxImagesPerMessage` 的**默认值**保持一致；真正的闸门在服务端
+ * （超限 400 `IMAGE_COUNT_EXCEEDED`），这里只为不让用户白传。
+ */
+const MAX_PENDING_IMAGES_FALLBACK = 4;
+
+/** 本地文件 → dataURL（上传接口吃这个形态；服务端照样按魔数校验，不信前缀） */
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(new Error(`读取本地文件失败：${file.name || '未命名'}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
  * `/` 过滤词的长度上限（字符）。
  *
  * 超过即视为"用户已经不在选 skill（而是在写正文）" → 收起浮层，别挡住输入。
@@ -200,6 +221,21 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const [convError, setConvError] = useState<string | null>(null);
   /** 发送 / 生成失败的错误提示（N4）：与 convError 分开，避免串到会话列表槽 */
   const [sendError, setSendError] = useState<string | null>(null);
+  /**
+   * 待发图片（REQ-20261123-006）：**组件本地状态**，不进 chatStore ——
+   * 它是"这一问要带什么"，既不是会话数据也不同步到多面板；刷新即清空符合直觉。
+   */
+  const [pendingImages, setPendingImages] = useState<ChatImageRef[]>([]);
+  const [imageUploading, setImageUploading] = useState(false);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
+  /**
+   * 张数上限的**生效值**：以服务端配置为准（`llm.maxImagesPerMessage`），
+   * 缺省才回落到内置默认。前后端同一口径 —— 否则"前端允许 4 张、后端按 2 拒绝"
+   * 会让用户白传两张再收到一句 400。
+   */
+  const maxPendingImages = config?.maxImagesPerMessage ?? MAX_PENDING_IMAGES_FALLBACK;
+  /** 入口是否可用：必须模型声明支持读图（旧 daemon 不返回该字段 → 视为不支持） */
+  const imageInputEnabled = config?.supportsImages === true;
   /** 会话切换器浮层开合（瞬时 UI 态，不进 store） */
   const [convPopOpen, setConvPopOpen] = useState(false);
   /**
@@ -1043,10 +1079,13 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     if (readyScope !== scope) return '正在切换知识库…';
     if (openingConv) return '正在准备会话…';
     if (state.streaming.active) return '生成中…';
+    // 图片还在上传时不能发：此时 pendingImages 里还没有这些图，一旦发出就是"图没带上"，
+    // 而图随后又出现在待发区（用户以为已发送）—— REQ-20261123-006 的静默丢输入
+    if (imageUploading) return '图片上传中…';
     if (state.messages.some((m) => m.id.startsWith('local-user-'))) return '提问保存状态待确认，请重新打开会话';
     if (!draft.trim()) return '请输入内容';
     return null;
-  }, [config, configError, draft, readyScope, scope, openingConv, state.streaming.active, state.messages]);
+  }, [config, configError, draft, readyScope, scope, openingConv, imageUploading, state.streaming.active, state.messages]);
 
   // 走查 #5：空草稿的「请输入内容」已由 placeholder 承担；提示行若重复显示，
   // 视觉上就成了"两个输入框"错觉（用户截图）。提示行只在**真阻塞**时让位给原因。
@@ -1493,6 +1532,53 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     store.dispatch({ type: 'setRefs', refs: store.getState().pendingRefs.filter((_, i) => i !== index) });
   };
 
+  /**
+   * 上传一批本地图片（按钮选文件 / 粘贴 / 拖拽都走这里）。
+   *
+   * 超上限**不静默丢**：提示"已忽略 N 张"，与需求 §3.2 的负向口径一致。
+   * 上传前先确保会话存在（惰性建会话与 handleSend 一致）—— 图片挂在会话目录下。
+   */
+  const addImages = useCallback(async (files: readonly File[]): Promise<void> => {
+    if (files.length === 0) return;
+    const room = maxPendingImages - pendingImages.length;
+    if (room <= 0) {
+      setSendError(`最多 ${maxPendingImages} 张图片，请先移除一张再添加`);
+      return;
+    }
+    const take = files.slice(0, room);
+    if (files.length > room) {
+      setSendError(`最多 ${maxPendingImages} 张图片，已忽略 ${files.length - room} 张`);
+    }
+    setImageUploading(true);
+    try {
+      const convId = store.getState().activeConvId ?? (await createNewConversation());
+      for (const file of take) {
+        const dataUrl = await readFileAsDataUrl(file);
+        const image = await uploadConversationImage(convId, dataUrl);
+        setPendingImages((cur) => [...cur, image]);
+      }
+    } catch (err) {
+      // 后端已给出可读文案（模型未开读图 / 不是位图 / 超 4MB），原样透出
+      setSendError(err instanceof Error ? err.message : '图片上传失败');
+    } finally {
+      setImageUploading(false);
+    }
+  }, [pendingImages.length, maxPendingImages, createNewConversation, store]);
+
+  /**
+   * 移除待发图：**只从待发区摘掉，不删服务端文件**。
+   *
+   * ⚠️ 曾经在这里顺手 `DELETE /images/:id`，但那会踩到一个真实的坏路径：
+   *   进入「编辑」时会**回填原图**到待发区（Q-A 复用原图）——
+   *   用户在待发区点 ✕ 再点「取消」，服务端文件已被删，而已发送消息里的 `images`
+   *   元数据还在 → 缩略图 404、重新生成时那张图也读不到了。
+   *   代价对比：留一个孤儿文件（≤4MB，删会话 / 清空时由既有级联清理，N15）
+   *   远小于「让用户取消一次编辑就毁掉已发送内容」。
+   */
+  const removePendingImage = useCallback((imageId: string): void => {
+    setPendingImages((cur) => cur.filter((i) => i.id !== imageId));
+  }, []);
+
   const handleSend = (): void => {
     const text = draft.trim();
     // `sendLockRef` 覆盖"await 期间连点"的窗口（`blocked` 只是渲染期快照）
@@ -1502,8 +1588,11 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     const reqScope = scope;
     // 引用快照：本轮用「点发送那一刻」的引用（异步等待期间用户可能仍在增删）
     const reqRefs = store.getState().pendingRefs;
+    // 图片同样快照（发送期间用户可能仍在增删）；发送成功后清空待发区
+    const reqImages = pendingImages;
     setSendError(null);
     setDraft(''); // 清空输入框（失败时可按错误块重试，见 N4）
+    if (reqImages.length > 0) setPendingImages([]);
     setAtBottom(true); // 新提问必须把视图带回底部（用户此前往上翻过历史时也要跟随）
     void (async () => {
       try {
@@ -1517,7 +1606,13 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         if (scopeRef.current !== reqScope || operationSeqRef.current !== operation) return;
         // ★ 引用**发送后不清空**：Q3 拍板「当前对话框内有效」= 同一会话的多轮提问持续携带，
         //   直到用户主动删除，或切换会话 / 切换 scope（清空点见 chatStore.setActiveConv 与本文件 scope effect）
-        const persisted = await stream.send(convId, text, reqRefs, skillIds);
+        const persisted = await stream.send(
+          convId,
+          text,
+          reqRefs,
+          skillIds,
+          reqImages.length > 0 ? reqImages : undefined,
+        );
         // ★ 只有收到 `done`（服务端确已落盘）才"以服务端为准"重取：
         //   error / aborted / 中断路径下服务端可能没有新内容 → 重取会把刚渲染的回答**覆盖成旧的**
         //   （用户看到回答凭空消失且无提示）。失败路径改由错误槽 + 重试入口承担。
@@ -1528,6 +1623,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         if (scopeRef.current === reqScope && operationSeqRef.current === operation) {
           setSendError(err instanceof Error ? err.message : '发送失败');
           setDraft((cur) => cur || text);
+          // 图已上传到服务端（元数据仍有效），失败时还给用户，不必重传
+          if (reqImages.length > 0) setPendingImages((cur) => (cur.length > 0 ? cur : reqImages));
         }
       } finally {
         if (operationSeqRef.current === operation) sendLockRef.current = false;
@@ -1585,7 +1682,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         // 编辑重发同样现解析：`[]` = 用户把 `/名称` 删掉了 → 后端显式清空该消息的点名
         const skillIds = await resolveSkillIds(trimmed);
         if (operationSeqRef.current !== operation) return;
-        const persisted = await stream.editAndResend(convId, msgId, trimmed, skillIds);
+        // 传数组（含空）：编辑语义是"重设这一问"，空数组表示用户把图删光了
+        const persisted = await stream.editAndResend(convId, msgId, trimmed, skillIds, pendingImages);
         if (persisted) await reloadActive(convId);
         void refreshConversations();
       } catch (err) {
@@ -1984,6 +2082,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
             <MessageBubble
               key={m.id}
               message={m}
+              convId={state.activeConvId ?? ''}
               live={live}
               // 兜底：meta/done 校正真实 id 引发重挂载时不播入场动画（防"闪一下"）
               instant={m.id === state.lastStreamedId}
@@ -2010,7 +2109,11 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
               canRegenerate={!state.streaming.active && Boolean(state.activeConvId) && m.id === lastAssistantId}
               canEdit={!state.streaming.active && Boolean(state.activeConvId)}
               editing={editing?.msgId === m.id ? editing.text : null}
-              onEditStart={() => setEditing({ msgId: m.id, text: m.content })}
+              onEditStart={() => {
+                setEditing({ msgId: m.id, text: m.content });
+                // Q-A：编辑重发**复用原图**——把该消息的图回填到待发区（可逐张删）
+                setPendingImages(m.images ?? []);
+              }}
               onEditChange={(text) => setEditing((e) => (e ? { ...e, text } : e))}
               onEditSubmit={(text) => handleEditResend(m.id, text)}
               onEditCancel={() => setEditing(null)}
@@ -2224,7 +2327,54 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                 aria-label="引用整篇文档（当前打开的文档；超长会按预算截断）"
                 title="把当前打开的文档整篇加入引用；没有打开的文档时会打开选择器"
               >{docRefBusy ? '读取中…' : '+ 整篇'}</button>
+              {/* 图片入口（REQ-20261123-006）：也可以直接 Ctrl+V 粘贴截图 */}
+              <button
+                type="button"
+                className="ki-chat-refbar__add"
+                onClick={() => imageInputRef.current?.click()}
+                disabled={
+                  !(config?.enabled ?? false)
+                  || !imageInputEnabled
+                  || imageUploading
+                  || pendingImages.length >= maxPendingImages
+                }
+                aria-label={
+                  pendingImages.length >= maxPendingImages
+                    ? `图片已达上限 ${maxPendingImages} 张，请先移除一张`
+                    : '添加图片（PNG / JPEG / WebP，单张 ≤4MB；也可 Ctrl+V 粘贴）'
+                }
+                title="添加图片；截图可直接 Ctrl+V 粘贴"
+              >{imageUploading ? '上传中…' : '+ 图片'}</button>
+              <input
+                ref={imageInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                multiple
+                hidden
+                onChange={(e) => {
+                  const files = [...(e.target.files ?? [])];
+                  // 清空 value：否则连续选同一个文件不会再触发 onChange
+                  e.target.value = '';
+                  void addImages(files);
+                }}
+              />
             </div>
+            {pendingImages.length > 0 ? (
+              <div className="ki-chat-imgbar" aria-label={`待发送 ${pendingImages.length} 张图片`}>
+                {pendingImages.map((img) => (
+                  <span key={img.id} className="ki-chat-imgbar__item">
+                    <img src={conversationImageUrl(state.activeConvId ?? '', img.id)} alt="" />
+                    <button
+                      type="button"
+                      onClick={() => removePendingImage(img.id)}
+                      aria-label="移除这张图片"
+                      title="移除"
+                    >✕</button>
+                  </span>
+                ))}
+                <span className="ki-chat-imgbar__count">{pendingImages.length}/{maxPendingImages} 张</span>
+              </div>
+            ) : null}
             {/* 高亮镜像层与 textarea 必须同处一个定位容器：镜像层 `absolute` 贴合它的
                 client box，排版属性全部从 textarea 现取（见 ComposerMirror 头注释）。
                 `data-tokenized` 只在**真有生效 token** 时出现 —— 否则不渲染镜像、不改 textarea 颜色。 */}
@@ -2254,6 +2404,21 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
                 setDraft(next);
                 // 触发判定必须基于「新文本 + 新光标」，不能用旧的 draft / 旧 selection
                 syncSlash(next, e.target.selectionStart ?? next.length);
+              }}
+              onPaste={(e) => {
+                /*
+                 * 粘贴截图（REQ-20261123-006）。三条注意：
+                 * · 只认 `kind === 'file'` 且 mime 是图片的项 —— 普通文本粘贴必须原样放行；
+                 * · 剪贴板**同时含文本与图**时两者都收（不 preventDefault 会丢图，反之会丢文本）；
+                 * · 拿不到 items（部分浏览器/受保护剪贴板）时静默放行，不阻断正常输入。
+                 */
+                const files = [...(e.clipboardData?.items ?? [])]
+                  .filter((it) => it.kind === 'file' && it.type.startsWith('image/'))
+                  .map((it) => it.getAsFile())
+                  .filter((f): f is File => f !== null);
+                if (files.length === 0) return;
+                if (!e.clipboardData?.getData('text/plain')) e.preventDefault();
+                void addImages(files);
               }}
               onKeyDown={(e) => {
                 // 输入法组合态一律放行（Enter 用于上屏，不是"选择候选 / 发送"）
@@ -2705,6 +2870,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
 /** 单条已落盘消息（user / assistant 分支 + 消息级操作条） */
 function MessageBubble({
   message,
+  convId,
   live,
   degraded,
   progress,
@@ -2726,6 +2892,8 @@ function MessageBubble({
   instant,
 }: {
   message: ChatMessage;
+  /** 所属会话 id：用户图片的字节地址要它（`/conversations/:id/images/:imgId`） */
+  convId: string;
   /** 生成中的虚拟消息（store.streaming 直读）：与完成态共用本组件，收尾仅换数据源 */
   live?: boolean;
   /** N17：本条的降级标记（来自 store.degradedByMessage；生成结束后仍保留，回看历史可见） */
@@ -2807,6 +2975,22 @@ function MessageBubble({
         </div>
       ) : isUser ? (
         <div className="ki-chat-msg__body">
+          {/* 本轮上传的图片（REQ-20261123-006）：点开放大；刷新 / 切回会话后仍在 */}
+          {message.images && message.images.length > 0 ? (
+            <div className="ki-chat-msg__imgs">
+              {message.images.map((img) => (
+                <a
+                  key={img.id}
+                  href={conversationImageUrl(convId, img.id)}
+                  target="_blank"
+                  rel="noreferrer"
+                  title="点击查看原图"
+                >
+                  <img src={conversationImageUrl(convId, img.id)} alt="" loading="lazy" />
+                </a>
+              ))}
+            </div>
+          ) : null}
           {/* 用户输入是纯文本：不渲染 Markdown（避免把用户输入的 markdown 当富文本执行） */}
           <p className="ki-chat-msg__text">{message.content}</p>
           {/* 本轮提问引用的文档片段（REQ-20261009-002 R11）：刷新 / 切回会话后仍可见 */}

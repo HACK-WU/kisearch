@@ -18,6 +18,7 @@ import type {
   AgentAskGroup,
   ChatConfigOk,
   ChatEvent,
+  ChatImageRef,
   ChatRef,
   ConversationFile,
   ConversationSummary,
@@ -283,6 +284,45 @@ export async function deleteConversation(id: string): Promise<{ ok: true }> {
  *
  * @param scope 目标 scope；**绝不触碰 `kb/{scope}/`**
  */
+// ─── 会话图片（REQ-20261123-006）───────────────────────────
+
+/**
+ * 上传一张图片（`data:image/png;base64,…` 或纯 base64）。
+ *
+ * 后端**按魔数**判真实格式（不信 mime 与后缀），这里传 dataURL 只是为了省去前端拼前缀。
+ * 返回的 `image.id` 就是发送时 `images` 数组里的元素。
+ *
+ * 失败码：`IMAGE_UNSUPPORTED`（模型未开读图）/ `IMAGE_INVALID`（不是 PNG·JPEG·WebP）/ `IMAGE_TOO_LARGE`。
+ */
+export async function uploadConversationImage(
+  convId: string,
+  data: string,
+): Promise<ChatImageRef> {
+  const res = await reqJson<{ image: ChatImageRef }>(
+    `${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/images`,
+    jsonBody({ data }),
+  );
+  return res.image;
+}
+
+/** 删除一张待发图片（幂等：不存在也返回 `removed:false`） */
+export async function deleteConversationImage(convId: string, imageId: string): Promise<boolean> {
+  const res = await reqJson<{ removed: boolean }>(
+    `${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/images/${encodeURIComponent(imageId)}`,
+    { method: 'DELETE' },
+  );
+  return res.removed;
+}
+
+/**
+ * 图片字节地址 —— `<img src>` 直接用。
+ *
+ * 走会话授权（同级鉴权与消息接口一致），**不可**当公共 CDN 地址分发。
+ */
+export function conversationImageUrl(convId: string, imageId: string): string {
+  return `${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/images/${encodeURIComponent(imageId)}`;
+}
+
 export async function clearConversations(scope: string): Promise<{ ok: true; deleted: number }> {
   return reqJson<{ ok: true; deleted: number }>(
     `${CHAT_API_BASE}/conversations?${new URLSearchParams({ scope }).toString()}`,
@@ -432,11 +472,13 @@ export async function* streamMessage(
   signal?: AbortSignal,
   refs?: readonly ChatRef[],
   skills?: readonly string[],
+  images?: readonly string[],
 ): AsyncGenerator<ChatEvent> {
-  const body: { text: string; refs?: readonly ChatRef[]; skills?: readonly string[] } = { text };
-  // 空引用 / 空点名不写字段：后端对「缺省」与「空数组」等价处理，少写一个键就少一处歧义
+  const body: { text: string; refs?: readonly ChatRef[]; skills?: readonly string[]; images?: readonly string[] } = { text };
+  // 空引用 / 空点名 / 空图片不写字段：后端对「缺省」与「空数组」等价处理，少写一个键就少一处歧义
   if (refs && refs.length > 0) body.refs = refs;
   if (skills && skills.length > 0) body.skills = skills;
+  if (images && images.length > 0) body.images = images;
   yield* postSse(`${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/messages`, body, signal);
 }
 
@@ -465,14 +507,19 @@ export async function* streamEditMessage(
   text: string,
   signal?: AbortSignal,
   skills?: readonly string[],
+  images?: readonly string[],
 ): AsyncGenerator<ChatEvent> {
   // `skills` 语义：undefined ⇒ 保留原消息上的点名；数组（含空）⇒ 覆盖（空 = 用户删掉了 `/名称`）
+  // `images` 同构：undefined ⇒ 保留原图（Q-A 复用）；空数组 ⇒ 清空
+  const body: { text: string; skills?: readonly string[]; images?: readonly string[] } = { text };
+  if (skills !== undefined) body.skills = skills;
+  if (images !== undefined) body.images = images;
   const res = await fetch(
     `${CHAT_API_BASE}/conversations/${encodeURIComponent(convId)}/messages/${encodeURIComponent(msgId)}`,
     {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify(skills ? { text, skills } : { text }),
+      body: JSON.stringify(body),
       signal,
     },
   );

@@ -61,6 +61,7 @@ import {
   ChatDisabledError,
   LlmTimeoutError,
   ToolsUnsupportedError,
+  type ChatContentPart,
   type ChatTurn,
   type ToolDef,
 } from '../llm-client.js';
@@ -74,6 +75,7 @@ import { canUseTool } from '../../auth/tool-permissions.js';
 import type { Capability } from '../../auth/capabilities.js';
 import { collectReplayItems, withEvidenceBlock, type ReplayItem } from './replay.js';
 import { toSourceRefs } from './projection.js';
+import { readConversationImage } from '../chat-store.js';
 import { serializeToolResponse } from './tool-response.js';
 // 取图结果的分流（REQ-20261123-008 B2）：字节在序列化**之前**抽走，正文只留摘要
 import { isToolImageResult, toImageParts, toToolImageSummary, demoteOlderImages } from './tool-image.js';
@@ -452,7 +454,44 @@ function safeReplayItems(input: ToolLoopInput): ReplayItem[] {
   }
 }
 
-function buildUpstreamMessages(input: ToolLoopInput, runtime: LoopRuntime): ChatTurn[] {
+/**
+ * 本轮用户上传图片 → 上游 `image_url` parts（REQ-20261123-006）。
+ *
+ * 单独抽成**异步**函数的原因：`buildUpstreamMessages` 是纯同步的（它的不变量与顺序被
+ * `degradedPath` 的 splice 依赖），不能在里面读盘。图片字节必须先在这里读好再传进去。
+ *
+ * 图被清理（读不到）时**跳过该张并计数** —— 让调用方能在文本里告诉模型"有一张没读到"，
+ * 而不是让模型对着少了图的提问瞎猜。
+ */
+async function resolveUserImageParts(
+  input: ToolLoopInput,
+): Promise<{ parts: ChatContentPart[]; missing: number }> {
+  const last = input.conv.messages[input.conv.messages.length - 1];
+  if (!last || last.role !== 'user' || !last.images || last.images.length === 0) {
+    return { parts: [], missing: 0 };
+  }
+  const parts: ChatContentPart[] = [];
+  let missing = 0;
+  for (const img of last.images) {
+    const found = await readConversationImage(input.scope, input.conv.id, img.id);
+    if (!found) {
+      missing += 1;
+      continue;
+    }
+    parts.push({
+      type: 'image_url',
+      image_url: { url: `data:${found.mime};base64,${found.buffer.toString('base64')}` },
+    });
+  }
+  return { parts, missing };
+}
+
+function buildUpstreamMessages(
+  input: ToolLoopInput,
+  runtime: LoopRuntime,
+  userImageParts: readonly ChatContentPart[] = [],
+  missingImages = 0,
+): ChatTurn[] {
   const msgs: ChatTurn[] = [];
   for (const m of buildSystemMessages(input.convSystemPrompt, injectionBlocks(input.conv, runtime))) {
     msgs.push({ role: 'system', content: m.content });
@@ -474,8 +513,17 @@ function buildUpstreamMessages(input: ToolLoopInput, runtime: LoopRuntime): Chat
   //   `renderRefsBlock` 的 2026-10-09 修订说明）。本函数的不变量仍是
   //   「返回数组末条恒为本轮 user」（degradedPath 的 splice 依赖它）。
   for (const m of input.conv.messages) {
-    // ★ 只取 role + content：ChatMessage 本身不含 reasoning，此处再做一次显式白名单
-    msgs.push({ role: m.role, content: m.content });
+    /*
+     * ★ 只取 role + content：ChatMessage 本身不含 reasoning，此处再做一次显式白名单。
+     *
+     * ★ 历史轮的图片**不重发**（REQ-20261123-006）：上游无状态，图会随每轮请求重传，
+     *   成本按剩余轮数放大（image_tokens × 轮数 + 带宽 × 轮数）。降级成文本占位，
+     *   让模型知道"那一轮有图"即可 —— 与工具图片的 `demoteOlderImages` 同口径。
+     */
+    const degraded = m.role === 'user' && m.images && m.images.length > 0
+      ? `${m.content}\n[图片×${m.images.length}（已省略）]`
+      : m.content;
+    msgs.push({ role: m.role, content: degraded });
   }
   // ★ 路由的三种 mode 都会让 conv.messages 以本轮 user 结束，再传入相同 userText：
   //     - append-user：锁内 appendMessage 先落盘，再 `conv: convAfterPrep` + `userText`
@@ -504,10 +552,26 @@ function buildUpstreamMessages(input: ToolLoopInput, runtime: LoopRuntime): Chat
   //   附在本轮 user 末尾（引用块之后）。构造失败降级为无证据（见 safeReplayItems）。
   const replayItems = safeReplayItems(input);
   const userContent = withEvidenceBlock(withRefsBlock(input.userText, input.refs), replayItems);
+  // 本轮图片 + 读不到的提示（图被清理时不能装作没这回事）
+  const userImagesText = missingImages > 0
+    ? `\n[其中 ${missingImages} 张图片未能读取（可能已被清理），无法看到其内容]`
+    : '';
+  const finalUserText = `${userContent}${userImagesText}`;
+
   if (!alreadyIncluded) {
-    msgs.push({ role: 'user', content: userContent });
+    // 未命中守卫 ⇒ conv 里没有本轮这条 user，图片 part 无从挂载（路由三条链路都不会走到）
+    msgs.push({ role: 'user', content: finalUserText });
+  } else if (userImageParts.length > 0) {
+    // ★ 图在前、文本在后：与多数 OpenAI 兼容实现的示例一致，且模型更倾向"先看图再读要求"
+    msgs[msgs.length - 1] = {
+      role: 'user',
+      content: [
+        ...userImageParts.map((part) => ({ ...part })),
+        { type: 'text', text: finalUserText },
+      ],
+    };
   } else {
-    msgs[msgs.length - 1] = { role: 'user', content: userContent };
+    msgs[msgs.length - 1] = { role: 'user', content: finalUserText };
   }
   return msgs;
 }
@@ -665,7 +729,9 @@ async function* toolLoopPath(
   runtime: LoopRuntime,
   messageId: string,
 ): AsyncGenerator<ChatEvent> {
-  const messages = buildUpstreamMessages(input, runtime);
+  // 本轮用户图先读好字节（buildUpstreamMessages 是纯同步的，见其上方注释）
+  const userImages = await resolveUserImageParts(input);
+  const messages = buildUpstreamMessages(input, runtime, userImages.parts, userImages.missing);
   /**
    * 本次生成已消耗的图片张数（REQ-20261123-008 · B4）。
    *
@@ -1074,7 +1140,17 @@ async function* pureChatPath(
       : '模型不可用，本次未检索',
   };
 
-  const messages = buildUpstreamMessages(input, runtime);
+  /*
+   * ★ 本轮图片在这里也必须读（REQ-20261123-006）：本路径的触发条件是「模型不支持工具 /
+   *   上游报工具不支持 / LLM 未配置」，而**读图能力与工具能力正交**（`llm.supportsImages`
+   *   是独立开关）。此前不传 `userImageParts`，结果本路径下用户上传的图**静默不发送**，
+   *   并且 `buildUpstreamMessages` 会给本轮的 user 也缀上「[图片×N（已省略）]」占位符
+   *   （那是给历史轮用的）—— 模型以为图被省略，实际一张都没到。
+   *   代价：`ToolsUnsupportedError` 从工具路径落到这里时会多读一次图（几 MB 磁盘读），
+   *   相对「图丢了」可接受。
+   */
+  const userImages = await resolveUserImageParts(input);
+  const messages = buildUpstreamMessages(input, runtime, userImages.parts, userImages.missing);
   // 系统提示插在既有 system 块之后、历史消息之前（无 system 块时置顶）
   let sysCount = 0;
   while (sysCount < messages.length && messages[sysCount].role === 'system') sysCount += 1;

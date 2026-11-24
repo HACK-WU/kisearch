@@ -49,6 +49,15 @@ export interface LlmStatus {
   ackRequired: boolean;
   maxToolRounds: number;
   /**
+   * 是否支持读图（`llm.supportsImages`，**手填开关**，D11 不做自动探测）。
+   * 可选：分析 / 追问等既有构造点不必补（缺省 = 不支持）。
+   */
+  supportsImages?: boolean;
+  /** 单图字节上限（`llm.maxImageBytes`，缺省 4MB） */
+  maxImageBytes?: number;
+  /** 单消息张数上限（`llm.maxImagesPerMessage`，缺省 4） */
+  maxImagesPerMessage?: number;
+  /**
    * 上下文上限的**部署默认**（**字符数**，取自 `config.yaml` 的 `llm.contextChars`，缺省 1000K）。
    *
    * ⚠️ REQ-20261014-001 起：这是三级优先链的**第二级**，**不是最终生效值** ——
@@ -146,6 +155,10 @@ export function resolveLlmStatus(cfg: unknown, configPath: string): LlmStatus {
     contextChars: llm.contextChars ?? CHAT_BUDGET.defaultContextChars,
     askMaxRounds: llm.askMaxRounds ?? ASK_MAX_ROUNDS_DEFAULT,
     askSessionTtlMs: llm.askSessionTtlMs ?? ASK_SESSION_TTL_DEFAULT_MS,
+    // 图片能力（REQ-20261123-006）：前端据此决定入口可用性与张数提示
+    supportsImages: llm.supportsImages === true,
+    maxImageBytes: llm.maxImageBytes ?? CHAT_BUDGET.maxImageBytes,
+    maxImagesPerMessage: llm.maxImagesPerMessage ?? CHAT_BUDGET.maxImagesPerMessage,
   };
 }
 
@@ -165,6 +178,9 @@ export function toChatConfigOk(status: LlmStatus, configPath: string): ChatConfi
     ackRequired: status.ackRequired,
     maxToolRounds: status.maxToolRounds,
     contextChars: status.contextChars,
+    supportsImages: status.supportsImages === true,
+    maxImageBytes: status.maxImageBytes ?? CHAT_BUDGET.maxImageBytes,
+    maxImagesPerMessage: status.maxImagesPerMessage ?? CHAT_BUDGET.maxImagesPerMessage,
   };
 }
 

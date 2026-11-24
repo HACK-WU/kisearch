@@ -20,7 +20,7 @@
 import { useCallback, useMemo, useRef } from 'react';
 import { getConversation, streamEditMessage, streamMessage, streamRegenerate } from '@/api/chatApi';
 import { DEGRADED_LABELS } from '@/api/chatContract';
-import type { ChatEvent, ChatRef, ChatToolArgsDisplay, ChatToolResponse } from '@/api/chatContract';
+import type { ChatEvent, ChatImageRef, ChatRef, ChatToolArgsDisplay, ChatToolResponse } from '@/api/chatContract';
 import type { ChatStore, DegradedMark, ProgressStep } from './chatStore';
 
 export interface ChatStreamApi {
@@ -32,7 +32,7 @@ export interface ChatStreamApi {
    *
    * @param skills `/` 斜杠点名的 skill id（2026-11-12；缺省 / 空数组不写进请求体）
    */
-  send(convId: string, text: string, refs?: readonly ChatRef[], skills?: readonly string[]): Promise<boolean>;
+  send(convId: string, text: string, refs?: readonly ChatRef[], skills?: readonly string[], images?: readonly ChatImageRef[]): Promise<boolean>;
   /** 重新生成（API-11，不新增 user 消息）；返回语义同 `send` */
   regenerate(convId: string): Promise<boolean>;
   /**
@@ -40,7 +40,7 @@ export interface ChatStreamApi {
    *
    * @param skills `undefined` = 保留原消息的 `/` 点名；数组（含空）= 覆盖（空 = 用户删掉了名称）
    */
-  editAndResend(convId: string, msgId: string, text: string, skills?: readonly string[]): Promise<boolean>;
+  editAndResend(convId: string, msgId: string, text: string, skills?: readonly string[], images?: readonly ChatImageRef[]): Promise<boolean>;
   /** 中止当前生成（N6：保留已生成部分并标记「已中止」） */
   abort(): void;
   /** 是否存在活跃流 */
@@ -276,10 +276,16 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
     const tempId = () => `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
     return {
-      async send(convId: string, text: string, refs?: readonly ChatRef[], skills?: readonly string[]): Promise<boolean> {
+      async send(
+        convId: string,
+        text: string,
+        refs?: readonly ChatRef[],
+        skills?: readonly string[],
+        images?: readonly ChatImageRef[],
+      ): Promise<boolean> {
         const placeholder = tempId();
         // 乐观显示 user 消息（不落盘乐观，只做 UI 立即反馈；失败的可重试入口在错误槽）
-        // 引用一并乐观挂上：发出后立即可见"这一问带着哪些引用"（REQ-20261009-002）
+        // 引用 / 图片一并乐观挂上：发出后立即可见"这一问带着哪些引用与图"（REQ-20261009-002 / 20261123-006）
         const cur = store.getState();
         store.dispatch({
           type: 'setMessages',
@@ -288,13 +294,14 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
             {
               id: `local-user-${placeholder}`, role: 'user', content: text, at: new Date().toISOString(),
               ...(refs && refs.length > 0 ? { refs: [...refs] } : {}),
+              ...(images && images.length > 0 ? { images: [...images] } : {}),
             },
           ],
         });
         return run(
           convId,
           placeholder,
-          (signal) => streamMessage(convId, text, signal, refs, skills),
+          (signal) => streamMessage(convId, text, signal, refs, skills, images?.map((i) => i.id)),
           undefined,
           undefined,
           `local-user-${placeholder}`,
@@ -310,8 +317,18 @@ export function useChatStream(store: ChatStore): ChatStreamApi {
         return run(convId, tempId(), (signal) => streamRegenerate(convId, signal), undefined, last?.role === 'assistant' ? last.id : undefined);
       },
 
-      async editAndResend(convId: string, msgId: string, text: string, skills?: readonly string[]): Promise<boolean> {
-        return run(convId, tempId(), (signal) => streamEditMessage(convId, msgId, text, signal, skills), () => {
+      async editAndResend(
+        convId: string,
+        msgId: string,
+        text: string,
+        skills?: readonly string[],
+        images?: readonly ChatImageRef[],
+      ): Promise<boolean> {
+        return run(
+          convId,
+          tempId(),
+          (signal) => streamEditMessage(convId, msgId, text, signal, skills, images?.map((i) => i.id)),
+          () => {
           // meta is emitted only after the server commits the edit/truncation.
           const messages = store.getState().messages;
           const idx = messages.findIndex((m) => m.id === msgId && m.role === 'user');

@@ -158,7 +158,9 @@ Web 侧边栏「AI 对话」所使用的**对话模型**配置。**整段可缺�
 | `defaultSystemPrompt` | `string` | 空 | 新建会话未显式传 `systemPrompt` 时使用的默认系统提示词 |
 | `supportsTools` | `boolean` | `true` | 上游是否支持 function calling。`false` → 走「daemon 代跑一次检索 + `degraded` 明示」的降级路径（**不是**禁用检索） |
 | `kbDisclosureAck` | `boolean` | `false` | 隐私确认。`false` 时对话接口返回 `403 DISCLOSURE_REQUIRED`；由前端确认入口调用 `POST /api/chat/config/ack` 置为 `true` |
-| `supportsImages` / `maxImagesPerMessage` / `maxImageBytes` | `boolean` / 正整数 / 正整数 | — | 当前版本**只解析不使用**这三个字段（为图片能力预留）：配置不报错、也不产生任何效果 |
+| `supportsImages` | `boolean` | `false` | 上游是否能读图（**手填开关**，不做自动探测）。`false` 时对话输入区的「+ 图片」入口不可用，上传图片返回 `400 IMAGE_UNSUPPORTED` |
+| `maxImagesPerMessage` | 正整数 | `4` | 单条消息最多几张图。发送时校验，超限返回 `400 IMAGE_COUNT_EXCEEDED`（上传阶段不限制张数） |
+| `maxImageBytes` | 正整数 | `4194304` | 单张图片的字节上限（默认 4MB）。超限返回 `400 IMAGE_TOO_LARGE`；只支持 PNG / JPEG / WebP，其它格式（含 SVG）返回 `400 IMAGE_INVALID` |
 | `reasoningEfforts` | `string[]` | 不配置 | **思考级别可选档位清单**（对话配置面板下拉的来源 + 合法性白名单）。按 **OpenAI 通用协议**原样透传（请求体顶层 `reasoning_effort`），**不做任何厂商适配**、本地不校验具体取值；仅约束形状：元素 1–64 字符非空、≤20 个、不重复、不得为保留字 `__follow_default__`。**不配置 ⇒ 面板该项不可调、且不下发该参数** |
 | `reasoningEffort` | `string` | 不配置 | 思考级别的**部署默认档**，必须 ∈ `reasoningEfforts`（否则配置加载阶段即报错，会阻断全部 `ki` 命令）。与对话配置层的用户覆盖值构成三级链：**覆盖值 → 本值 → 不下发** |
 | `contextChars` | 正整数 | `1000000` | 上下文窗口刻度（字符数，默认 1000K）：只作占比分母与 80% / 90% 预警基准，不参与截断或拒绝。对话配置层可覆盖 |

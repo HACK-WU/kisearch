@@ -17,12 +17,13 @@
  * @see design/S02_会话存储与写入一致性_DESIGN.md §3.3 / §9
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readJson, writeJson } from '../store.js';
 import { loadConfig, resolveDefaultChatDir } from '../config.js';
 import { validateScope } from '../scope.js';
-import type { ConversationFile, ChatMessage, ConversationSummary, PromptInjectionSnapshot } from './chat-contract.js';
+import type { ConversationFile, ChatMessage, ChatImageRef, ConversationSummary, PromptInjectionSnapshot } from './chat-contract.js';
 
 /** 会话不存在（映射 404 `CONVERSATION_NOT_FOUND`） */
 export class ConversationNotFoundError extends Error {
@@ -121,6 +122,147 @@ function convPath(scope: string, id: string): string {
 /** 本地图片附件目录（`{chatDir}/{scope}/assets/`） */
 function assetsDirFor(scope: string): string {
   return path.join(chatDirFor(scope), 'assets');
+}
+
+// ─── 会话图片（REQ-20261123-006）──────────────────────────
+
+/**
+ * 图片 id 的合法形态：与 `convId` 拼成文件名，必须是单段（无 `/`、无 `.`）。
+ *
+ * 长度 8~40 是为了排除空串与超长垃圾；`randomUUID()`（36 字符）正好落在区间内。
+ * 校验发生在**拼路径之前** —— 否则 `id = '../../kb/x'` 就能越出 assets 目录。
+ */
+const IMAGE_ID_RE = /^[A-Za-z0-9-]{8,40}$/;
+
+/** 白名单 mime → 落盘后缀。只允许这三种：其余格式上游直接 400（已实测 SVG） */
+const IMAGE_MIME_EXT: Readonly<Record<string, string>> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+};
+
+/** 后缀 → mime（读回时用；与上方表互为逆映射） */
+const IMAGE_EXT_MIME: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  webp: 'image/webp',
+};
+
+/** 图片元数据 / 字节不合法（映射 400 `IMAGE_INVALID`） */
+export class ConversationImageInvalidError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConversationImageInvalidError';
+  }
+}
+
+/**
+ * 落盘一张用户上传的图片，返回元数据（**不含 base64**）。
+ *
+ * · 文件名 `{convId}__{id}.{ext}`：`convId` 前缀是删除会话时级联清理的唯一依据（N15）
+ * · 不碰会话 JSON —— 图片与会话是两个对象，落盘失败不影响会话本身
+ * · 同会话并发上传不同图片互不干扰（文件名唯一，无共享可写状态）
+ */
+export async function saveConversationImage(
+  scope: string,
+  convId: string,
+  data: Buffer,
+  mime: string,
+): Promise<ChatImageRef> {
+  validateScope(scope);
+  assertValidId(convId);
+  const ext = IMAGE_MIME_EXT[mime];
+  if (!ext) throw new ConversationImageInvalidError(`不支持的图片格式：${mime}`);
+
+  const id = crypto.randomUUID();
+  if (!IMAGE_ID_RE.test(id)) throw new ConversationImageInvalidError('生成的图片 id 不合法');
+
+  const dir = assetsDirFor(scope);
+  const file = path.join(dir, `${convId}__${id}.${ext}`);
+  try {
+    await fs.promises.mkdir(dir, { recursive: true });
+    await fs.promises.writeFile(file, data);
+  } catch (err) {
+    throw new ChatWriteFailedError(err);
+  }
+  return { id, mime, bytes: data.byteLength };
+}
+
+/**
+ * 读回一张图片的字节。不存在返回 `null`（**不抛**）——
+ * 调用方要能区分"图被清理了"（可提示重传）与"读盘故障"（500）。
+ */
+export async function readConversationImage(
+  scope: string,
+  convId: string,
+  imageId: string,
+): Promise<{ buffer: Buffer; mime: string } | null> {
+  validateScope(scope);
+  assertValidId(convId);
+  if (!IMAGE_ID_RE.test(imageId)) return null;
+
+  const dir = assetsDirFor(scope);
+  for (const [ext, mime] of Object.entries(IMAGE_EXT_MIME)) {
+    const file = path.join(dir, `${convId}__${imageId}.${ext}`);
+    try {
+      const buffer = await fs.promises.readFile(file);
+      return { buffer, mime };
+    } catch {
+      // 换下一个后缀试（后缀由服务端决定，正常只会命中一个）
+    }
+  }
+  return null;
+}
+
+/**
+ * 只取图片的元数据（**不读字节**）。
+ *
+ * 发送前校验"这个 imgId 真实存在"用它 —— 用 `readConversationImage` 会把 4MB 图整个读进内存，
+ * 只为拿一个 `bytes` 不值得。
+ */
+export async function statConversationImage(
+  scope: string,
+  convId: string,
+  imageId: string,
+): Promise<{ mime: string; bytes: number } | null> {
+  validateScope(scope);
+  assertValidId(convId);
+  if (!IMAGE_ID_RE.test(imageId)) return null;
+  const dir = assetsDirFor(scope);
+  for (const [ext, mime] of Object.entries(IMAGE_EXT_MIME)) {
+    try {
+      const st = await fs.promises.stat(path.join(dir, `${convId}__${imageId}.${ext}`));
+      if (st.isFile()) return { mime, bytes: st.size };
+    } catch {
+      // 换下一个后缀
+    }
+  }
+  return null;
+}
+
+/**
+ * 删除一张图片（用户主动移除待发图 / 清理失败回滚）。
+ * 返回是否真的删掉了 —— 不存在不报错（幂等）。
+ */
+export async function deleteConversationImage(
+  scope: string,
+  convId: string,
+  imageId: string,
+): Promise<boolean> {
+  validateScope(scope);
+  assertValidId(convId);
+  if (!IMAGE_ID_RE.test(imageId)) return false;
+  const dir = assetsDirFor(scope);
+  let removed = false;
+  for (const ext of Object.keys(IMAGE_EXT_MIME)) {
+    try {
+      await fs.promises.unlink(path.join(dir, `${convId}__${imageId}.${ext}`));
+      removed = true;
+    } catch {
+      // 不存在即跳过
+    }
+  }
+  return removed;
 }
 
 /** `c-*.json` 会话文件名判定（磁盘上其他文件一律忽略，S02 §5） */
@@ -597,6 +739,13 @@ export async function truncateAfterAndEdit(
    *   必须真的清掉，否则会出现"文本里看不到却仍在生效"。
    */
   skills?: string[],
+  /**
+   * 本轮图片（REQ-20261123-006，可选）。
+   *
+   * · 传 `undefined` ⇒ **保留**原消息上的 `images`（Q-A 拍板：编辑重发复用原图，不要求重传）；
+   * · 传数组（含空数组）⇒ **覆盖**：空数组表示用户把待发图删光了，必须真的清掉。
+   */
+  images?: ChatImageRef[],
 ): Promise<{ conv: ConversationFile; discardedCount: number }> {
   validateScope(scope);
   return withConvLock(id, () => {
@@ -615,11 +764,17 @@ export async function truncateAfterAndEdit(
     conv.messages = conv.messages.slice(0, idx + 1);
     // 用编辑后文本替换该条 content（S07 §3.9 / api/retrieval.md §3 语义）
     const { skills: _prevSkills, ...rest } = target;
-    conv.messages[idx] = skills === undefined
-      ? { ...target, content: newText }
+    const base: ChatMessage = skills === undefined
+      ? target
       : skills.length > 0
-        ? { ...rest, content: newText, skills }
-        : { ...rest, content: newText };
+        ? { ...rest, skills }
+        : rest;
+    const next: ChatMessage = { ...base, content: newText };
+    if (images !== undefined) {
+      if (images.length > 0) next.images = images;
+      else delete next.images;
+    }
+    conv.messages[idx] = next;
 
     conv.seq += 1;
     conv.messageCount = conv.messages.length;

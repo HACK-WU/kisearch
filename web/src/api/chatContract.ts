@@ -113,6 +113,20 @@ export interface ChatProgressStep {
   alreadyLoaded?: boolean;
 }
 
+/**
+ * 用户上传图片的元数据（REQ-20261123-006；与后端 `ChatImageRef` 同形状）。
+ *
+ * ★ 只有元数据，**没有 base64**：字节由
+ *   `GET /api/chat/conversations/:id/images/:imgId` 单独取，前端用 URL 直接做缩略图。
+ */
+export interface ChatImageRef {
+  /** 文件名唯一段（后端生成） */
+  id: string;
+  /** `image/png` / `image/jpeg` / `image/webp` */
+  mime: string;
+  bytes: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -128,6 +142,13 @@ export interface ChatMessage {
   progress?: ChatProgressStep[];
   /** 用户本轮提问手动引用的文档片段（仅 user 消息；与 assistant 的 `sources` 语义不同） */
   refs?: ChatRef[];
+  /**
+   * 用户本轮上传的图片（仅 user 消息，REQ-20261123-006）。
+   *
+   * 渲染：用 `/api/chat/conversations/{id}/images/{image.id}` 取字节；
+   * 历史轮的图不进上游（后端降级为占位），但**页面仍显示缩略图**（用户视角它是存在过的）。
+   */
+  images?: ChatImageRef[];
   /**
    * 用户本轮用 `/` 斜杠**点名**的 skill id（2026-11-12，仅 user 消息）。
    *
@@ -383,6 +404,13 @@ export interface ChatConfigOk {
   configPath: string;
   requestTimeoutMs: number | null;
   reason: string | null;
+  // ── 图片能力（REQ-20261123-006）──
+  /** 是否支持读图（`llm.supportsImages`）；缺省（旧 daemon）= 不支持 */
+  supportsImages?: boolean;
+  /** 单图字节上限（生效值，字节） */
+  maxImageBytes?: number;
+  /** 单消息张数上限（生效值） */
+  maxImagesPerMessage?: number;
   code: string | null;
   supportsTools: boolean;
   /** = `!ackRequired`；与 supportsTools 正交（见 api/config.md 对照表） */

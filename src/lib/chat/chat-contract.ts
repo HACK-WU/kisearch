@@ -193,6 +193,25 @@ export interface ChatProgressStep {
 }
 
 /**
+ * 用户上传图片的**元数据**（REQ-20261123-006）。
+ *
+ * ★ 只存元数据，**绝不存 base64**：
+ *   · 字节落在 `{chatDir}/{scope}/assets/{convId}__{id}.{ext}`（`chat-store.ts`）；
+ *   · 一张 4MB 图的 base64 约 5.3MB，写进会话 JSON 会让每次读会话都要解析 5MB 文本，
+ *     并且 `listConversations` 之类本不需要图的路径也会被拖慢。
+ *
+ * ★ `id` 是**文件名唯一段**（只允许 `[A-Za-z0-9-]`），绝对路径由 `convId` + `id` 推出 ——
+ *   存完整路径会把 `chatDir` 的部署位置写死进数据，换目录就全失效。
+ */
+export interface ChatImageRef {
+  /** 文件名唯一段（`[A-Za-z0-9-]{8,40}`），与 `convId` 拼成磁盘文件名 */
+  id: string;
+  /** 白名单内：`image/png` / `image/jpeg` / `image/webp` */
+  mime: string;
+  bytes: number;
+}
+
+/**
  * 会话消息。
  *
  * ⚠️ 两条结构性不变量（不得违反）：
@@ -218,6 +237,17 @@ export interface ChatMessage {
    * 仅 user 消息写入；assistant 的检索来源仍在 `sources` —— 两者语义不同，不得互相替代。
    */
   refs?: ChatRef[];
+  /**
+   * 用户在本轮提问里**上传的图片**（REQ-20261123-006）。仅 user 消息写入。
+   *
+   * ⚠️ 与 `refs` 语义不同：`refs` 是"引用知识库里的文本片段"，`images` 是"用户给的像素"。
+   *   两者都是本轮输入的一部分，但预算口径不同 —— 图片**不进字符预算**（Q-D），
+   *   只按张数（单消息 ≤4）与字节（单图 ≤4MB）约束。
+   *
+   * ⚠️ 历史轮次**不重发**图片：上游无状态，每轮都会重传，成本按轮数放大。
+   *   `buildUpstreamMessages` 把非本轮的 `images` 降级为 `[图片×N（已省略）]` 文本。
+   */
+  images?: ChatImageRef[];
   /**
    * 用户在本轮提问里用 `/` 斜杠**点名**的 skill id（2026-11-12）。
    *
@@ -454,6 +484,13 @@ export interface ChatConfigOk {
   configPath: string;
   requestTimeoutMs: number | null;
   reason: string | null;
+  // ── 图片能力（REQ-20261123-006）──
+  /** 是否支持读图（`llm.supportsImages`）：前端据此禁用「+ 图片」入口 */
+  supportsImages?: boolean;
+  /** 单图字节上限的**生效值**（`llm.maxImageBytes` ?? 4MB） */
+  maxImageBytes?: number;
+  /** 单消息张数上限的**生效值**（`llm.maxImagesPerMessage` ?? 4） */
+  maxImagesPerMessage?: number;
   code: string | null;
   // ── v2（D13）──────────────────────────────
   /** 决定走【工具路径】还是【预检索降级路径】；**不决定能否检索** */
@@ -513,6 +550,15 @@ export const CHAT_BUDGET = {
    * 跨用户轮次清零：历史轮次的图不会重建（`conv.messages` 只落字符串），天然满足。
    */
   maxImagesPerRun: 6,
+  /**
+   * 用户上传图片的**兜底默认**（REQ-20261123-006）：`config.yaml` 的
+   * `llm.maxImageBytes` / `llm.maxImagesPerMessage` 缺省时用它。
+   *
+   * 两处共用（上传校验 `imagePolicy` 与 API-01 的 `maxImagesPerMessage` 回显），
+   * 避免"后端按 4 校验、前端按别的数字提示"的两套口径。
+   */
+  maxImageBytes: 4 * 1024 * 1024,
+  maxImagesPerMessage: 4,
   /** 工具返回上限的配置边界（服务端强校验）：低于下限几乎必然截断，高于上限无实际意义 */
   toolResponseCharsMin: 1000,
   toolResponseCharsMax: 100_000,
@@ -572,6 +618,15 @@ export const CHAT_ERROR_CODES = {
   // 4xxx 检索与隐私
   DISCLOSURE_REQUIRED: 'DISCLOSURE_REQUIRED',
   KB_IMAGE_MISSING: 'KB_IMAGE_MISSING',
+  // 5xxx 图片上传（REQ-20261123-006）——客户端据 code 分支显示可读文案
+  /** 内容不是合法位图（魔数不符 / 后缀伪装 / 空文件） */
+  IMAGE_INVALID: 'IMAGE_INVALID',
+  /** 超过单图字节上限（`llm.maxImageBytes`，默认 4MB） */
+  IMAGE_TOO_LARGE: 'IMAGE_TOO_LARGE',
+  /** 超过单消息张数上限（`llm.maxImagesPerMessage`，默认 4） */
+  IMAGE_COUNT_EXCEEDED: 'IMAGE_COUNT_EXCEEDED',
+  /** 当前模型不支持读图（`llm.supportsImages !== true`） */
+  IMAGE_UNSUPPORTED: 'IMAGE_UNSUPPORTED',
 } as const;
 
 export type ChatErrorCode = (typeof CHAT_ERROR_CODES)[keyof typeof CHAT_ERROR_CODES];
