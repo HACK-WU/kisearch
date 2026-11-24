@@ -2125,8 +2125,25 @@
 }
 .gov-ask__clear:disabled { opacity: .45; }
 .gov-ask__clear svg { width: 12px; height: 12px; flex: none; }
-.gov-ask__input { display: flex; gap: 6px; }
+/* 输入行（2026-11-24 多行化）：按钮必须**贴底**对齐。
+   默认的 `stretch` 会把按钮拉成与输入框等高（输入框长高后按钮被撑成一根竖条），
+   而垂直居中会让它悬在中间 —— 用户明确要求「在最底下」，故 flex-end。 */
+.gov-ask__input { display: flex; gap: 6px; align-items: flex-end; }
 .gov-ask__input .gov-input { flex: 1; }
+/* 追问输入框：单行 input → 多行 textarea，复用 .gov-input 的边框/底色/字号，
+   只覆盖多行需要的排版。⚠️ 高度由 JS 按 scrollHeight 写 inline 样式，
+   这里的 min/max 只作钳制：单行 30px（与按钮同高）、最多 6 行
+   （13px × 1.6 ≈ 21px/行 + 上下 padding 8px），超出转内部滚动。 */
+.gov-ask__ta {
+  height: auto;
+  min-height: 30px;
+  max-height: 134px;
+  padding: 4px 10px;
+  line-height: 1.6;
+  resize: none;
+  overflow-y: auto;
+  font-family: inherit;
+}
 
 /* 已确认的候选：勾选框禁用 + 标「已确认」。
    注意不能 display:none —— .gov-cand 首列是固定 18px，抽掉 checkbox 会把内容挤进那一列 */

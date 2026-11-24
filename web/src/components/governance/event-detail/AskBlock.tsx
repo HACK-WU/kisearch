@@ -119,6 +119,21 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
    */
   const stoppedRef = useRef(false);
   const listRef = useRef<HTMLDivElement>(null);
+  /**
+   * 多行输入框（2026-11-24）：单行 `<input>` 撑不住多行草稿，换成 textarea 后
+   * 高度要自己跟内容走 —— 否则多行时会出内部滚动条，最新一行被顶出可视区。
+   *
+   * 口径与 AI 对话页（`ChatPanel.tsx` 的 `syncComposerHeight`）一致：
+   * **先归零再取 `scrollHeight`**，这样删行后高度收得回去；上下限写进 CSS
+   * （`.gov-ask__ta` 的 min/max-height），这里不硬编码。
+   */
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const syncTaHeight = useCallback((): void => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = 'auto';
+    ta.style.height = `${ta.scrollHeight}px`;
+  }, []);
 
   /**
    * 读记录请求的序号（与流式的 `seqRef` 分开：那个管「哪一轮追问」，这个管「哪一次读记录」）。
@@ -188,6 +203,12 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
     if (!el) return;
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 24) el.scrollTop = el.scrollHeight;
   }, [turns.length, pending?.answer]);
+
+  /**
+   * 输入内容变化（含发送后清空、切换到别的事件）都重算高度：
+   * 删行要收回去，清空要回到单行 —— 否则发完之后输入框还挂着三行高。
+   */
+  useEffect(() => { syncTaHeight(); }, [question, syncTaHeight]);
 
   const send = async (): Promise<void> => {
     const text = question.trim();
@@ -477,21 +498,31 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       ) : null}
 
       <div className="gov-ask__input">
-        <input
-          className="gov-input"
-          type="text"
+        {/*
+          多行输入（2026-11-24 用户要求）：原先 `<input type="text">` 根本装不下多行，
+          Shift+Enter 无处可去。换成 textarea 后按 AI 对话页同款口径：
+          · Enter 发送 / **Shift+Enter 换行**（放行浏览器默认行为，不 preventDefault）；
+          · 中文输入法组合态一律放行（Enter 用来上屏候选，不能当发送）；
+          · 高度由 `syncTaHeight` 跟内容走，上下限在 CSS 里。
+        */}
+        <textarea
+          className="gov-input gov-ask__ta"
+          ref={taRef}
+          rows={1}
           value={question}
           maxLength={4000}
           placeholder={remote
             ? '上一轮仍在回答，可点停止中断'
             : asking
               ? '正在回答，可点停止中断'
-              : canAsk ? '就这次分析追问一句，回车发送' : '当前账号无提问权限'}
+              : canAsk ? '就这次分析追问一句，Enter 发送，Shift+Enter 换行' : '当前账号无提问权限'}
           disabled={!canAsk || asking || Boolean(remote)}
           title={askTitle}
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => {
             if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+            // Shift+Enter = 换行：交给浏览器默认行为，绝不在这里发送
+            if (e.shiftKey) return;
             e.preventDefault();
             void send();
           }}
