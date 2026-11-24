@@ -27,6 +27,13 @@ export interface EventAnalysisCardProps {
   readOnlyHint?: string;
   /** 递增触发一次分析（由概要卡「AI 分析」按钮驱动） */
   startSignal: number;
+  /**
+   * 递增 = 父级刚重新取过详情（事件列表的刷新按钮，2026-11-24）。
+   *
+   * 追问记录是 `AskBlock` 挂载时自己读一次的，父级换掉 `analysis` 传不到它手上，
+   * 只能靠这个信号通知它重读。`AiAnalyzePanel` 不用它 —— 那个跟 `analysis` 的引用变化走。
+   */
+  reloadSignal?: number;
   onUpdated: (next: EventAnalysis) => void;
   onOpenSettings: () => void;
   onRemoveLocation: (loc: ConfirmedCodeLocation) => void;
@@ -113,7 +120,7 @@ function chipOf(analysis: EventAnalysis | null): { tone: ChipTone; text: string;
 export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | null {
   const {
     scope, event, analysis, canWrite, canAsk, busy, readOnlyHint, startSignal,
-    onUpdated, onOpenSettings, onRemoveLocation, onReset, onDirtyChange,
+    reloadSignal = 0, onUpdated, onOpenSettings, onRemoveLocation, onReset, onDirtyChange,
   } = props;
   const draft = analysis?.draft ?? null;
   const confirmed = analysis?.confirmed ?? [];
@@ -431,6 +438,7 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
                 eventId={event.id}
                 canAsk={canAsk}
                 canWrite={canWrite}
+                reloadSignal={reloadSignal}
                 activeRunId={draft.runId}
                 /* 补丁覆盖成功后刷新卡面；`resumeAvailable` 从原 analysis 带过来（见 onSaved 的注释） */
                 onAnalysisUpdated={(next) => onUpdated({

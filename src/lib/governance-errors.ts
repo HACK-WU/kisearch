@@ -193,6 +193,13 @@ export const GOVERNANCE_CODE_NUMBERS = {
   ANALYSIS_CANDIDATE_ALL_DROPPED: 1625,
   /** 覆盖已有 AI 结论必须显式 `overwrite: true`（防外部上传静默吃掉站内跑批结果） */
   ANALYSIS_DRAFT_EXISTS: 1626,
+  /**
+   * 追问被用户主动停止（2026-11-24，与 `FIND_CANCELED` 同口径）。
+   *
+   * 「不是错误，但要能被前端按 code 区分文案」：实际文案由前端给（灰字提示），
+   * 这里只保证它不被当成 `ANALYSIS_ASK_TIMEOUT` 显示成"回答超时，请重试"。
+   */
+  ANALYSIS_ASK_CANCELED: 1627,
 
   // ── 治理读路径视图聚合（REQ-20261120-001，1700-1799）──
   // ⚠ 不得塞进 1500-1599：契约测试断言「15xx 只放传输层错误」，
@@ -272,6 +279,11 @@ const HTTP_STATUS: Partial<Record<GovernanceErrorCode, number>> = {
   ANALYSIS_ASK_RATE_LIMITED: 429,
   ANALYSIS_ASK_BUSY: 429,
   ANALYSIS_ASK_TIMEOUT: 504,
+  /**
+   * 499 而非 504：主动停止不是服务端超时。前端在 SSE 分支只读 `code`，
+   * 但普通 POST 回退路径（非流式）会看 HTTP 状态 —— 504 会让人以为上游挂了。
+   */
+  ANALYSIS_ASK_CANCELED: 499,
   ANALYSIS_FOLLOWUP_RATE_LIMITED: 429,
   ANALYSIS_FOLLOWUP_BUSY: 429,
   ANALYSIS_LLM_UNAVAILABLE: 503,

@@ -88,6 +88,7 @@ import {
 } from './events/analysis-ask-store.js';
 import {
   askEventAnalysis,
+  cancelEventAsk,
   listActiveAskIds,
   listFinishedAsks,
   type AskTargetEvent,
@@ -1188,6 +1189,25 @@ export async function handleGovernanceRoutes(
             res.end();
           }
           return true;
+        }
+        /*
+         * 手动停止追问（2026-11-24）：`POST /analysis/ask/cancel`
+         *
+         * 与分析停止同款语义：只发 abort + 置标记，**终态由 runner 收口**
+         * （有内容 → 落库成正式记录；无内容 → `ANALYSIS_ASK_CANCELED`）。
+         * 幂等：没在跑返回 200 + `canceled:false`，按钮点两次不该报错。
+         */
+        if (segs[3] === 'ask' && segs[4] === 'cancel' && method === 'POST' && !segs[5]) {
+          const b = await body();
+          const scope = scopeFromBody(b);
+          const event = findEventIn(readAllEvents(scope), id);
+          if (!event) return sendJson(res, 404, { ok: false, code: 'EVENT_NOT_FOUND', error: `事件 ${id} 不存在` });
+          return sendJson(res, 200, {
+            ok: true,
+            scope,
+            eventId: event.id,
+            canceled: cancelEventAsk(scope, event.id),
+          });
         }
         if (segs[3] === 'ask' && !segs[4]) {
           if (method === 'GET') {

@@ -64,6 +64,18 @@ function formatError(err: unknown): { code?: string; message: string } {
   return { message: (err as Error).message || '请求失败' };
 }
 
+/**
+ * 候选的默认勾选集（置信度达标的那些）。
+ *
+ * 挂载、跨轮同步、换候选三处共用一份口径：`picked` 是用户可手改的勾选集合，
+ * 只有**候选集本身变了**才该回到默认值，否则会把用户刚点掉的候选又勾回来。
+ */
+function defaultPickedOf(draft: AnalysisDraft | null): Set<string> {
+  return new Set(
+    (draft?.candidates ?? []).filter((c) => shouldDefaultCheckCandidate(c.confidence)).map((c) => c.id),
+  );
+}
+
 export interface AiAnalyzePanelProps {
   scope: string;
   event: EventView;
@@ -97,11 +109,7 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
   const [procOpen, setProcOpen] = useState(!initialCommitted);
   const [openStep, setOpenStep] = useState<number | null>(null);
   const [openCands, setOpenCands] = useState<string[]>([]);
-  const [picked, setPicked] = useState<Set<string>>(() => new Set(
-    (analysis?.draft?.candidates ?? [])
-      .filter((c) => shouldDefaultCheckCandidate(c.confidence))
-      .map((c) => c.id),
-  ));
+  const [picked, setPicked] = useState<Set<string>>(() => defaultPickedOf(analysis?.draft ?? null));
   /** G-12：后端报已有草稿冲突时，先就地确认再带 forceOverwrite 重发 */
   const [overwritePrompt, setOverwritePrompt] = useState(false);
 
@@ -113,12 +121,42 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
     setDraft(next.draft);
     setConfirmed(next.confirmed);
     onUpdatedRef.current(next);
-    if (resetPicked && next.draft) {
-      setPicked(new Set(
-        (next.draft.candidates ?? []).filter((c) => shouldDefaultCheckCandidate(c.confidence)).map((c) => c.id),
-      ));
-    }
+    if (resetPicked && next.draft) setPicked(defaultPickedOf(next.draft));
   }, []);
+
+  /**
+   * 父级换了 `analysis` 就以它为准（2026-11-24 用户要求：列表刷新按钮要连详情一起刷）。
+   *
+   * 本地 `draft` / `confirmed` 是挂载时从 props 拷的副本，之后只由自己的 1.5s 轮询与操作推进；
+   * 不跟 props 就会出现「卡头 chip 已是「失败」，过程区还写着「外部上传 · 无分析过程」」。
+   * 用**引用比对**而不是信号递增：刷新按钮与 8s 详情轮询都会换掉这个对象，两者都该生效；
+   * 而信号递增是一次性的，父级异步取回新详情时信号早已消费掉，正好漏掉最该刷的那次。
+   *
+   * 刻意不走 `syncFromAnalysis`：它会回调 `onUpdated` 把值写回父级，而这里传进来的
+   * 正是父级刚给的值，回写只是多一次无意义的 state 更新。
+   */
+  const lastPropAnalysisRef = useRef(analysis);
+  useEffect(() => {
+    if (lastPropAnalysisRef.current === analysis) return;
+    lastPropAnalysisRef.current = analysis;
+    const incoming = analysis?.draft ?? null;
+    /*
+     * 同一轮还在跑：本地比 props 新（1.5s 轮询在推进），拿父级的旧快照倒回去
+     * 会让进度往回退。换了一轮（runId 不同）或已结束时照常采纳 —— 那才是「看到新结果」。
+     */
+    if (incoming?.status === 'running' && incoming.runId === draft?.runId) return;
+    /*
+     * 只认「候选集（id + 顺序）变了」才重置勾选：`picked` 是用户手点出来的，
+     * 而换掉 `analysis` 对象的路径不止刷新 —— 采纳追问补丁、另一标签页确认位置
+     * 都会走这里。无条件重置会把用户刚点掉的高置信度候选又勾回去，
+     * 接着点「确认」提交的就是他没选的那批位置（静默写错数据）。
+     */
+    const idsOf = (d: AnalysisDraft | null): string => (d?.candidates ?? []).map((c) => c.id).join('\u0000');
+    const candidatesChanged = idsOf(draft) !== idsOf(incoming);
+    setDraft(incoming);
+    setConfirmed(analysis?.confirmed ?? []);
+    if (candidatesChanged) setPicked(defaultPickedOf(incoming));
+  }, [analysis, draft]);
 
   /** 在途守卫：连点「AI 分析」或 effect 与按钮同时触发时，只发一次 start */
   const startingRef = useRef(false);

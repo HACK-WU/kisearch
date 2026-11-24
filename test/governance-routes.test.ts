@@ -81,6 +81,9 @@ const ROUTES: Array<[string, string, 'knowledge.read' | 'knowledge.write']> = [
   // 整份重置分析（2026-11-23）：与上面 /analysis/draft 并列，清草稿 + 已确认位置
   ['DELETE', '/governance/events/evt_1/analysis', 'knowledge.write'],
   ['POST', '/governance/events/evt_1/analysis/cancel', 'knowledge.write'],
+  // 停止追问（2026-11-24）：与**发起**同权限（knowledge.ask）—— 能发起就能收回，
+  // 否则 viewer 问出的那轮只能等超时。漏登记即 404（本表是白名单式匹配）。
+  ['POST', '/governance/events/evt_1/analysis/ask/cancel', 'knowledge.ask'],
   ['DELETE', '/governance/events/evt_1/analysis/confirmed/loc_1', 'knowledge.write'],
   ['GET', '/governance/docs', 'knowledge.read'],
   ['GET', '/governance/docs/search', 'knowledge.read'],
@@ -116,8 +119,8 @@ describe('① 路由权限登记（漏一条就是 404）', () => {
     assert.deepEqual(problems, [], `以下路由登记有误：\n${problems.join('\n')}`);
   });
 
-  it('表里正好 45 条（新增/删除路由必须同步这张表）', () => {
-    assert.equal(ROUTES.length, 45);
+  it('表里正好 46 条（新增/删除路由必须同步这张表）', () => {
+    assert.equal(ROUTES.length, 46);
   });
 
   it('未登记的治理子路径仍被判 unknown（防"多登记"造成越权面扩大）', () => {

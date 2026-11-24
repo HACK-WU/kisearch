@@ -88,7 +88,12 @@ describe('④ 渲染与门禁', () => {
 
   it('运行态期间不能再次发送（避免并出两条追问）', () => {
     assert.match(block, /if \(!text \|\| asking \|\| !canAsk \|\| remote\) return;/);
-    assert.match(block, /disabled=\{!canAsk \|\| asking \|\| Boolean\(remote\) \|\| !question\.trim\(\)\}/);
+    /*
+     * 2026-11-24 起运行中不再禁用发送键，而是**整颗换成停止键**（见 ask-cancel.test.mjs）：
+     * 约束不变（运行态没有发送入口），断言跟着实现走。
+     */
+    assert.match(block, /\{asking \|\| remote \? \(/);
+    assert.match(block, /disabled=\{!canAsk \|\| !question\.trim\(\)\}/);
   });
 
   it('运行态期间不能清空记录', () => {

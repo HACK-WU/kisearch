@@ -9,6 +9,14 @@
  *   · **取消硬预算**：兜底只留单轮请求超时（300s）+ 首字节超时（30s）；
  *   · 限流独立（6 次/60s·scope、并发 2），不再与 `ki_ask` 共享（见 ask-limiter followupLimiter）。
  *
+ * ═══ 取消（2026-11-24）═══
+ * 能终止一轮追问的有两条，都走同一个 `AbortController`：
+ *   · 用户点「停止」→ `cancelEventAsk`（路由 `POST /analysis/ask/cancel`）；
+ *   · 单轮请求超时 / 首字节超时（由 `streamChat` 自己 abort）。
+ * 两者收口不同：**有正文都落库**（同分析 partial 语义），无正文时按 `canceledByUser`
+ * 分别抛 `ANALYSIS_ASK_CANCELED`（主动停）与 `ANALYSIS_ASK_TIMEOUT`（超时）——
+ * 用同一个码会让「我自己停的」显示成「回答超时，请重试」。
+ *
  * 闸门顺序：事件存在 → 草稿存在 → 归一后是否 running → 问题长度 → 模型可用/已确认外发
  * → 追问限流/并发 → 组装上下文 → 工具循环 → 落库。
  */
@@ -93,8 +101,24 @@ const followupLimiter = createAskLimiter({ rateMax: 6, concurrentMax: 2 });
  * 前端在列表行上打「追问中」浮标。之所以不扫磁盘的 `.ask.running.json`：
  * 那是给「切页回来接续」用的单事件快照，扫全库要 readdir + 逐文件读，
  * 而这里只需要一个 id 列表，内存即可、且与分析的标记同生命周期（重启即清）。
+ *
+ * 2026-11-24 起同时承载「停止」所需的 `controller` 与 `canceledByUser` 标记
+ * —— 与分析侧 `activeRuns` 完全同构（见 `cancelEventAnalysis`）。在此之前
+ * `controller` 只活在 `askEventAnalysis` 的局部作用域里，外部拿不到、停不下来。
  */
-const activeAsks = new Map<string, { startedAt: number }>();
+interface ActiveAsk {
+  startedAt: number;
+  controller: AbortController;
+  /**
+   * 用户点了「停止」。
+   *
+   * 与分析的差别：追问没有总时长预算，abort 的来源也只有这一个，
+   * 所以它唯一的作用是**区分收口文案**（超时 vs 主动停止）与**不记「失败」徽标**。
+   */
+  canceledByUser?: boolean;
+}
+
+const activeAsks = new Map<string, ActiveAsk>();
 
 /** 最近结束的追问（列表行「追问完成 / 追问失败」；上限裁剪，重启即清） */
 export interface FinishedAsk {
@@ -120,6 +144,30 @@ export function listActiveAskIds(scope: string): string[] {
     if (key.startsWith(prefix)) ids.push(key.slice(prefix.length));
   }
   return ids;
+}
+
+/**
+ * 手动停止追问（2026-11-24）。
+ *
+ * 与 `cancelEventAnalysis` 同构：只置标记 + `abort()`，**不在这里写盘** ——
+ * 终态（有内容落库 / 无内容抛 `ANALYSIS_ASK_CANCELED`）由 runner 的收口分支决定，
+ * 避免与 finally 的清理、运行态删除打架。
+ *
+ * 幂等：没在跑就返回 false（按钮可能被点两次、或刚好在收口，不该报错）。
+ * 返回 true 只代表「abort 已发出」，SSE 端真正结束还要等当前这一轮让出
+ * （工具执行段若拿不到可中断的实现，最坏要等这一轮工具返回）。
+ *
+ * ⚠ 并发边界：`activeAsks` 每个 `(scope, event)` 只有一条记录，同事件并出两轮时
+ * 后注册的覆盖前一条 —— 那时本函数只能停掉**后注册**的那一轮，另一轮自己跑完。
+ * 并发上限来自限流（`concurrencyMax: 2`）；前端已用 `asking || remote` 挡住同页重发，
+ * 跨标签页仍可能踩到。要根治得把 `activeAsks` 的值改成按轮 id 的集合（另案）。
+ */
+export function cancelEventAsk(scope: string, eventId: string): boolean {
+  const run = activeAsks.get(askKey(scope, eventId));
+  if (!run) return false;
+  run.canceledByUser = true;
+  run.controller.abort();
+  return true;
 }
 
 /** 该 scope 下最近结束的追问（供列表「追问完成 / 追问失败」徽标） */
@@ -411,10 +459,16 @@ export async function askEventAnalysis(
   const thisAskKey = askKey(scope, event.id);
   /** 本轮落库的 turn id（null = 没成功，finally 据此记「追问失败」） */
   let askTurnId: string | null = null;
+  /*
+   * abort 控制器（2026-11-24）：必须在注册 `activeAsks` **之前**创建，
+   * 否则「刚开跑就点停止」时 Map 里还没有它，`cancelEventAsk` 会返回 false。
+   * 它同时是上游流式与 fs 工具沙箱的中断信号（下游共用同一个 signal）。
+   */
+  const controller = new AbortController();
   try {
     running = startAskRunning(scope, event.id, { question, runId: draftRunId });
     // 列表标记：这一轮开始 → 显示「追问中」，上一轮的「完成」徽标作废
-    activeAsks.set(thisAskKey, { startedAt: now });
+    activeAsks.set(thisAskKey, { startedAt: now, controller });
     forgetFinishedAsk(thisAskKey);
     const history = readAskDoc(scope, event.id).turns;
     const attachedDocs = {
@@ -432,7 +486,6 @@ export async function askEventAnalysis(
       analysisCfg = defaultPromptConfig().analysis!;
     }
 
-    const controller = new AbortController();
     const { entries, targetDir } = buildAskToolEntries(scope, cfg, analysisCfg, deps, controller);
     const toolDefs: ToolDef[] = entries.map((e) => e.def);
     const entryMap = new Map(entries.map((e) => [e.name, e] as const));
@@ -519,6 +572,13 @@ export async function askEventAnalysis(
     };
 
     for (let round = 0; round < ASK_TOOL_MAX_ROUNDS + 1; round += 1) {
+      /*
+       * 用户停止（2026-11-24）：`cancelEventAsk` abort 之后不能再发起新的上游调用
+       * —— 否则停止要等「当前这轮让出 + 下一轮再跑一遍」才生效。
+       * 工具执行段（下面 `entry.run`）不在这里拦：它拿的是同一个 signal，
+       * 能中断的自己会中断，中断不了的多半是同步 KB 检索，拦了也省不下时间。
+       */
+      if (controller.signal.aborted) break;
       // 每轮开头复查 runId：分析已被重跑则终止，避免用新代码回答老结论
       const current = readNormalizedAnalysisDoc(scope, event.id);
       if (!current.draft || current.draft.runId !== draftRunId) {
@@ -570,9 +630,9 @@ export async function askEventAnalysis(
           }
         }
       } catch (err) {
-        // 用户取消（未来 SSE abort）或单轮请求超时/上游异常：都退出循环，
-        // 由下方按"有无内容"决定收口 —— 有内容保留（截断），无内容 → ANALYSIS_ASK_TIMEOUT。
-        // 取消硬预算后不再有 setTimeout abort，但保留 abort 分支以防未来 SSE 取消。
+        // 用户停止（`cancelEventAsk` 的 abort）或单轮请求超时/上游异常：都退出循环，
+        // 由下方按"有无内容"决定收口 —— 有内容保留（截断），无内容时再按
+        // `canceledByUser` 区分「主动停止」与「超时」两种码（文案完全不同）。
         void err;
         // 异常轮：本轮已缓冲的正文按"最终作答"flush，避免丢内容
         if (roundContent) {
@@ -666,9 +726,22 @@ export async function askEventAnalysis(
       if (round + 1 >= ASK_TOOL_MAX_ROUNDS) forceAnswerNext = true;
     }
 
+    /*
+     * 用户是否点了「停止」（2026-11-24）。
+     *
+     * 在收口处读一次就定下来：`finally` 里 Map 条目会被删掉，之后再读永远是 false。
+     * 有内容时不影响落库（半截答案保留，同分析的 partial 语义），只影响文案与徽标。
+     */
+    const canceledByUser = activeAsks.get(thisAskKey)?.canceledByUser === true;
     const text = answer.trim();
     if (!text) {
-      throw new GovernanceError('ANALYSIS_ASK_TIMEOUT', '回答超时且未产生内容，请重试');
+      /*
+       * 两个出口文案必须分开：主动停止不是错误，抛 TIMEOUT 会让前端显示
+       * 「回答超时…请重试」——用户自己停的，看到"超时"会以为出了问题。
+       */
+      throw canceledByUser
+        ? new GovernanceError('ANALYSIS_ASK_CANCELED', '已停止本轮追问（尚未生成内容）')
+        : new GovernanceError('ANALYSIS_ASK_TIMEOUT', '回答超时且未产生内容，请重试');
     }
 
     /*
@@ -676,8 +749,11 @@ export async function askEventAnalysis(
      *
      * 三步里任何一步失败都只**降级**（记一条步骤说明），绝不让追问本身失败（N13）：
      * 用户问的是问题，补丁只是附带的建议。
+     *
+     * 主动停止时**整段跳过**：用户刚喊停，接着弹一个「要不要覆盖结论」的框
+     * 是把他没看完的半截答案当真凭实据，产物不可信。
      */
-    const extracted = extractProposal(text);
+    const extracted = canceledByUser ? { answer: text } : extractProposal(text);
     let proposalView: AskProposalView | undefined;
     if (extracted.patch) {
       // 与提示词同源：同一个视角算出来的骨架，避免"提示说能写、校验说不能"
@@ -741,14 +817,22 @@ export async function askEventAnalysis(
      * 列表标记收口：撤掉「追问中」，记一条结束态。
      * `askTurnId` 为空 = 这一轮没落库（超时 / 上游异常 / 闸门内报错）→ 记 failed，
      * 让列表行能提示「追问失败」，而不是静默消失。
+     *
+     * 主动停止**不记**（2026-11-24）：那是用户自己刚做的动作，列表不需要再提醒；
+     * 记 failed 更糟 —— 会打「追问失败」徽标，把他引向"去看看出了什么错"，
+     * 而这一轮什么都没配错（同分析侧不复用 failed 的理由）。
+     * 标记必须在 `delete` 之前读：删掉之后就查不到了。
      */
+    const canceled = activeAsks.get(thisAskKey)?.canceledByUser === true;
     activeAsks.delete(thisAskKey);
-    rememberFinishedAsk(thisAskKey, {
-      eventId: event.id,
-      turnId: askTurnId,
-      status: askTurnId ? 'ok' : 'failed',
-      at: Date.now(),
-    });
+    if (!canceled) {
+      rememberFinishedAsk(thisAskKey, {
+        eventId: event.id,
+        turnId: askTurnId,
+        status: askTurnId ? 'ok' : 'failed',
+        at: Date.now(),
+      });
+    }
     // 所有出口都必须释放追问限流的并发槽，否则计数泄漏、后续追问全被判 BUSY
     followupLimiter.release();
   }

@@ -146,6 +146,12 @@ const RULES: Rule[] = [
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
   // 流式追问（SSE）：与普通 POST 同权限
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask\/stream$/, 'permission', 'knowledge.ask'),
+  /*
+   * 停止追问（2026-11-24）：与**发起**同权限，而不是跟分析停止一样要 `knowledge.write`。
+   * 理由：能发起就能收回 —— viewer 有 `knowledge.ask`，若这里要写权限，
+   * 他发起的追问就只能等超时。分析停止之所以要 write，是因为发起分析本身就要 write。
+   */
+  pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask\/cancel$/, 'permission', 'knowledge.ask'),
   pattern('GET', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/confirm$/, 'permission', 'knowledge.write'),

@@ -363,6 +363,14 @@ export interface AnalysisAskTurn {
 export interface AskProposal {
   conclusion: string;
   chain: ConclusionNode[];
+  /**
+   * 数据链路（2026-11-24 · REQ-20261124-001）：**缺省 = 本条补丁不改链路**。
+   *
+   * 与外部上传正相反（那边缺省 = 清空）：追问是「沿当前结论继续」，模型多数轮次并不想
+   * 动链路，清空会让用户每次追问都丢链路（S03 §7 决策）。解析层已 `normalizeDataFlow`
+   * 归一，归一后为空的不写进 patch —— 所以这里出现就一定是非空文本。
+   */
+  dataFlow?: string;
   /** 模型给的一句话说明，仅展示 */
   reason: string;
 }

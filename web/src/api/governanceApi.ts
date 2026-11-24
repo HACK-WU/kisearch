@@ -890,6 +890,24 @@ export function resetEventAnalysis(
   });
 }
 
+/**
+ * 手动停止正在跑的那一轮追问（2026-11-24）。
+ *
+ * 与 `cancelEventAnalysis` 同款语义：只发 abort，**终态由服务端收口**——
+ * 已生成的部分会落库成正式记录，一字未生成则以 `ANALYSIS_ASK_CANCELED` 结束。
+ * 幂等：没在跑返回 `canceled:false`（按钮可能被点两次，不该报错）。
+ */
+export function cancelEventAsk(
+  scope: string,
+  eventId: string,
+): Promise<{ ok: true; scope: string; eventId: string; canceled: boolean }> {
+  return req(`/api/governance/events/${encodeURIComponent(eventId)}/analysis/ask/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scope }),
+  });
+}
+
 /** 追问这次分析（B2）：提问一轮 */
 export function askEventAnalysis(
   scope: string,

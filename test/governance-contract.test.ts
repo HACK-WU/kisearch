@@ -249,6 +249,11 @@ describe("追问（B2）错误码状态映射", () => {
     assert.equal(new GovernanceError("ANALYSIS_ASK_BUSY", "x").status, 429);
     assert.equal(new GovernanceError("ANALYSIS_ASK_TIMEOUT", "x").status, 504);
   });
+
+  it("1627（主动停止）必须是 499 而不是 504 —— 停不是超时", () => {
+    assert.equal(GOVERNANCE_CODE_NUMBERS.ANALYSIS_ASK_CANCELED, 1627);
+    assert.equal(new GovernanceError("ANALYSIS_ASK_CANCELED", "x").status, 499);
+  });
 });
 
 /**

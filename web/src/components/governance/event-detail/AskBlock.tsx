@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   askEventAnalysis,
   askEventAnalysisStream,
+  cancelEventAsk,
   clearEventAnalysisAsk,
   GovernanceApiError,
   listEventAnalysisAsk,
@@ -51,7 +52,10 @@ function shouldResume(
  * · 过程步骤只在**本会话**保留（不落盘），刷新后由服务端记录接管答案（H-06）；
  * · 回车发送 + `isComposing` 保护（中文选词回车不误发，H-04/H-05）；
  * · 请求序号 + `eventId` 闭包：切事件后晚到的增量直接丢弃（H-13）；
- * · 能看历史 ≠ 能提问：提问看 `canAsk`（knowledge.ask，viewer 也有），清空看 `canWrite`。
+ * · 能看历史 ≠ 能提问：提问看 `canAsk`（knowledge.ask，viewer 也有），清空看 `canWrite`；
+ * · **可停止**（2026-11-24）：运行中（本地流式 `asking` / 服务端接续 `remote`）发送键换成
+ *   停止键，走 `POST /analysis/ask/cancel`（服务端 abort）。停止不是错误 —— 用中性
+ *   `notice` 而非红色 `error`，且**绝不落进「回退普通 POST」**（那会重跑一遍）。
  */
 export interface AskBlockProps {
   scope: string;
@@ -60,6 +64,13 @@ export interface AskBlockProps {
   canWrite: boolean;
   /** 当前草稿的 runId：用于分组与"拿新结论回答老问题"的防护 */
   activeRunId: string | null;
+  /**
+   * 递增 = 父级刚重新取过详情（事件列表刷新按钮，2026-11-24）。
+   *
+   * 追问记录是挂载时读一次、之后只靠「运行中 2s 轮询」更新的，刷新按钮刷不到它
+   * —— 别的标签页刚追问完，这里会一直停在旧问答上。
+   */
+  reloadSignal?: number;
   /**
    * 覆盖成功后把新 doc 交给父级（S03）。
    *
@@ -70,7 +81,7 @@ export interface AskBlockProps {
 }
 
 export function AskBlock(props: AskBlockProps): JSX.Element {
-  const { scope, eventId, canAsk, canWrite, activeRunId, onAnalysisUpdated } = props;
+  const { scope, eventId, canAsk, canWrite, activeRunId, reloadSignal = 0, onAnalysisUpdated } = props;
   const [turns, setTurns] = useState<AnalysisAskTurn[]>([]);
   /**
    * 服务端认为「还在跑」的那一轮（#82）：
@@ -86,6 +97,10 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
   const [turnSteps, setTurnSteps] = useState<Record<string, AskStep[]>>({});
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
+  /** 已发出停止请求、正在等服务端收口（2026-11-24）：期间按钮显示「停止中…」并禁用 */
+  const [stopping, setStopping] = useState(false);
+  /** 中性提示（灰字）：停止成功这类「不是错误的状态变化」不走红色 `error` */
+  const [notice, setNotice] = useState('');
   const [clearing, setClearing] = useState(false);
   const [error, setError] = useState('');
   /** 本轮补丁建议（S03）：流式结束时才弹框，避免打断阅读 */
@@ -95,6 +110,14 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
   /** 流式过程中先收下，落库后再交给 state */
   const proposalRef = useRef<AskProposalEvent | null>(null);
   const seqRef = useRef(0);
+  /**
+   * 本轮是否被用户主动停止（2026-11-24）。
+   *
+   * 停止时「有半截内容」的服务端会正常落库并回 `done`（不是错误路径），
+   * 前端拿不到任何"这是被停止的"信号 —— 只能在本地记一笔，
+   * 收口后补一句「已停止」，否则用户会以为是自己看错了。
+   */
+  const stoppedRef = useRef(false);
   const listRef = useRef<HTMLDivElement>(null);
 
   /**
@@ -120,6 +143,21 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
   useEffect(() => { void refresh(); }, [refresh]);
 
   /**
+   * 刷新按钮（2026-11-24）：父级刚重新取过详情，这里跟着重读一次记录。
+   *
+   * 用 ref 比对而不是把 `reloadSignal` 塞进 `refresh` 的依赖：后者会让首次挂载
+   * 与每次刷新各多读一次；而且正在流式输出时不该因为父级刷新而重读（`asking` 期间
+   * 服务端记录还没落库，读回来是空的，会被误当成"记录没了"）。
+   */
+  const reloadSigRef = useRef(reloadSignal);
+  useEffect(() => {
+    if (reloadSignal === reloadSigRef.current) return;
+    reloadSigRef.current = reloadSignal;
+    if (asking) return;
+    void refresh();
+  }, [reloadSignal, asking, refresh]);
+
+  /**
    * 运行中追问的续接轮询（2026-11-23 · #82）。
    *
    * 场景：追问回答到一半切走 / 刷新 → SSE 断开、组件内存态没了，但服务端仍在跑。
@@ -132,6 +170,17 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
     const timer = window.setInterval(() => { void refresh(); }, REMOTE_POLL_MS);
     return () => window.clearInterval(timer);
   }, [pollingRemote, refresh]);
+
+  /**
+   * 「停止中…」的解锁条件（2026-11-24）：本地流式结束 **且** 服务端没有在跑的轮次。
+   *
+   * 不能一发出停止请求就解锁 —— abort 只是信号，服务端可能还在工具执行段里收尾
+   * （此时 `.ask.running.json` 还在）。这期间若让用户再发一条，就有两轮同时写
+   * 同一份运行态（后写覆盖前写），回来看到的半截答案会张冠李戴。
+   */
+  useEffect(() => {
+    if (!asking && !remote && stopping) setStopping(false);
+  }, [asking, remote, stopping]);
 
   // 新内容到达时贴底（只在已贴底时跟随，避免打断回看）；过程区内部自己贴底（AskProcess）
   useEffect(() => {
@@ -148,7 +197,10 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
     seqRef.current = seq;
     setAsking(true);
     setError('');
+    setNotice('');
     setQuestion('');
+    // 新一轮开跑：上一轮的「已停止」标记必须清掉（否则这一轮的 done 会显示成被停止）
+    stoppedRef.current = false;
     setPending({ question: text, answer: '' });
     stepsRef.current = [];
     setSteps([]);
@@ -199,6 +251,11 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       }
       setTurns((prev) => [...prev, res.turn]);
       setPending(null);
+      /*
+       * 「停止时有半截内容」走的是**正常结束**（服务端把已生成部分落库成正式记录），
+       * 前端拿不到停止信号，只能靠本地标记补一句，否则这一轮看起来跟正常答完一样。
+       */
+      if (stoppedRef.current) setNotice('已停止本轮追问 · 已生成的部分已保留');
       // 补丁建议落库后才弹框（turnId 此时才可靠）
       const suggestion = proposalRef.current;
       proposalRef.current = null;
@@ -207,6 +264,24 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       setSteps([]);
     } catch (err) {
       if (seqRef.current !== seq) return;
+      const code = err instanceof GovernanceApiError ? err.code : undefined;
+      /*
+       * 主动停止（2026-11-24）：服务端 abort 后流以 `error` 结束。
+       * **必须挡在「回退普通 POST」之前** —— 那条兜底会重新发一次完整追问，
+       * 等于把用户刚停掉的这一轮又跑一遍（既费钱又违背他的意图）。
+       */
+      if (stoppedRef.current || code === 'ANALYSIS_ASK_CANCELED') {
+        setPending(null);
+        /*
+         * 文案**不承诺"没生成内容"**：`ANALYSIS_ASK_CANCELED` 只保证"这一轮没落库"，
+         * 而落库失败（磁盘/锁）也会走到这里 —— 那时实际上生成过内容、只是没存住。
+         * 说成"尚未生成内容"会把"数据没存住"伪装成"你没等到东西"，用户不会去查。
+         */
+        setNotice('已停止本轮追问');
+        setQuestion('');
+        void refresh();
+        return;
+      }
       // 一字未收到 → 回退普通 POST（兼容不支持流式/代理缓冲的环境）
       if (!received) {
         try {
@@ -229,7 +304,7 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
        */
       if (!received) setPending(null);
       setQuestion((q) => (q ? q : text));
-      const code = err instanceof GovernanceApiError ? err.code : undefined;
+      // `code` 在 catch 开头已算过（停止分支要用），这里不能重复声明
       if (code === 'REVISION_CONFLICT') {
         setError('分析结果已更新，请刷新后重新提问');
         void refresh();
@@ -238,6 +313,43 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
       }
     } finally {
       if (seqRef.current === seq) setAsking(false);
+    }
+  };
+
+  /**
+   * 停止正在跑的那一轮追问（2026-11-24）。
+   *
+   * 交互与 AI 分析卡的「停止」一致：发出请求后进「停止中…」并禁用，**不立刻解锁**。
+   * 原因见上面的解锁 effect —— abort 只是信号，服务端可能还在工具执行段；
+   * 早解锁会让新一轮与旧一轮的收尾同时写同一份运行态。
+   *
+   * `canceled:false` 是**正常结果**（那一轮刚好已经结束），不是失败：
+   * 只刷新记录，不显示红色错误。
+   */
+  const stop = async (): Promise<void> => {
+    if (stopping) return;
+    setStopping(true);
+    setError('');
+    try {
+      const res = await cancelEventAsk(scope, eventId);
+      if (!res.canceled) {
+        /*
+         * `canceled:false` 有两种含义，必须分开说：
+         *   · 本地已经没有流式了 → 真的结束了；
+         *   · 本地**还在流式**（`asking`）→ 是竞态：服务端那一轮还没注册
+         *     （请求刚发出/在排队），此时说"已经结束"会和随后涌出的回答自相矛盾。
+         *     让按钮恢复可点，用户再点一次就能停掉。
+         */
+        setNotice(asking ? '服务端暂未找到这一轮，可稍后重试停止' : '这一轮追问已经结束');
+        setStopping(false);
+        void refresh();
+        return;
+      }
+      stoppedRef.current = true;
+      setNotice('已停止本轮追问');
+    } catch (err) {
+      setError((err as Error).message || '停止失败，请重试');
+      setStopping(false);
     }
   };
 
@@ -371,8 +483,10 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
           value={question}
           maxLength={4000}
           placeholder={remote
-            ? '上一轮仍在回答，完成后可继续追问'
-            : canAsk ? '就这次分析追问一句，回车发送' : '当前账号无提问权限'}
+            ? '上一轮仍在回答，可点停止中断'
+            : asking
+              ? '正在回答，可点停止中断'
+              : canAsk ? '就这次分析追问一句，回车发送' : '当前账号无提问权限'}
           disabled={!canAsk || asking || Boolean(remote)}
           title={askTitle}
           onChange={(e) => setQuestion(e.target.value)}
@@ -382,18 +496,44 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
             void send();
           }}
         />
-        <button
-          type="button"
-          className="gov-btn gov-btn--sm gov-btn--primary"
-          disabled={!canAsk || asking || Boolean(remote) || !question.trim()}
-          title={askTitle}
-          onClick={() => void send()}
-        >
-          {asking ? '回答中…' : remote ? '追问中…' : '发送'}
-        </button>
+        {/*
+          运行中（本地流式 / 服务端接续）把「发送」换成「停止」（2026-11-24）：
+          与分析卡同一个位置语义（底栏右侧的终止入口），样式也复用 `danger-ghost`。
+          两种运行形态都必须能停 —— 接续态下发起人可能已在别的标签页走了。
+        */}
+        {asking || remote ? (
+          <button
+            type="button"
+            className="gov-btn gov-btn--sm gov-btn--danger-ghost"
+            disabled={!canAsk || stopping}
+            title={!canAsk
+              ? askTitle
+              : stopping
+                /*
+                 * 「停止中…」可能持续一阵：abort 在工具执行段收不到，最坏要等这一轮工具返回。
+                 * 说清楚比让人以为按钮卡死强，也解释了为什么还不能马上再问。
+                 */
+                ? '正在停止：等当前这一轮收口，工具调用进行中时可能要等它返回'
+                : '停止这一轮追问（已生成的内容会保留）'}
+            onClick={() => void stop()}
+          >
+            {stopping ? '停止中…' : '停止'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="gov-btn gov-btn--sm gov-btn--primary"
+            disabled={!canAsk || !question.trim()}
+            title={askTitle}
+            onClick={() => void send()}
+          >
+            发送
+          </button>
+        )}
       </div>
 
       {error ? <span className="gov-error">{error}</span> : null}
+      {notice ? <span className="gov-hint">{notice}</span> : null}
     </div>
   );
 }
