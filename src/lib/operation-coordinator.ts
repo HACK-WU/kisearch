@@ -55,6 +55,10 @@ const READ_OPERATIONS = new Set<string>([
   'doc-get-api',
   'doc-edit-read',
   'asset-read-api',
+  // 图集只读端点（REQ-20261120-003）：只 stat/读 .atlas/ 下的文件，不打开引擎，
+  // 导入期间也应能打开页面看图集。
+  'atlas-status-api',
+  'atlas-view-api',
   // 任务中心「重试未完成」入口的只读判据（2026-10-13）：只读清单文件 + 源目录存在性，
   // 不打开引擎、不写元数据 ⇒ 登记为 read（否则导入期间任务详情查询会被排到队尾）。
   'import-incomplete-api',

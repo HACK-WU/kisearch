@@ -335,6 +335,32 @@ export async function getSearchConfig(): Promise<SearchConfigResponse> {
   return req<SearchConfigResponse>('/api/search-config');
 }
 
+// ─── 图集（REQ-20261120-003 S-04）────────────────────
+// 字段与 `ki atlas status --json` 同构：页面状态栏与 CLI 共用一套名字，避免两端口径漂移。
+
+export interface AtlasStatusResponse {
+  ok: boolean;
+  exists: boolean;
+  scope?: string;
+  title?: string;
+  branch?: string;
+  baseline?: string;
+  generatedAt?: string;
+  viewCount?: number;
+  /** entry html 字节数 */
+  size?: number;
+  /** 原始 zip 字节数 */
+  packageSize?: number;
+  sha256?: string;
+  uploadedAt?: string;
+  uploadedBy?: string;
+  entries?: { name: string; size: number }[];
+}
+
+export async function getAtlasStatus(scope: string): Promise<AtlasStatusResponse> {
+  return req<AtlasStatusResponse>(`/api/atlas/status?scope=${encodeURIComponent(scope)}`);
+}
+
 /**
  * 探活端点 `/healthz`（免鉴权，MCP 单例探活同源）。
  *

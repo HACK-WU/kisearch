@@ -7,6 +7,7 @@ import { SearchPage } from '@/pages/SearchPage';
 import { TasksPage } from '@/pages/TasksPage';
 import { DataSourcePage } from '@/pages/DataSourcePage';
 import { ChatPage } from '@/pages/ChatPage';
+import { AtlasPage } from '@/pages/AtlasPage';
 import { ResourcesPage } from '@/pages/ResourcesPage';
 import { AiSettingsPage } from '@/pages/AiSettingsPage';
 import { LifecyclePage } from '@/pages/LifecyclePage';
@@ -112,6 +113,12 @@ export function AppRoutes(): JSX.Element {
         />
         {/* 独立对话页（REQ-20261008-001）；:convId 为会话深链（URL 契约 §2.4） */}
         <Route path="chat" element={<ChatPage />} />
+        {/*
+          知识地图（REQ-20261120-003）：页面只做容器，图集内容由包自带。
+          一期无上传入口（页面上传是二期），写入口只有 `ki atlas upload`。
+          权限由后端 /api/atlas/status 的 403 兜住并在页面里渲染错误态，与 browse/search 同款。
+        */}
+        <Route path="atlas" element={<AtlasPage />} />
         {/*
           agent 问答只读详情（REQ-20261116-003）。
           ⚠️ 必须排在 `chat/:convId` **之前**：否则 `chat/ask/ka-xxx` 会被 `:convId` 段吞掉

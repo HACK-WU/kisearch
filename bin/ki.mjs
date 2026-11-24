@@ -54,6 +54,8 @@ const COMMANDS = {
   'migrate-relation-cache': 'src/migrate-relation-cache.ts',
   'index-optimize': 'src/index-optimize.ts',
   'event-types': 'src/event-types.ts',
+  // 图集（REQ-20261120-003）：一期唯一写入口；页面上传是二期
+  'atlas': 'src/atlas.ts',
 };
 
 // 获取命令和参数

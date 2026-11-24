@@ -173,6 +173,8 @@ import { readVectorDimensionSnapshot, refreshVectorDimensionSnapshot } from './v
 import { withTimeoutFallback } from './timeout.js';
 // 上传逐条校验的单一实现（与事件参考文档上传共用；放独立模块避免 governance 反向依赖成环）
 import { sanitizeFileName, validateUploadFile, type UploadFilePolicy } from './import-upload-policy.js';
+// 图集（REQ-20261120-003）：HTTP 层只做鉴权与转发，校验/落盘全在 src/lib/atlas/ 内核
+import { AtlasError, atlasCodeName, atlasHttpStatus, readEntry, readStatus } from './atlas/index.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -1098,7 +1100,7 @@ export async function handleApiRequest(
   // effective scope = query scope 或 'default'（与工具缺省值一致，防止缺省时绕过授权）
   // 新增带 scope 参数的只读接口时必须同步加入本列表，否则该接口不受越权拦截
   if (authScopes !== null && req.method === 'GET'
-    && (p === '/tags' || p === '/doc/list' || p === '/doc/get' || p === '/doc/edit' || p === '/asset' || p === '/import/config' || p === '/import/incomplete' || p === '/vector/status')) {
+    && (p === '/tags' || p === '/doc/list' || p === '/doc/get' || p === '/doc/edit' || p === '/asset' || p === '/import/config' || p === '/import/incomplete' || p === '/vector/status' || p === '/atlas/status' || p === '/atlas/view')) {
     const queryScope = url.searchParams.get('scope');
     const effectiveScope = queryScope && queryScope.trim() ? queryScope.trim() : 'default';
     if (!scopeAllowed(authScopes, effectiveScope)) {
@@ -1519,6 +1521,19 @@ export async function handleApiRequest(
       await getSharedOperationCoordinator().submit(
         { operation: 'tag-list', params: { scope: effectiveScope } },
         () => runWithConfigSnapshot(requestConfig, () => handleTags(res, url)),
+        [effectiveScope],
+      );
+      return;
+    }
+    // ── 图集（REQ-20261120-003）：一期只读两端点；写入口只有 `ki atlas upload` ──
+    // 失败态一律回 JSON（设计 D6）：页面必须先查 status 再决定是否建 iframe，
+    // 否则 iframe 会把 401/403/404 的 JSON 渲染成一屏文字。
+    if ((p === '/atlas/status' || p === '/atlas/view') && req.method === 'GET') {
+      const effectiveScope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+      const isStatus = p === '/atlas/status';
+      await getSharedOperationCoordinator().submit(
+        { operation: isStatus ? 'atlas-status-api' : 'atlas-view-api', params: { scope: effectiveScope } },
+        () => runWithConfigSnapshot(requestConfig, () => (isStatus ? handleAtlasStatus(res, effectiveScope) : handleAtlasView(res, effectiveScope))),
         [effectiveScope],
       );
       return;
@@ -2138,20 +2153,55 @@ async function handleTags(res: http.ServerResponse, url: URL): Promise<void> {
   sendJson(res, 200, { ok: true, tags, scope });
 }
 
+// ─── GET /api/atlas/* （REQ-20261120-003）─────────────
+
+/** 统一错误出口：带 code/hint，便于页面与 agent 按码分支 */
+function sendAtlasError(res: http.ServerResponse, err: unknown): void {
+  if (err instanceof AtlasError) {
+    sendJson(res, atlasHttpStatus(err.code), { ok: false, code: atlasCodeName(err.key), error: err.message, hint: err.hint });
+    return;
+  }
+  sendJson(res, 500, { ok: false, error: (err as Error).message });
+}
+
+async function handleAtlasStatus(res: http.ServerResponse, scope: string): Promise<void> {
+  try {
+    const st = readStatus(scope);
+    // 字段摊平：与 `ki atlas status --json` 同构（页面状态栏与 CLI 共用一套字段名）
+    sendJson(res, 200, st.exists && st.meta ? { ok: true, exists: true, ...st.meta } : { ok: true, exists: false });
+  } catch (err) {
+    sendAtlasError(res, err);
+  }
+}
+
+async function handleAtlasView(res: http.ServerResponse, scope: string): Promise<void> {
+  try {
+    const buf = readEntry(scope);
+    res.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Content-Length': buf.length,
+      // 图集是可信内部产物，但仍按「同源可嵌」收紧，防止被外站 iframe 引用
+      'X-Frame-Options': 'SAMEORIGIN',
+      'Content-Security-Policy': "frame-ancestors 'self'",
+      'Cache-Control': 'no-cache',
+    });
+    res.end(buf);
+  } catch (err) {
+    sendAtlasError(res, err);
+  }
+}
+
 // ─── GET /api/asset ──────────────────────────────────
 
-/** 附件 MIME 映射（REQ-20260904-001；后缀集合与 import.ts ASSET_EXTENSIONS 对应） */
-const ASSET_MIME: Record<string, string> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.gif': 'image/gif',
-  '.svg': 'image/svg+xml',
-  '.webp': 'image/webp',
-  '.ico': 'image/x-icon',
-  '.bmp': 'image/bmp',
-  '.avif': 'image/avif',
-};
+/**
+ * 附件 MIME 映射（REQ-20260904-001）。
+ *
+ * ★ 2026-11-24 收敛为单一来源 `asset-mime.ts`（REQ-20261124-002 前置层）：
+ * 此前本文件与 `asset-image.ts` 各有一份完全相同的 9 项白名单，两份必然漂移。
+ * 抽到无依赖的 `asset-mime.ts` 而不是直接 import `asset-image.js`，是为了避免
+ * 把导入内核（`import.js`）与 SVG worker（`svg-raster.js`）拉进本模块图。
+ */
+import { ASSET_MIME } from './asset-mime.js';
 
 /**
  * GET /api/asset?scope=&group=&path= —— 读取 group 级 assets 目录下的附件（REQ-20260904-001）

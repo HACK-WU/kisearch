@@ -70,6 +70,10 @@ const RULES: Rule[] = [
   exact('GET', '/import/status', 'permission', 'knowledge.read'),
   exact('GET', '/import/incomplete', 'permission', 'knowledge.read'),
   exact('GET', '/vector/status', 'permission', 'knowledge.read'),
+  // 图集（REQ-20261120-003）：一期只读两端点；写入口是 CLI（不经 HTTP）。
+  // 未登记即 404 —— 漏这两行的表现是「页面一直空态 + 路由覆盖率单测转红」。
+  exact('GET', '/atlas/status', 'permission', 'knowledge.read'),
+  exact('GET', '/atlas/view', 'permission', 'knowledge.read'),
   exact('GET', '/embedding/summary', 'permission', 'knowledge.read'),
   exact('POST', '/vector/status/refresh', 'permission', 'knowledge.read'),
 

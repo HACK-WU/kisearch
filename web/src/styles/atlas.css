@@ -1,0 +1,115 @@
+/* 知识地图页（REQ-20261120-003 S-04）——沿用 ki.css 的语义色，不新造配色 */
+
+/* 作为 .ki-content-inner（flex column）的子项吃掉剩余高度；min-height:0 让 iframe 能内部滚动 */
+.atlas-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 0;
+}
+
+/* 状态栏：基线 commit / 生成时间 / sha / 快照声明，恒显不折叠 */
+.atlas-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--ki-line, #e3e6e2);
+  background: var(--ki-surface, #fff);
+  font-size: 12px;
+  color: var(--ki-text-muted, #6b7770);
+}
+
+.atlas-bar__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ki-text, #17211c);
+}
+
+.atlas-bar__meta,
+.atlas-bar__sha {
+  font-variant-numeric: tabular-nums;
+}
+
+.atlas-bar__sha {
+  padding: 1px 6px;
+  border: 1px solid var(--ki-line, #e3e6e2);
+  border-radius: 4px;
+}
+
+/* 「生成时快照」是防误导的关键提示，弱化但必须可见，且靠右推 */
+.atlas-bar__note {
+  margin-left: auto;
+  opacity: 0.85;
+}
+
+.atlas-bar__retry {
+  flex: 0 0 auto;
+}
+
+/* iframe 占满剩余高度；内部滚动交给图集自己，页面不再套滚动条 */
+.atlas-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  display: block;
+  background: #fff;
+}
+
+/* 空态 / 错误态 / 加载态共用的居中容器 */
+.atlas-hint {
+  margin: auto;
+  max-width: 560px;
+  padding: 28px 24px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--ki-line, #e3e6e2);
+  border-radius: 10px;
+  background: var(--ki-surface, #fff);
+}
+
+.atlas-hint strong {
+  font-size: 15px;
+  color: var(--ki-text, #17211c);
+}
+
+.atlas-hint--err strong {
+  color: var(--ki-danger, #b4241c);
+}
+
+.atlas-hint__sub {
+  font-size: 12px;
+  color: var(--ki-text-muted, #6b7770);
+  line-height: 1.6;
+}
+
+.atlas-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.atlas-steps code,
+.atlas-hint__sub code {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--ki-line, #e3e6e2);
+  background: var(--ki-surface-sunken, #f4f6f4);
+  font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+/* 页容器需要相对定位，让居中的提示块能撑满高度 */
+.atlas-page > .atlas-hint {
+  margin-block: auto;
+}
