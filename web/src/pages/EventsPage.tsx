@@ -512,6 +512,17 @@ export function EventsPage(): JSX.Element {
    */
   const [refreshing, setRefreshing] = useState(false);
   const refreshTimer = useRef<number | null>(null);
+  /**
+   * 详情子树的重载信号（2026-11-24 用户要求：刷新按钮要连详情一起刷）。
+   *
+   * `loadDetail` 只换得动本页 state 里的详情；右栏有些数据是**子组件自己拉的**
+   * —— 追问记录（`AskBlock` 挂载时读一次）。父级重新取详情碰不到它，于是会出现
+   * 「详情已是新一轮结论、追问区还停在旧问答」。递增这个计数器通知它重读。
+   *
+   * 另外两块不需要信号：AI 分析面板跟 `analysis` 的引用变化走，AI 查找结论由下面
+   * 那个 effect 把本信号列进依赖。
+   */
+  const [detailReload, setDetailReload] = useState(0);
 
   const loadList = useCallback(async () => {
     const seq = ++listSeq.current;
@@ -655,31 +666,59 @@ export function EventsPage(): JSX.Element {
     return () => window.clearTimeout(t);
   }, [message]);
 
+  /** 当前右栏展示的是哪个事件（用于判断「这次 load 是不是换事件」；不放 state，避免多一次渲染） */
+  const shownDetailId = useRef<string | null>(null);
+
   const loadDetail = useCallback(async (id: string) => {
+    let d: EventDetail;
     try {
       /*
        * 必须**先**取详情拿「事件所属库」，再用它读 refs —— 视图下两者不是同一个 scope，
        * 并行发出去会让 refs 请求带着视图名打在空目录上（旧实现是 Promise.all）。
        */
-      const d = await getEventDetail(scope, id);
-      const r = await listRefs(d.scope, id);
-      setDetail(d);
-      setRefs(r.refs);
+      d = await getEventDetail(scope, id);
     } catch (err) {
       setMessage({ tone: 'err', text: (err as Error).message });
+      return;
     }
+    /*
+     * refs 失败不连累详情：旧实现两条都成功才写 state，一次 refs 报错就让详情整块停在旧值
+     * —— 手动刷新时最需要它的场景（结论 / 阶段都变了）反而什么都不更新。
+     * 但两条仍要**在同一次提交里一起写**：只先写详情会留出一帧「B 的详情 + A 的参考文档」
+     * （切事件时 A 的列表还没被覆盖），跨事件串数据比晚几十毫秒更糟。
+     */
+    let refs: RefItem[] | null = null;
+    let refsError: unknown = null;
+    try {
+      refs = (await listRefs(d.scope, id)).refs;
+    } catch (err) {
+      refsError = err;
+    }
+    /*
+     * 换事件时若 refs 读不到，**宁可清空也不能挂着上一个事件的文档**：
+     * 详情已换成 B、列表还是 A 的，「参考文档」里点开就是别人的文档。
+     * 用 ref 记当前展示的事件 id（放进依赖会让 loadDetail 每次详情变更都重建 → effect 死循环）。
+     */
+    const switchingEvent = shownDetailId.current !== null && shownDetailId.current !== d.event.id;
+    shownDetailId.current = d.event.id;
+    setDetail(d);
+    if (refs) setRefs(refs);
+    else if (switchingEvent) setRefs([]);
+    if (refsError) setMessage({ tone: 'err', text: (refsError as Error).message });
   }, [scope]);
 
   /**
    * 刷新左侧列表（2026-11-20：刷新按钮归属列表，放回列表区，不再占页头）。
    *
-   * 三件事一起做：重取列表 → 已选中时顺带刷新详情 → **至少转 600ms** 再复位。
-   * 最后一件事是为了让点击有可见反馈：本地请求常 30~80ms 返回，`listLoading` 只活一两帧，
-   * 用户会以为按钮没反应。
+   * 四件事一起做：重取列表 → 已选中时顺带刷新详情 → **详情子树的内部数据一起重拉**
+   * → 至少转 600ms 再复位。最后一件事是为了让点击有可见反馈：本地请求常 30~80ms 返回，
+   * `listLoading` 只活一两帧，用户会以为按钮没反应。
    */
   const refreshList = useCallback((): void => {
     if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
     setRefreshing(true);
+    // 与详情请求并行走：追问记录等子组件不等 loadDetail 返回就能发起自己的重拉
+    setDetailReload((n) => n + 1);
     const startedAt = Date.now();
     void (async () => {
       try {
@@ -794,7 +833,11 @@ export function EventsPage(): JSX.Element {
       })
       .catch(() => { /* 读失败保留现有值，不清空 */ });
     return () => { alive = false; };
-  }, [active?.id, eventScope]);
+    /*
+     * `detailReload`：点刷新时连这份结论一起重读 —— 它落在磁盘上，
+     * 别的标签页刚固定过总结时，只有重新读才看得见。
+     */
+  }, [active?.id, eventScope, detailReload]);
   const activeAnalysis = detail?.event.id === active?.id ? (detail?.analysis ?? null) : null;
   /**
    * 点开事件 = 看过这次结果（2026-11-20）：把当前 draft 的 runId 记进 localStorage，
@@ -1702,6 +1745,8 @@ export function EventsPage(): JSX.Element {
                   busy={busy}
                   readOnlyHint={readOnlyHint}
                   startSignal={startSignal}
+                  /* 刷新按钮（2026-11-24）：让卡内自持副本的子块（追问记录、分析面板）跟着重拉 */
+                  reloadSignal={detailReload}
                   onUpdated={(next: EventAnalysis) => {
                     setDetail((prev) => (prev ? { ...prev, analysis: next } : prev));
                   }}

@@ -4,6 +4,7 @@ import { AiAnalyzePanel } from '@/components/governance/AiAnalyzePanel';
 import { AnalysisEditor } from './AnalysisEditor';
 import { CodeLocRow } from './CodeLocRow';
 import { ConclusionChain } from './ConclusionChain';
+import { DataFlowBlock } from './DataFlowBlock';
 import { AskBlock } from './AskBlock';
 import { inferAnalysisView } from '@/lib/analysisView';
 
@@ -297,6 +298,9 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
                 ) : (
                   <p className="gov-conclusion__text gov-conclusion__text--empty">当前没有结论。</p>
                 )}
+                {/* 数据链路（2026-11-24）：编辑态也照常只读展示 —— 它和结论一样不可手改，
+                    改成输入框就得配校验与后端写入，不在本次范围（H12 只放开未确认点与位置）。 */}
+                <DataFlowBlock dataFlow={draft?.dataFlow} source={draft?.source} />
               </div>
             )}
             saving={saving}
@@ -347,6 +351,13 @@ export function EventAnalysisCard(props: EventAnalysisCardProps): JSX.Element | 
                 </p>
               </div>
             ) : null}
+
+            {/*
+             * 数据链路（2026-11-24 · REQ-20261124-001）：与「分析结论」「未确认点」**三者并列**，
+             * 不嵌在紫色结论壳里 —— 结论是 AI 的判断，链路是客观路径，混在一个壳里会读成同一件事。
+             * 无值时由组件自己决定：外部上传给占位块，老数据（AI 来源）整块不渲染。
+             */}
+            <DataFlowBlock dataFlow={draft?.dataFlow} source={draft?.source} />
 
             {/*
              * 未确认点：独立区块，**不随过程区折叠、也不随已确认消失**（2026-11-18 用户反馈）。

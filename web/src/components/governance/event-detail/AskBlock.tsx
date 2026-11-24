@@ -272,6 +272,12 @@ export function AskBlock(props: AskBlockProps): JSX.Element {
         expectedRunId: activeRunId ?? null,
         conclusion: p.patch.conclusion,
         chain: p.patch.chain,
+        /*
+         * 数据链路（2026-11-24 · S03 §3.1）：**补丁里没有该字段就不传**。
+         * 不传 = 服务端保留旧链路（补丁缺省语义），传空串则会把链路清掉 ——
+         * 所以这里必须是条件展开，不能无条件 `dataFlow: p.patch.dataFlow`。
+         */
+        ...(p.patch.dataFlow ? { dataFlow: p.patch.dataFlow } : {}),
         ...(p.turnId ? { acceptedProposalTurnId: p.turnId } : {}),
       });
       setProposal(null);

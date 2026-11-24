@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ThinkingBlock, ToolCallRow } from './ToolCallRow';
 import { StepMetrics } from './StepMetrics';
 import { ConclusionChain } from './event-detail/ConclusionChain';
+import { DataFlowBlock } from './event-detail/DataFlowBlock';
 import { formatDurationMs } from '@/lib/duration';
 import {
   cancelEventAnalysis,
@@ -541,6 +542,13 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
                   </div>
                 </div>
               ) : null}
+
+              {/*
+               * 数据链路（2026-11-24 · REQ-20261124-001）：紧跟在过程区「最终结论」之后。
+               * 与上面那条结论同源（同一份 draft），滚到底读完结论正好接着读路径；
+               * 运行中没有链路可读，不占位（过程中冒出一个空块只会让人以为已经出结果了）。
+               */}
+              {!isRunning ? <DataFlowBlock dataFlow={draft?.dataFlow} source={draft?.source} nested /> : null}
             </div>
           ) : null}
         </>
