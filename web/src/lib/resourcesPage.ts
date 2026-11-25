@@ -153,11 +153,12 @@ export const MCP_TOOLS: McpToolGroup[] = [
       { name: 'ki_edit_relation', purpose: '对大 Relation 多轮按行编辑，finish 后一次性更新索引' },
       { name: 'ki_store', purpose: '只写向量层单条文本（不写 KB，易产生孤儿向量）' },
       { name: 'ki_bulk_store', purpose: '只写向量层批量文本（同上）' },
-      { name: 'ki_event_set_stage', purpose: '把事件流转到指定阶段（到终态按类型动作处理关联文档）' },
       { name: 'ki_event_create', purpose: '创建事件，可同时挂关联文档与参考文档（type / stage 可传名称）' },
+      {
+        name: 'ki_event_edit',
+        purpose: '事件唯一编辑工具（一次只做一类）：改描述 / 改预期效果 / 上传结论 / 关联文档增删 / 参考文档增删 / 阶段流转',
+      },
       { name: 'ki_event_delete', purpose: '删除已收口事件；必须指定关联文档去向（保留 / 进回收站）' },
-      { name: 'ki_event_docs', purpose: '事件关联文档增删：add 挂上（可见性随阶段）/ remove 解绑（不删文档）' },
-      { name: 'ki_event_refs', purpose: '事件参考文档增删：只建引用，不改被引文档的分类与可见性' },
     ],
   },
   {

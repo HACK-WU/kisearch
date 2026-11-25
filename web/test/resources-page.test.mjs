@@ -501,10 +501,10 @@ describe('文档外链（页面内唯一允许的 GitHub 链接）', () => {
 });
 
 describe('MCP 工具清单（接入后能用什么）', () => {
-  it('25 个工具分三组：读 12 / 写 10 / 组织与删除 3', () => {
-    assert.equal(MCP_TOOL_COUNT, 25);
+  it('23 个工具分三组：读 12 / 写 8 / 组织与删除 3', () => {
+    assert.equal(MCP_TOOL_COUNT, 23);
     assert.deepEqual(MCP_TOOLS.map((g) => g.label), ['读', '写', '组织与删除']);
-    assert.deepEqual(MCP_TOOLS.map((g) => g.items.length), [12, 10, 3]);
+    assert.deepEqual(MCP_TOOLS.map((g) => g.items.length), [12, 8, 3]);
   });
 
   it('★ 工具名与 docs/mcp-tools.md 的清单逐条一致（防文档漂移）', () => {
