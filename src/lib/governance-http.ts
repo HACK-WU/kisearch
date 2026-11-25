@@ -342,6 +342,19 @@ function num(value: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined;
 }
 
+/**
+ * 一批事件里最近一次改动的时间戳；空集合返回 `0`（语义是「从来没有过事件动态」）。
+ *
+ * 供 `/api/governance/counts` 的 `eventsMaxUpdatedAt` 用：侧栏「事件」红点拿它和
+ * 前端已读水位比较。**视图必须取 max 而不是 sum** —— 「有没有新动态」是聚合问题，
+ * 求和得到的数无法与任何时间点比较。
+ */
+function maxUpdatedAt(events: ReadonlyArray<{ updatedAt: number }>): number {
+  let max = 0;
+  for (const e of events) if (e.updatedAt > max) max = e.updatedAt;
+  return max;
+}
+
 // ─── 参考文档上传（REQ-20261118-001）────────────────────
 
 /** 单次上传文件数上限（需求 D5：选择即限制，不截断） */
@@ -1465,6 +1478,13 @@ export async function handleGovernanceRoutes(
         const b = await body();
         const scope = scopeFromBody(b);
         const outcome = await deleteEvent(scope, { event: id, docAction: str(b.docAction) as 'wiki' | 'trash' | undefined });
+        /*
+         * 清掉进程内「已结束分析」登记（2026-11-25）：事件删掉后列表行随之消失，但侧栏
+         * 「事件」红点读的正是这份缓存 —— 不清它，那条会一直算「有一份没看过的结论」，
+         * 而事件已不存在、点不进任何地方，红点就再也灭不掉。
+         * 与「重置分析」（`DELETE .../analysis`）分支同口径。
+         */
+        forgetFinishedAnalysis(scope, id);
         return sendJson(res, 200, { ...outcome, ok: true, scope });
       }
 
@@ -2203,7 +2223,7 @@ export async function handleGovernanceRoutes(
 
     if (segs[0] === 'counts' && method === 'GET') {
       const targets = readTargets(str(q.get('scope')));
-      const sum = { docs: 0, eventsOpen: 0, eventsClosed: 0, trash: 0, pendingIndex: 0 };
+      const sum = { docs: 0, eventsOpen: 0, eventsClosed: 0, trash: 0, pendingIndex: 0, eventsMaxUpdatedAt: 0 };
 
       // 视图分支：逐成员累加。侧栏 badge 与分类页头部同源，两处口径不能各算一套。
       if (targets.view) {
@@ -2218,6 +2238,12 @@ export async function handleGovernanceRoutes(
               docs,
               eventsOpen: events.filter((e) => e.closedAt === null).length,
               eventsClosed: events.filter((e) => e.closedAt !== null).length,
+              /**
+               * 最近一次事件改动的时间戳（2026-11-25）：侧栏「事件」红点的判据。
+               * 与 `eventsOpen` 同一批 `readAllEvents` 结果上算，**零额外磁盘 I/O**；
+               * 视图取各成员最大值 —— 「有没有新动态」是聚合问题，求和没有意义。
+               */
+              eventsMaxUpdatedAt: maxUpdatedAt(events),
               trash: listTrash(member).total,
               pendingIndex: pendingCount(member),
             };
@@ -2225,6 +2251,7 @@ export async function handleGovernanceRoutes(
             sum.docs += row.docs;
             sum.eventsOpen += row.eventsOpen;
             sum.eventsClosed += row.eventsClosed;
+            sum.eventsMaxUpdatedAt = Math.max(sum.eventsMaxUpdatedAt, row.eventsMaxUpdatedAt);
             sum.trash += row.trash;
             sum.pendingIndex += row.pendingIndex;
           } catch (err) {
@@ -2254,6 +2281,8 @@ export async function handleGovernanceRoutes(
         docs,
         eventsOpen: events.filter((e) => e.closedAt === null).length,
         eventsClosed: events.filter((e) => e.closedAt !== null).length,
+        // 与视图分支同口径（见上方注释）：侧栏红点判据，业务上「最近改动」
+        eventsMaxUpdatedAt: maxUpdatedAt(events),
         trash: listTrash(scope).total,
         pendingIndex: pendingCount(scope),
       });

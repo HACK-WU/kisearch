@@ -12,6 +12,7 @@
 import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -152,6 +153,41 @@ describe('治理页视图聚合', { timeout: 120_000 }, () => {
     assert.equal(body.scope, A);
     assert.equal(body.docs, 1);
     assert.equal(typeof body.pendingIndex, 'number');
+  });
+
+  /**
+   * 侧栏「事件」红点的判据字段（2026-11-25）。
+   *
+   * 关键在**视图取 max 而不是求和**：求和得到的数无法与任何时间点比较，
+   * 一旦写成 sum，「有没有新动态」会永远成立（红点再也不灭）。
+   * 用法与事件文件的最小字段见 `src/lib/events/store.ts::readAllEvents` 的校验（id / stageKey）。
+   */
+  it('事件红点：counts 的 eventsMaxUpdatedAt 单库取本库、视图取各成员最大值', async () => {
+    const dirA = path.join(getKbDir(A), '.events');
+    const dirB = path.join(getKbDir(B), '.events');
+    fs.mkdirSync(dirA, { recursive: true });
+    fs.mkdirSync(dirB, { recursive: true });
+    const atA = 1_700_000_000_000;
+    const atB = 1_700_000_005_000;
+    const record = (id: string, updatedAt: number): string => JSON.stringify({
+      version: 1, id, title: '红点用例', description: '', typeId: 'et_1',
+      stageIndex: 0, stageKey: '已排期', closedAt: null, revision: 1, createdAt: updatedAt, updatedAt,
+    });
+    // `readAllEvents` 跳过 `_` 开头的文件，这里用正常文件名并在 finally 里清掉，避免污染其它用例
+    const fileA = path.join(dirA, 'evt_notice_a.json');
+    const fileB = path.join(dirB, 'evt_notice_b.json');
+    fs.writeFileSync(fileA, record('evt_notice_a', atA));
+    fs.writeFileSync(fileB, record('evt_notice_b', atB));
+    try {
+      const single = await getJson(base, `/api/governance/counts?scope=${A}`);
+      assert.equal(single.body.eventsMaxUpdatedAt, atA, '单库必须返回本库最近一次改动');
+
+      const view = await getJson(base, `/api/governance/counts?scope=${VIEW}`);
+      assert.equal(view.body.eventsMaxUpdatedAt, atB, '视图必须取各成员最大值（sum 会让红点永不熄灭）');
+    } finally {
+      fs.rmSync(fileA, { force: true });
+      fs.rmSync(fileB, { force: true });
+    }
   });
 
   it('视图 /trash：合并条目 + settingsByScope，且不返回单一 settings', async () => {
