@@ -2,7 +2,7 @@
  * hooks.ts —— TanStack Query 数据获取 hooks
  */
 
-import { useQuery } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import {
   getDocList, fetchGroupDocsAll, getHealth, getDataSourceList, getDataSourceDetail, getHealthz, getAtlasStatus,
   type DocListResponse, type HealthResponse, type DataSourceListResponse, type DataSourceDetailResponse,
@@ -197,24 +197,104 @@ export function useVectorDimensionStatus(scope: string) {
 }
 
 /**
- * 当前 scope 的图集（知识地图）状态（REQ-20261120-003）。
+ * 图集状态的共享查询选项（单库目标与视图逐成员目标共用同一份配置）。
  *
- * ★ **两个消费方共用同一 queryKey**：`AtlasPage` 用它决定「空态 / 图集 / 报错」三态，
- *   顶栏动作 `AtlasHeaderActions` 用它决定按钮文案（上传 / 重新上传）以及是否显示「卸载」。
- *   于是同一时刻只发一个请求；上传或卸载成功后 invalidate 这一条，两处同时换到新状态
- *   —— 不需要额外的「页面收到了吗」消息通道。
+ * ★ 为什么抽工厂：同一个 queryKey 若被不同选项注册，react-query 会各按各自的 staleTime /
+ *   retry 生效 —— 单库路径与视图路径的表现就不一致（一个自动重试、一个不重试）。
+ * ★ 唯一消费方是 `useAtlasTargets`，但页面与顶栏都经它取数，所以「同一条配置」
+ *   等价于「两处行为一致」。
  * ★ `retry: false`：`/api/atlas/status` 的失败态各有文案（401 会话过期 / 403 无权看这个库 /
  *   服务不可达），自动重试会把错误页拖成一直转圈。
  * ★ 不跟窗口聚焦重取：图集是**部署物**，不是转瞬即变的数据。
  */
-export function useAtlasStatus(scope: string) {
-  return useQuery<AtlasStatusResponse>({
-    queryKey: ['atlasStatus', scope],
+function atlasStatusOptions(scope: string) {
+  return {
+    queryKey: ['atlasStatus', scope] as const,
     queryFn: () => getAtlasStatus(scope),
     staleTime: 0,
     refetchOnWindowFocus: false,
     retry: false,
+  };
+}
+
+/** `useAtlasTargets` 的一项 */
+export interface AtlasTarget {
+  scope: string;
+  status?: AtlasStatusResponse;
+  exists: boolean;
+  uploadedAt?: string;
+  isPending: boolean;
+  isError: boolean;
+  error: (Error & { status?: number }) | null;
+}
+
+export interface AtlasTargets {
+  /** scopeList 是否已就绪。未就绪时**不能**判分支，否则会先按单库查视图名、闪一次空态 */
+  ready: boolean;
+  isView: boolean;
+  /** 视图定义的成员总数（含库目录已缺失的成员） */
+  memberCount: number;
+  /** 待查的库：视图 = 成员库（排除 missing），单库 = `[scope]` */
+  targets: AtlasTarget[];
+  /** 任一目标还在查 */
+  isPending: boolean;
+}
+
+/**
+ * 知识地图的取数目标（视图感知）。
+ *
+ * 背景（2026-11-25 用户拍板）：图集是整幅 HTML 画布，多库合并不了，也不给视图单独装一份
+ * （`/open/v1/atlas/*` 显式拒绝视图名）。所以视图下的正确做法是**从成员库里挑一份来看**：
+ * 只配了一个就直接出图、不摆切换器；两个以上才需要切。
+ *
+ * ★ 单库：一个目标，key 仍是 `['atlasStatus', scope]` —— 与改造前完全一致，
+ *   于是从视图切到某个成员库时能直接命中视图路径留下的缓存。
+ * ★ 视图：逐成员库查。成员数 2-3 个，服务端只是读本机 `meta.json`，并发无压力；
+ *   不做后端聚合是为了让后端零改动（成员清单前端 `scopeList` 已有）。
+ * ★ `scopeList` 未就绪时**一个请求都不发**：否则会先拿视图名当库名查一次、
+ *   返回 `exists:false` → 页面闪一次「还没有知识地图」再切到正确形态。
+ * ★ 权限：`filterAuthorizedViews` 要求「视图名 ∧ 全部成员」都已授权才列出视图，
+ *   所以能列出该视图 ⇒ 成员名全在授权集合 ⇒ 逐成员请求必放行（服务端 `scopeAllowed`）。
+ */
+export function useAtlasTargets(scope: string): AtlasTargets {
+  const list = useScopeList();
+  const view = (list.data?.views ?? []).find((item) => item.view === scope);
+  const isView = view !== undefined;
+  const missing = new Set(view?.missing ?? []);
+  /**
+   * 去重：`views.json` 的 members 由 CLI 写入，`--members a,a` 这类手误会产生重复项。
+   * 不去重会让 `useQueries` 对同一 scope 建两条 query（key 相同 → 只发一个请求，
+   * 但 `targets` 会出现两个同名项、切换器里也重复一行）。
+   */
+  const names = list.isPending
+    ? []
+    : isView
+      ? [...new Set(view?.members ?? [])].filter((name) => !missing.has(name))
+      : [scope];
+
+  const results = useQueries({
+    queries: names.map((name) => atlasStatusOptions(name)),
   });
+  const targets = names.map((name, index): AtlasTarget => {
+    const result = results[index];
+    return {
+      scope: name,
+      status: result?.data,
+      exists: result?.data?.exists === true,
+      uploadedAt: result?.data?.uploadedAt,
+      isPending: result?.isPending === true,
+      isError: result?.isError === true,
+      error: (result?.error as (Error & { status?: number }) | null | undefined) ?? null,
+    };
+  });
+
+  return {
+    ready: !list.isPending,
+    isView,
+    memberCount: isView ? (view?.members ?? []).length : 1,
+    targets,
+    isPending: targets.some((item) => item.isPending),
+  };
 }
 
 /**

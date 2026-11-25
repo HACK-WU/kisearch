@@ -147,3 +147,73 @@
 .atlas-page > .atlas-hint {
   margin-block: auto;
 }
+
+/* ── 顶栏「成员库切换」：只在视图下、且 ≥2 个成员装了图集时出现 ─────────────────
+   皮肤复用顶栏 action（`.ki-topbar__chat-toggle`：32px 高、与「AI 对话」等高），
+   但**不能**跟着它在 ≤1100px 收成 32px 纯图标 —— 那会丢掉「正在看哪个库」这个唯一信息。
+   窄屏改为「图标 + 首字母 + ▾」，全名进 title。 */
+.atlas-switch { position: relative; }
+/* ⚠️ 双类选择器不是啰嗦：`.ki-topbar__chat-toggle` 与本类**特异性相同**（都是单类），
+   胜负就取决于 CSS 打包顺序 —— ki.css 由 App.tsx 全局导入、本文件挂在页面 chunk 上，
+   顺序在生产构建里不保证。提一级特异性后，与加载顺序无关。 */
+.ki-topbar__chat-toggle.atlas-switch__button { gap: 6px; }
+.atlas-switch__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+.atlas-switch__initial { display: none; font-variant-numeric: tabular-nums; }
+.atlas-switch__caret { font-size: 10px; line-height: 1; opacity: 0.7; }
+.atlas-switch__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 120;
+  min-width: 240px;
+  max-width: calc(100vw - 24px);
+  padding: 5px;
+  border: 1px solid var(--ki-color-border);
+  border-radius: var(--ki-radius-sm);
+  background: var(--ki-color-surface);
+  box-shadow: var(--ki-shadow-2);
+}
+.atlas-switch__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--ki-color-text);
+  font: inherit;
+  font-size: var(--ki-font-size-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.atlas-switch__item:hover,
+.atlas-switch__item--active {
+  background: color-mix(in srgb, var(--ki-color-primary) 10%, transparent);
+  color: var(--ki-color-primary);
+}
+.atlas-switch__item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.atlas-switch__note {
+  margin: 4px 2px 2px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--ki-color-border);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ki-color-text-muted);
+}
+
+/* 窄屏：全名让位给首字母。⚠️ 必须单独写 width / padding，覆盖
+   `.ki-topbar__chat-toggle` 的 `width: 32px; padding: 0`（ki.css:456-459）——
+   那条规则会把「图标 + 首字母 + ▾」压成一条缝。 */
+@media (max-width: 1100px) {
+  .ki-topbar__chat-toggle.atlas-switch__button { width: auto; padding: 0 8px; }
+  .atlas-switch__name { display: none; }
+  .atlas-switch__initial { display: inline; }
+}

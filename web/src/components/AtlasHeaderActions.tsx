@@ -6,7 +6,7 @@
  * （「基于 master @ 071afab 生成 · …」）说的是同一件事，页面里等于同一句话说两遍；
  * 动作上移后页面只剩图集本体，纵向上还省掉一整条。
  *
- * ★ 状态走共享缓存 `['atlasStatus', scope]`（lib/hooks 的 `useAtlasStatus`）：上传/卸载成功后
+ * ★ 状态走共享缓存 `['atlasStatus', <库名>]`（lib/hooks 的 `useAtlasTargets`）：上传/卸载成功后
  *   invalidate 一次，`AtlasPage` 那边自动换成新图集 —— 不需要额外的页面间消息通道。
  * ★ 皮肤复用顶栏 action（`ki-topbar__chat-toggle`）：与「AI 对话」「AI 设置」等高同为 32px，
  *   ≤1100px 断点会跟着收成图标按钮（label 在 `.ki-topbar__chat-label` 里）。
@@ -18,12 +18,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import '@/styles/atlas.css';
-import { useAtlasStatus } from '@/lib/hooks';
+import { useAtlasTargets } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
 import { deleteAtlasPackage, uploadAtlasPackage } from '@/api/httpApi';
 import { Icon } from '@/components/icons';
+import { atlasMemberNote, resolveAtlasView, toAtlasProbes } from '@/lib/atlasTargets';
 
 /** 上传弹窗状态：同一时刻只有一个动作，用单对象表达比多个 useState 更好守 */
 interface UploadState {
@@ -150,12 +152,93 @@ function AtlasDialog({
   );
 }
 
+/**
+ * 顶栏「成员库切换」：只在**视图**下、且 ≥2 个成员装了图集时出现（0/1 个时页面直出，
+ * 摆一个只有一项的下拉是纯噪音）。
+ *
+ * 为什么不复用全局 scope 选择器：那个换的是「看哪个库 / 视图」（会连带换掉浏览页、
+ * 检索页的上下文），这里换的是「视图内看哪个成员库的图集」，范围小一层 —— 混用会让人
+ * 以为自己切了知识库。选中态写 URL `?member=`（replace 不进历史），刷新与分享都停在同一份。
+ *
+ * ★ 只读账号也要能切（读操作）：本组件**不判** `knowledge.write`，上传/卸载才判。
+ */
+function AtlasMemberSwitch({ members, selected, note, onPick }: {
+  members: string[];
+  selected: string;
+  note: string | null;
+  onPick: (member: string) => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * 点外部收起：必须用 `mousedown`（与 ScopeSelect 同一坑）——用 `click` 时
+   * 面板内的按钮会先触发重渲染，原节点脱离 DOM，`contains` 判 false 导致"刚点就关"。
+   */
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDown = (event: MouseEvent): void => {
+      const target = event.target as Node | null;
+      if (!target || !target.isConnected) return;
+      if (rootRef.current && !rootRef.current.contains(target)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  return (
+    <div className="atlas-switch" ref={rootRef}>
+      <button
+        type="button"
+        className="ki-topbar__chat-toggle atlas-switch__button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        title={`当前查看「${selected}」的知识地图；本视图共 ${members.length} 个成员库已配置`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Icon name="map" />
+        <span className="ki-topbar__chat-label atlas-switch__name">{selected}</span>
+        {/* 窄屏只留首字母：≤1100px 时全名会挤掉「AI 对话」等动作（见 atlas.css 断点） */}
+        <span className="atlas-switch__initial" aria-hidden="true">{selected.slice(0, 1).toUpperCase()}</span>
+        <span className="atlas-switch__caret" aria-hidden="true">▾</span>
+      </button>
+      {open ? (
+        <div className="atlas-switch__panel" role="listbox" aria-label="选择成员库的知识地图">
+          {members.map((member) => (
+            <button
+              key={member}
+              type="button"
+              role="option"
+              aria-selected={member === selected}
+              className={`atlas-switch__item${member === selected ? ' atlas-switch__item--active' : ''}`}
+              onClick={() => { onPick(member); setOpen(false); }}
+            >
+              <span className="atlas-switch__item-name">{member}</span>
+              {member === selected ? <Icon name="check" className="ki-icon ki-icon--sm" /> : null}
+            </button>
+          ))}
+          {note ? <p className="atlas-switch__note">{note}</p> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function AtlasHeaderActions(): JSX.Element {
   const scope = useScopeValue();
   const { can } = useAuth();
   const queryClient = useQueryClient();
-  const status = useAtlasStatus(scope);
-  const exists = status.data?.exists === true;
+  const targets = useAtlasTargets(scope);
+  const [params, setParams] = useSearchParams();
   const [upload, setUpload] = useState<UploadState | null>(null);
   /**
    * 卸载确认：替换原生 `window.confirm`（样式与全站不一致）。
@@ -181,11 +264,49 @@ export function AtlasHeaderActions(): JSX.Element {
    * 因此前端不拦 = 真的给了入口。
    */
   const canWrite = can('knowledge.write');
+
+  /**
+   * 视图分支必须在 `canWrite` **之前**：切换成员是**读**操作，只读账号也要能切；
+   * 上传 / 卸载才是写操作（单库分支才判）。
+   *
+   * 成员状态还在读时不摆：先短后长会让顶栏抖一下，也让「直出」看起来像「本来有个切换器」。
+   */
+  if (targets.isView) {
+    if (!targets.ready || targets.isPending) return <></>;
+    const shape = resolveAtlasView(toAtlasProbes(targets.targets), params.get('member'));
+    /**
+     * 0 份不摆；1 份且无读取失败也不摆（页面直出，摆一个只有一项的下拉是纯噪音，用户拍板）。
+     *
+     * 但「1 份 + 有成员读取失败」要摆：视图 [A 有图集, B 读失败] ⇒ 直出 A，若不摆，
+     * B 的失败就**没有任何地方能看到**，用户会把「没读到」当成「没装」（R5 正是要防这个）。
+     * members 为 0 时不摆 —— 那时页面已经整幅是错误卡，顶栏再摆个空标签只是噪音。
+     */
+    if (shape.members.length === 0) return <></>;
+    if (shape.members.length === 1 && shape.failed.length === 0) return <></>;
+    const selected = shape.selected ?? shape.members[0] ?? '';
+    return (
+      <AtlasMemberSwitch
+        members={shape.members}
+        selected={selected}
+        note={atlasMemberNote(shape)}
+        onPick={(member) => {
+          setParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.set('member', member);
+            return next;
+          }, { replace: true });
+        }}
+      />
+    );
+  }
+
   /**
    * 状态读不出来时不摆动作：此时页面显示的是「无法读取图集状态」错误卡片，
    * 顶栏却顶着一个「上传图集包」，会被读成「这个库没有图集」。
    */
-  const statusUnavailable = status.isError;
+  const single = targets.targets[0];
+  const exists = single?.exists === true;
+  const statusUnavailable = single?.isError === true;
   if (!canWrite || statusUnavailable) return <></>;
 
   const refresh = (): void => {
