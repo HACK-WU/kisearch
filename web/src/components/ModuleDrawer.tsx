@@ -14,18 +14,19 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { MarkdownPreview } from '@/components/MarkdownPreview';
 import { ReaderLinkComposer, type ReaderLinkSelection } from '@/components/ReaderLinkComposer';
 import { DocMoveDialog } from '@/components/DocMoveDialog';
 import { DocDeleteDialog } from '@/components/DocDeleteDialog';
-import type { DeleteDocumentResponse, MoveDocumentResponse } from '@/api/httpApi';
+import type { DeleteDocumentResponse, DocTrashHit, MoveDocumentResponse } from '@/api/httpApi';
 import { anchorBlock, findAnchorBlocks } from '@/lib/kiLinks';
 // 根散文件的 group 是内部保留键（`__root__`）：路径段位置整段省略（连分隔符一起）
 import { groupPathSegment } from '@/lib/groupTree';
 import { selectHighlightTerms } from '@/lib/searchText';
 import { useDocumentEditor } from '@/lib/documentEditorContext';
 import { useScopeReadonly, useViewMemberReadonly } from '@/lib/hooks';
-import { useScopeValue } from '@/lib/scopeContext';
+import { useScope, useScopeValue } from '@/lib/scopeContext';
 import { SCOPE_READONLY_BLOCKED_HINT } from '@/lib/scopeReadonly';
 import {
   DOC_FIND_DEBOUNCE_MS,
@@ -41,6 +42,20 @@ import {
   pickFindSeed,
   stepFindIndex,
 } from '@/lib/docFind';
+
+/**
+ * 回收站条目的可恢复截止日（本地时区）。
+ *
+ * 只到天：清理按天跑，写成「还有 6 天 3 小时」反而暗示了不存在的精度；
+ * 时间戳异常时退化成「到期」，不抛错也不显示 `NaN`。
+ */
+function formatTrashDeadline(expiresAt: number): string {
+  const date = new Date(expiresAt);
+  if (Number.isNaN(date.getTime())) return '条目到期';
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day} 前可恢复`;
+}
 
 /** 头部导航箭头（描边 SVG，替代此前易显粗糙的文本箭头 → / ←） */
 const ICON_DRAWER_COLLAPSE = (
@@ -530,6 +545,20 @@ export function ModuleDrawer({
 }: ModuleDrawerProps): JSX.Element {
   const [content, setContent] = useState<string | null>(initialContent ?? null);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 404 且命中央回收站时的落点（2026-11-25）。
+   *
+   * 原文案「Group "x" 未匹配到有效路径」把「路径写错」和「文档被删」说成同一句话，
+   * 后者只能靠恢复解决 —— 有这份信息才能把标题、期限与出口（回收站）说清楚。
+   * 后端只在 404 下发，其余错误恒为 null。
+   */
+  const [errorTrash, setErrorTrash] = useState<DocTrashHit | null>(null);
+  /**
+   * 回收站页跟随全局 scope（`TrashPage` 用 `useScopeValue()`），
+   * 所以跳转前先把 scope 落到文档原本所在的库，用户落地就在对的那个库上。
+   */
+  const { setScope: setGlobalScope } = useScope();
+  const navigate = useNavigate();
   const showingFallback = content === null && error !== null && Boolean(fallbackContent);
   const displayedContent = content ?? (showingFallback ? fallbackContent ?? null : null);
   const [anchorWarning, setAnchorWarning] = useState<string | null>(null);
@@ -837,6 +866,7 @@ export function ModuleDrawer({
     }
     setLoading(true);
     setError(null);
+    setErrorTrash(null);
     fetcher(scope, group, module, member)
       .then((res) => {
         if (res.content) setContent(res.content);
@@ -847,15 +877,37 @@ export function ModuleDrawer({
           setError(details || '未找到原文内容');
         }
       })
-      .catch((e: Error) => setError(e.message))
+      /*
+       * `body` 由 `getDocContent` 挂在 Error 上（其余 fetcher 可能没有）：
+       * 有 `trash` 就说明这篇已进回收站，正文区要换成可恢复的提示而不是「重试」。
+       */
+      .catch((e: Error & { body?: { trash?: DocTrashHit } }) => {
+        setError(e.message);
+        setErrorTrash(e.body?.trash ?? null);
+      })
       .finally(() => setLoading(false));
   }, [scope, module, group, member, content, fetcher, loadAttempt]);
 
   const retryLoad = useCallback((): void => {
     setContent(null);
     setError(null);
+    setErrorTrash(null);
     setLoadAttempt((attempt) => attempt + 1);
   }, []);
+
+  /**
+   * 跳到回收站（文档已被删除时唯一的出口）。
+   *
+   * 用路由跳转而不是 `location.assign`：`TrashPage` 读的是 `useScopeValue()`（context），
+   * `setGlobalScope` 已经把它改成文档原本所在的库，SPA 内跳转即可落到正确的库；
+   * 整页重载既丢当前页面状态，也把改造点变成了硬编码绝对路径
+   * （部署带 base 前缀时会 404，且与本仓其余 6 个页面清一色用 `useNavigate` 不一致）。
+   */
+  const goTrash = useCallback((): void => {
+    if (!errorTrash) return;
+    setGlobalScope(errorTrash.scope);
+    navigate('/governance/trash');
+  }, [errorTrash, setGlobalScope, navigate]);
 
   /**
    * 生效查找词：用户输入优先（findApplied），否则回落到打开文档时带入的 highlightQuery
@@ -1432,11 +1484,27 @@ export function ModuleDrawer({
       ) : error && displayedContent === null ? (
         <div className="ki-drawer__status">
           <div className="ki-drawer__status-icon">⚠</div>
-          <h3>加载失败</h3>
+          {/* 已删除不是"加载失败"：改标题 + 给期限 + 给出口，用户才知道该做什么 */}
+          <h3>{errorTrash ? '该文档已被删除' : '加载失败'}</h3>
           <p>{error}</p>
-          <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={retryLoad}>
-            重试
-          </button>
+          {errorTrash && (
+            <p className="ki-cell-sub">
+              {errorTrash.scope}
+              {errorTrash.group && errorTrash.group !== '__root__' ? ` · ${errorTrash.group}` : ''}
+              {' · '}
+              {formatTrashDeadline(errorTrash.expiresAt)}
+            </p>
+          )}
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'center', flexWrap: 'wrap' }}>
+            {errorTrash && (
+              <button className="ki-btn ki-btn--primary ki-btn--small" type="button" onClick={goTrash}>
+                前往回收站
+              </button>
+            )}
+            <button className="ki-btn ki-btn--secondary ki-btn--small" type="button" onClick={retryLoad}>
+              重试
+            </button>
+          </div>
         </div>
       ) : displayedContent === null ? (
         <div className="ki-drawer__status">

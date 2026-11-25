@@ -458,6 +458,24 @@ export async function getDocList(
   return req<DocListResponse>(`/api/doc/list?${params.toString()}`);
 }
 
+/**
+ * 文档在回收站里的落点（`/api/doc/get` 404 且命中央回收站时下发）。
+ *
+ * `kind==='doc'` 是这篇被单独删除，`'group'` 是整组被删（该篇随之进站）。
+ * `expiresAt` 之后条目会被物理清理，届时再也恢复不了 —— 页面必须显示这个期限。
+ */
+export interface DocTrashHit {
+  /** 文档原本所在的库；视图模式下是**成员库**，不是视图名 */
+  scope: string;
+  kind: 'doc' | 'group';
+  group: string;
+  name: string;
+  reason: 'manual' | 'temp-expired' | 'event-closed' | 'event-expired';
+  deletedAt: number;
+  expiresAt: number;
+  dirName: string;
+}
+
 /** GET /api/doc/get 返回：单篇文档正文（浏览页阅读器） */
 export interface DocContentResponse {
   ok?: boolean;
@@ -467,6 +485,13 @@ export interface DocContentResponse {
   totalLines?: number;
   error?: string;
   hint?: string;
+  /**
+   * `DOC_IN_TRASH` = 这篇文档已经进回收站（不是路径写错、也不是没权限）。
+   *
+   * 后端只在 404 时才可能给：正常读取不带该字段。
+   */
+  code?: string;
+  trash?: DocTrashHit;
 }
 
 /**
@@ -498,7 +523,16 @@ export async function getDocContent(
   } catch (err) {
     const body = (err as { body?: DocContentResponse }).body;
     if (body && (body.error || body.hint)) {
-      throw new Error([body.error, body.hint].filter(Boolean).join('；'));
+      /*
+       * `body` 必须挂到抛出的 Error 上：404 有两种完全不同的成因 ——
+       * 路径/名称不对（改条件重试）与被删除（只能去回收站恢复）。
+       * 后端用 `code` / `trash` 区分，只把 message 抛上去的话，调用方就只剩一句
+       * 「未找到」，又会退回到"看不出该做什么"的状态（2026-11-25）。
+       */
+      throw Object.assign(new Error([body.error, body.hint].filter(Boolean).join('；')), {
+        status: (err as { status?: number }).status,
+        body,
+      });
     }
     throw err;
   }

@@ -85,6 +85,8 @@ import { runHealthCheck, healthCheckWorstCaseMs } from './health-check.js';
 import { getRelationsCachePath, getAssetsDir, getKbDir } from './scope.js';
 // 附件寻址的回收站分支（2026-11-23）：回收站条目自带 group 级 assets 副本
 import { getTrashRoot, isSafeTrashDirName } from './trash-store.js';
+// 读正文 404 的「已删除」判据（2026-11-25）：路径写错与文档被删的原始文案无法区分
+import { buildDocTrashHint, findDocInTrash, type DocTrashHit } from './doc-trash-hint.js';
 import {
   ASSET_EXTENSIONS,
   DEFAULT_MAX_ASSET_SIZE,
@@ -2496,6 +2498,14 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
     sendJson(res, 400, { ok: false, error: '缺少 group/relation 参数' });
     return;
   }
+  /**
+   * 回收站判定用的键：必须用归一后的值。
+   *
+   * `url.searchParams` 里的 group/relation 可能带首尾空格，而 `.trash/**\/meta.json`
+   * 里的 `group` / `name` 是写入时归一过的 —— 拿原始值比对会漏判（表现为"明明在回收站
+   * 却仍报路径未匹配"）。只用于回收站匹配，不改 `executeGetModuleInfoLocal` 的入参。
+   */
+  const trashKey = { group: group.trim(), relation: relation.trim() };
 
   const config = loadConfig();
   let targets;
@@ -2549,13 +2559,35 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
     // 用户会以为"整个视图里没有这篇文档"（其实是没查）。
     const skippedFields = targets.skipped.length > 0 ? { skipped: targets.skipped } : {};
     if (hits.length === 0) {
-      sendJson(res, 404, {
-        ok: false,
-        view: targets.views[0],
-        error: `在视图 ${targets.views[0]} 的 ${candidates.length} 个成员库中均未找到该文档`,
-        searched: candidates,
-        ...skippedFields,
-      });
+      /*
+       * 成员库都没命中 → 再问一次回收站：被删掉的文档同样"查不到"，
+       * 但补救途径完全不同（去回收站恢复，而不是改路径 / 怀疑权限）。
+       * 命中条目的 `scope` 即"它原来在哪个库"。
+       *
+       * 用循环而不是 `.map().find()`：`findDocInTrash` 内部要遍历整个 `.trash` 目录，
+       * `.map()` 会先把**每个**成员库都扫一遍才让 `.find` 挑结果 —— 视图有 20 个成员
+       * 就是 20 次目录遍历，哪怕第一个就命中。这里命中即停。
+       */
+      let trashHit: DocTrashHit | null = null;
+      for (const member of candidates) {
+        trashHit = findDocInTrash(member, trashKey.group, trashKey.relation);
+        if (trashHit) break;
+      }
+      sendJson(res, 404, trashHit
+        ? {
+          ok: false,
+          view: targets.views[0],
+          ...buildDocTrashHint(trashHit),
+          searched: candidates,
+          ...skippedFields,
+        }
+        : {
+          ok: false,
+          view: targets.views[0],
+          error: `在视图 ${targets.views[0]} 的 ${candidates.length} 个成员库中均未找到该文档`,
+          searched: candidates,
+          ...skippedFields,
+        });
       return;
     }
     sendJson(res, 409, {
@@ -2571,7 +2603,18 @@ async function handleDocGet(res: http.ServerResponse, url: URL): Promise<void> {
 
   const scope = resolveScope(config, scopeRaw);
   const result = await executeGetModuleInfoLocal({ scope, group, relation }, { noVectorFallback: true });
-  sendJson(res, result.ok ? 200 : 404, result);
+  if (result.ok) {
+    sendJson(res, 200, result);
+    return;
+  }
+  /*
+   * 未命中：先判「是不是已经进回收站了」。
+   * 原文案（`Group "x" 未匹配到有效路径`）在「路径写错」与「文档被删」两种场景下完全一样，
+   * 而后者只能靠恢复解决 —— 不点明会被读成视图/权限问题（实测后台任务详情就是这么被误读的）。
+   * 判定只在失败路径执行，正常读正文不额外扫回收站目录。
+   */
+  const trashHit = findDocInTrash(scope, trashKey.group, trashKey.relation);
+  sendJson(res, 404, trashHit ? { ...result, ...buildDocTrashHint(trashHit) } : result);
 }
 
 // ─── GET /api/doc/list ────────────────────────────────
