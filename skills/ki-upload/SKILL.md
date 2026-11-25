@@ -22,6 +22,7 @@ description: 把本地文档或整个目录上传到远端 ki 并等待导入完
 | 场景 | 通道 | 说明 |
 |------|------|------|
 | 本机文件 → 远端 ki（**本 skill**） | `/open/v1/import/upload` | 只依赖 curl 级能力，跨机可用，自动切分/向量化 |
+| 本机文件 → 远端 ki（已装 `ki-client`） | `ki-client upload` / `upload-dir` | 有**文件级增量**与自动分批，还能顺带取件 / 取正文 / 部署图集；见 `use_skill("ki-client")` |
 | 单条知识写入（已在上下文里的正文） | MCP `ki_sync_relation` | 逐条写，适合短内容；**不做 chunk 切分**，长文档别用 |
 | 文件与 ki 同机 | `ki import --source <dir>` | 最快，但前提是同一台机器 |
 | 人在浏览器前 | Web 导入页 | 需要人工操作，不可自动化 |
