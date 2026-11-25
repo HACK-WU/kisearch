@@ -49,5 +49,23 @@ web/dist/
 # ---- 本地临时产物（构建残留 / 截图 / 调试输出，不进版本控制）----
 temp/
 
-AGENTS.md 
+AGENTS.md
 __pycache__/
+
+# ---- Agent / IDE 工具目录（本地工作区，不进版本控制）----
+.claude/
+.codebuddy/
+.qoder/
+.dsh-browser-demo/
+
+# ---- 本地同步与归档产物 ----
+.codewiki-sync.json
+archive.md
+review/
+
+# ---- 需求 / 解决方案工作区（与已忽略的 CodeWikiHub/ 同口径：本地沉淀）----
+.requirements/
+.solutions/
+
+# ---- 与 AGENTS.md 同类的本地说明 ----
+CLAUDE.md
