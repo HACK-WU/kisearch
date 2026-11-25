@@ -372,6 +372,14 @@ export interface RefSearchResultDto {
   query: string;
   /** 本次实际参与检索的单元（库名或视图名），顺序 = [事件库, ...extraScopes] */
   targets?: string[];
+  /**
+   * 本次**实际生效**过的 scope（2026-11-25，与 `ki_recall` 的 `scopesUsed` 同口径）。
+   *
+   * `targets` 只是默认范围；模型按问题换库/换视图后，真正查过的库在这里（面板据此展示）。
+   * 运行期由 `find-service` 透传 `DeepFindSearchResult.scopesUsed`，此前只在服务层
+   * `RefSearchResult` 与前端契约副本里声明，本 DTO 漏了 —— 契约与响应体不一致（#99）。
+   */
+  scopesUsed?: string[];
   /** 配置里存在但本次被剔除的项（无权限 / 已不存在 / 视图无成员） */
   skippedTargets?: Array<{ name: string; reason: 'forbidden' | 'missing' | 'view-members-changed' }>;
   /** 部分 target 检索失败（其余结果仍有效；全部失败才是 503） */
