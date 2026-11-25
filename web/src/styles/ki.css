@@ -384,6 +384,9 @@ a:hover { text-decoration: underline; }
   .ki-nav-item { justify-content: center; gap: 0; padding: 0; }
   /* 窄轨 gap 为 0：上面那条 `margin-right: -5px` 会把红点压到计数上，这里还原成正常间距 */
   .ki-nav-item__notice { margin-left: 0; margin-right: 0; }
+  /* 计数在 72px 内侧栏会被挤到图标上（2026-11-25 实测：图标 18 + 数字 11 + padding 0，
+     「426」这种三位数直接压在图标右缘）。窄轨只留图标，数字回到展开态看。 */
+  .ki-nav-item__count { display: none; }
   /* 窄轨里组标题被 `display:none`，分组感只能靠留白 + 细分隔线撑住 ——
      否则三组塌成一条 12 项图标长列（原实现即如此，组间关系完全丢失） */
   .ki-sidebar__section + .ki-sidebar__section {

@@ -853,10 +853,15 @@ export function AppShell(): JSX.Element {
           <div className="ki-sidebar__section-head">
             <span className="ki-sidebar__section-label">知识治理</span>
           </div>
+          {/* 三项图标 2026-11-25 用户拍板。原来照「接入与运维」倒序借用 layers / clock / database，
+              与「视图」「后台任务」「数据源」三对全撞 —— 侧栏靠图标做第一层辨识，同形等于逼用户逐字读标签。
+              现状：分类 = sliders（本页管的是「调档」长期/临时，不是目录，folder 会暗示目录树）、
+              事件 = warn（需要跟到底的事）、回收站 = trash（垃圾桶，本次新增图标）。
+              ⚠ 改图标前先看 sidebar-nav-icons.test.mjs：它锁「同一侧栏不重复」+「图标名必须存在于 icons.tsx」。 */}
           {[
-            { to: '/governance/lifecycle', label: '分类', icon: 'layers', count: govCounts?.docs },
-            { to: '/governance/events', label: '事件', icon: 'clock', count: govCounts?.eventsOpen },
-            { to: '/governance/trash', label: '回收站', icon: 'database', count: govCounts?.trash },
+            { to: '/governance/lifecycle', label: '分类', icon: 'sliders', count: govCounts?.docs },
+            { to: '/governance/events', label: '事件', icon: 'warn', count: govCounts?.eventsOpen },
+            { to: '/governance/trash', label: '回收站', icon: 'trash', count: govCounts?.trash },
           ].map((item) => (
             <NavLink
               key={item.to}
