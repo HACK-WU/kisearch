@@ -201,4 +201,3 @@ node dist/cli.js --help
 ## 不在本版范围
 
 - 真机联调（当前全部验证打的是 mock `/open/v1`）
-- 服务端 `ki_get_image` 的物理移除 — 由本仓另立需求，本工具先并行存在

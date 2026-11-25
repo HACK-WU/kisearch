@@ -9,16 +9,23 @@
 import type { Capability } from './capabilities.js';
 
 export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
-  // 读工具（10）
+  // 读工具（11）
   ki_search: 'knowledge.read',
   ki_get_module_info: 'knowledge.read',
   /**
    * 取图（REQ-20261123-008）：读 KB 里的图片字节，与读正文同档。
    *
+   * ★ 2026-11-25：本工具**只存在于内部对话面与分析面**，不再在 `/mcp` 注册
+   *   （取件改由 `ki-client asset get` 承担）。登记项**必须保留** —— chat 的
+   *   `tool-loop` 靠它做 `canUseTool` 过滤，删掉会让模型静默失去看图能力。
+   *   因此它是「chat 有、对外 MCP 无」的唯一工具，`capability-coverage` 测试
+   *   为此单列了例外（`INTERNAL_ONLY_TOOL_NAMES`）。
+   *
    * ⚠️ 本表是**默认拒绝**白名单：新增工具漏登记 ⇒ `canUseTool` 恒 false ⇒
    *    工具被 `tool-loop` 静默过滤，模型只会说"我没有这个工具"，不会报错。
-   *    新增 chat 工具必须同步 5 处：`CHAT_MCP_TOOLS`、`MCP_TOOL_GROUPS`、
-   *    `READ_ONLY_TOOL_NAMES`、本表、`operation-coordinator::READ_MCP_TOOLS`。
+   *    新增 chat 工具必须同步：`CHAT_MCP_TOOLS`、`MCP_TOOL_GROUPS`、本表、
+   *    `operation-coordinator::READ_MCP_TOOLS`；若同时对外暴露，
+   *    还要加 `READ_ONLY_TOOL_NAMES` 并在 `mcp-server-factory` 注册。
    */
   ki_get_image: 'knowledge.read',
   ki_group_list: 'knowledge.read',
@@ -39,7 +46,7 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
    * 故按 `knowledge.read` 而非 `knowledge.ask`（后者是"给答案"的能力）。不进 CHAT_MCP_TOOLS。
    */
   ki_recall: 'knowledge.read',
-  // 写工具（13）
+  // 写工具（11）
   ki_store: 'knowledge.write',
   ki_bulk_store: 'knowledge.write',
   ki_sync_relation: 'knowledge.write',

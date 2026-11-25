@@ -20,7 +20,7 @@ import {
   TOKEN_CAPABILITIES,
 } from '../src/lib/auth/capabilities.js';
 import { CHAT_MCP_TOOLS } from '../src/lib/chat/mcp-tool-registry.js';
-import { READ_ONLY_TOOL_NAMES } from '../src/lib/mcp-tools/tool-access.js';
+import { INTERNAL_ONLY_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from '../src/lib/mcp-tools/tool-access.js';
 import { buildKiMcpServer } from '../src/lib/mcp-server-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
@@ -74,17 +74,31 @@ describe('capability coverage', () => {
      * 用 chat 清单当全集会让"注册了但没登记能力"漏检，也让新增仅主通道工具必然挂测试。
      */
     const registered = registeredToolNames(buildKiMcpServer(null));
+    /*
+     * 口径：能力表 = 主通道已注册 + 仅内部工具。
+     * `INTERNAL_ONLY_TOOL_NAMES`（目前只有 ki_get_image）是 2026-11-25 从 `/mcp` 移除、
+     * 但 chat / 分析面仍需能力登记的例外，见 tool-access.ts 的说明。
+     */
     assert.deepEqual(
       new Set(ALL_TOOL_NAMES),
-      new Set(registered),
-      '能力登记表与主通道实际注册工具集必须一一对应',
+      new Set([...registered, ...INTERNAL_ONLY_TOOL_NAMES]),
+      '能力登记表与「主通道实际注册工具集 + 仅内部工具」必须一一对应',
     );
+    for (const name of INTERNAL_ONLY_TOOL_NAMES) {
+      assert.equal(
+        registered.includes(name), false,
+        `${name} 在 INTERNAL_ONLY_TOOL_NAMES 里却仍被主通道注册（清单已过期）`,
+      );
+    }
 
     const chatNames = CHAT_MCP_TOOLS.map((t) => t.name);
-    // 2026-11-23：新增 ki_get_image（REQ-20261123-008），13 → 14
+    // 2026-11-25：ki_get_image 从 /mcp 移除但保留在 chat，工具数仍为 14
     assert.equal(chatNames.length, 14);
     for (const name of chatNames) {
-      assert.ok(registered.includes(name), `chat 工具未在主通道注册：${name}`);
+      assert.ok(
+        registered.includes(name) || INTERNAL_ONLY_TOOL_NAMES.includes(name),
+        `chat 工具既未在主通道注册、也不在仅内部清单中：${name}`,
+      );
       assert.ok(TOOL_CAPABILITIES[name], `工具未登记：${name}`);
     }
     for (const name of READ_ONLY_TOOL_NAMES) {

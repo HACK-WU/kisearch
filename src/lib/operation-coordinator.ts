@@ -84,6 +84,10 @@ const READ_MCP_TOOLS = new Set<string>([
   /**
    * 取图（REQ-20261123-008）：纯本地文件读，无 embedding、零元数据写。
    * 落 write 串行会让「导入期间看图」排在几十秒之后（与 `ki_get_module_info` 同理）。
+   *
+   * ★ 2026-11-25 起该工具**只在内部对话面存在**（对外 `/mcp` 已移除，
+   *   见 `mcp-tools/tool-access.ts::INTERNAL_ONLY_TOOL_NAMES`）；本行仍必要 ——
+   *   去掉后 chat 的看图调用会被判成 write 车道，排到导入之后。
    */
   'ki_get_image',
   /**

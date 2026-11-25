@@ -10,7 +10,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { registerGroupListTool } from './mcp-tools/group-list.js';
 import { registerGetModuleInfoTool } from './mcp-tools/get-module-info.js';
-import { registerGetImageTool } from './mcp-tools/get-image.js';
 import { registerSyncRelationTool } from './mcp-tools/sync-relation.js';
 import { registerEditRelationTool } from './mcp-tools/edit-relation.js';
 import { registerBulkSyncRelationTool } from './mcp-tools/bulk-sync-relation.js';
@@ -55,16 +54,19 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
     },
     readOnly ? { instructions: READ_ONLY_INSTRUCTIONS } : undefined,
   );
-  // ── 读工具（6 个）：只读会话同样注册 ──
+  // ── 读工具（11 个）：只读会话同样注册 ──
   // ⚠️ 新增读工具时同步加入 mcp-tools/tool-access.ts::READ_ONLY_TOOL_NAMES，
   //    否则只读 Token 看不见它（方向安全，但功能缺失）。
   registerSearchTool(server);
   registerGetModuleInfoTool(server);
-  /**
-   * `ki_get_image`（REQ-20261123-008）：读文档里图片的**实际内容**。
-   * 只读（不改库），但会把图片字节外发给客户端 —— 已在 product 层确认按只读工具处理。
+  /*
+   * `ki_get_image` 已**不在对外 MCP 面注册**（2026-11-25）：
+   * 该通道 2026-11-24 起只回清单与取件链接（MCP 客户端不渲染 image content），
+   * 取件由 `ki-client asset get` 承担，故整个工具从 `/mcp` 移除。
+   * ⚠️ 内部对话面（`chat/mcp-tool-registry.ts`）与事件分析面
+   * （`events/analysis-runner.ts`）的同名工具**仍然存在**且返回真图片 ——
+   * 它们直接调 `asset-image.ts::executeGetImage`，不走本工厂，与本行无关。
    */
-  registerGetImageTool(server);
   registerGroupListTool(server);
   registerScopeListTool(server, authScopes);
   registerViewListTool(server, authScopes);
@@ -82,7 +84,7 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
    * 虽然内部会跑模型，但代价（模型额度 + 内容外发）已由产品确认接受（S-02 D-02-3）。
    */
   registerRecallTool(server, auth?.id ?? 'local');
-  // ── 写工具（13 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
+  // ── 写工具（11 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
   // ⚠️ 新增写工具必须放在本块内，否则会暴露给只读 Token；
   //    tools/call 侧另有一道白名单拦截（mcp-http.ts::findReadOnlyViolation）兜住缓存/构造调用。
   if (!readOnly) {

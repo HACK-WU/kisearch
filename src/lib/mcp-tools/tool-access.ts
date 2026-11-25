@@ -14,6 +14,9 @@
  *   | `SCOPE_LESS_ENUM_TOOL_NAMES` | 参数形状（schema 是否含 scope） | 越权校验跳过 / 调度不占 scope |
  *   | `operation-coordinator.ts::READ_MCP_TOOLS` | 并发（能否与导入长任务并行） | read 通道还是 write 串行 |
  *
+ * 另有 `INTERNAL_ONLY_TOOL_NAMES`（下方）：**不在 `/mcp` 注册**的内部工具，
+ * 与上面三条不同维度（对外暴露面），故单独列，不并入任何一条。
+ *
  * ★ `READ_ONLY_TOOL_NAMES` 与 `READ_MCP_TOOLS` **禁止互相引用**：两者口径不同，
  *   例 `ki_tag_list` 只读（在只读白名单内），但全库扫描、导入期间结果不可信，
  *   故**不在** `READ_MCP_TOOLS`。合并会二选一坏掉：只读 Token 丢失 `ki_tag_list`，
@@ -27,19 +30,21 @@
  */
 
 /**
- * 只读 Token 可见 / 可调的工具名单（**12 个**，均为纯读）。
+ * 只读 Token 可见 / 可调的工具名单（**11 个**，均为纯读）。
  *
  * `ki_ask` 不在其中 —— 对库只读但会产出答案，按模型消耗型准入。
  * `ki_recall` **在**其中（REQ-20261118-004，用户拍板「它本来就是只读」）：
  * 虽然它内部会跑模型，但产出只有文档清单与判断，不写任何数据；
  * 放开后只读 Token 也能触发模型调用与内容外发，该代价已由产品确认。
- * `ki_get_image`（REQ-20261123-008）：读 KB 里的图片字节，同样不写任何数据。
+ *
+ * ★ `ki_get_image` 已**移出**本清单（2026-11-25）：该工具不再在 `/mcp` 注册
+ *   （取件改由 `ki-client asset get` 承担），本清单只描述对外 MCP 面，故不再列它。
+ *   内部对话面仍保留同名工具，其准入走 `auth/tool-permissions.ts` 的 `knowledge.read`。
  */
 export const READ_ONLY_TOOL_NAMES: readonly string[] = [
   'ki_search',
   'ki_recall',
   'ki_get_module_info',
-  'ki_get_image',
   'ki_group_list',
   'ki_scope_list',
   'ki_view_list',
@@ -49,6 +54,22 @@ export const READ_ONLY_TOOL_NAMES: readonly string[] = [
   'ki_event_type_list',
   'ki_event_get',
 ];
+
+/**
+ * 登记在能力表（`auth/tool-permissions.ts`）但**不在对外 `/mcp` 注册**的工具。
+ *
+ * 目前只有 `ki_get_image`：2026-11-24 起该工具已降级为「只回清单 + 取件链接」
+ * （MCP 客户端不渲染 image content），取件由 `ki-client asset get` 承担，
+ * 故 2026-11-25 整体从 `/mcp` 移除。
+ *
+ * **但内部对话面（`chat/mcp-tool-registry.ts`）与事件分析面
+ * （`events/analysis-runner.ts`）的同名工具仍然存在且返回真图片** ——
+ * 它们直接调 `asset-image.ts::executeGetImage`，不经 MCP 工厂，
+ * 服务端进程内的模型循环也用不了本地 CLI。因此能力登记必须保留。
+ *
+ * 用途：`test/capability-coverage.test.ts` 用它对齐「能力表 = /mcp 已注册 + 本清单」。
+ */
+export const INTERNAL_ONLY_TOOL_NAMES: readonly string[] = ['ki_get_image'];
 
 /**
  * 无 `scope` 参数、纯本地枚举的只读工具。

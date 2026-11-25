@@ -1,6 +1,6 @@
 # MCP 工具参考
 
-`ki mcp` 共暴露 **24 个**工具（数量随版本变化，以客户端 `tools/list` 的实际结果为准）。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
+`ki mcp` 共暴露 **23 个**工具（数量随版本变化，以客户端 `tools/list` 的实际结果为准）。除两个无 `scope` 参数的枚举工具（`ki_scope_list` / `ki_view_list`）外，其余工具均接受 `scope`（缺省 `default`；`strict` 模式下必须在授权白名单内）。
 
 > 三个例外：`ki_ask` 的 `scope` **必填**且只接受单个具体知识库（不吃视图名、不吃逗号分隔多库）；`ki_recall` 的 `scope` **同样必填**但接受多个库或知识视图，漏传会直接报错并回可用清单（服务端不设默认库）；`ki_ask` 与全部写工具只在**非只读** Token 会话里注册；`ki_recall` 例外 —— 它虽也会调模型，但产出只有文档清单与判断、不写任何数据，故**只读 Token 也可用**（该取舍由产品确认）。
 
@@ -12,8 +12,7 @@
 |---|---|---|
 | `ki_search` | 语义检索（hybrid / fulltext） | `query`（必填）、`limit`（默认 10，总条数上限）、`tags`（不传=搜全部）、`mode`、`threshold`、`timeout`、`include_original` |
 | `ki_group_list` | Group 树 + Relations，支持 hot/warm/cold/emerging/full 分区与向量兜底 | `groups`（单数别名 `group`）、`subtree`、`mode`（默认 hot）、`hot_count`、`depth`、`auto_fallback` |
-| `ki_get_module_info` | 读取本地 KB 原文；同 Group 批量 ≤10 条；超长文档可分段读取。**返回体带 `images[]` 清单**（正文引用了哪些图、各自能不能取），配合 `ki_get_image` 看图 | `group`（必填）、`relation` 或 `relations[]`（二选一）、`start_line` / `start_char` / `max_chars`（可选，分段读取；不传 = 全文） |
-| `ki_get_image` | 返回文档里图片的**清单与取件地址**（**本工具不再返回图片内容**：多数 MCP 客户端显示不了图片，只会把图片数据当成一长串乱码文本截断）。每张图给两条链接：`apiUrl`（程序用，需带 token）与 `humanUrl`（浏览器直接打开即可看）；不支持的在返回摘要里逐条说明原因 | `group`（必填，与读文档时一致）、`refs[]`（1~3 个，原样传 `images[].ref`） |
+| `ki_get_module_info` | 读取本地 KB 原文；同 Group 批量 ≤10 条；超长文档可分段读取。**返回体带 `images[]` 清单**（正文引用了哪些图、各自能不能取） | `group`（必填）、`relation` 或 `relations[]`（二选一）、`start_line` / `start_char` / `max_chars`（可选，分段读取；不传 = 全文） |
 | `ki_scope_list` | 列出所有 scope 及 KB/向量状态；精确读整篇走「本工具 → `ki_group_list` → `ki_get_module_info`」，只有模糊描述时用 `ki_search`。每条含 `wikiSync { enabled, writableDir, writableFrom, rejectReason? }`（`enabled:true` + `writableDir:null` = 配了但写不进去，如未配置 `wikiSync.sourceDir`）。视图定义读取失败时响应带 `viewsWarning`（此时 `views` 缺省 ≠ 没有视图） | — |
 | `ki_view_list` | 列出知识视图（多个知识库的只读聚合）。默认每条含 `view` / `id` / `members` / `availableCount` / `missing` / **`usableCount`**（真能参与语义检索的成员数）；有成员不可用时给 **`degradedReason`**（如「3 个向量维度不一致（语义检索会跳过）」），维度不一致的库名另列 `dimensionMismatch`。`verbose` 展开 `memberMeta` 与审计字段（健康摘要同样保留）。没有视图、被授权过滤光、视图文件损坏三种"空"分别给 `hint` / `warning` | `verbose` |
 | `ki_tag_list` | 列出 scope 下的 tag 及文档数（只读） | `scope` |
@@ -100,27 +99,8 @@ MCP 不提供 scope / doc 级联删除，也不提供 `--force` 类操作：需�
 
 ## 图片：文档里的截图与示意图
 
-知识库文档正文里的图片（`![](assets/x.png)` 这类）以前只以路径字符串出现，AI 看不到画面内容。现在分两步：
-
-1. **读文档时给清单**：`ki_get_module_info` 的返回体多一个 `images` 数组，每张图带 `ref`（取图时原样传回）、格式、字节数、`supported`（能否取）。
-2. **需要时取件**：调 `ki_get_image`，一次 1~3 张，返回每张图的**取件地址**（不是图片本身，原因见下）。
-
-**为什么不再直接返回图片**
-
-早期版本是把图片数据直接塞进工具返回。服务端这边是对的，但**大多数 MCP 客户端显示不了图片**，只会把这段数据当成超长文本注入并截断 —— 模型拿到的是一串乱码，等于看不到图。所以现在改成给地址，让你或程序自己去取。
-
-**怎么取**
-
-- `humanUrl`：**人**直接粘到浏览器就能看到原图（本机访问免登录；跨机器或走反向代理时需要先登录 Web）。
-- `apiUrl`：**程序**用，请求时带 `Authorization: Bearer <token>`。
-- 也可以让 `ki-client` 把图存到本地再从本地看：`ki-client asset get --remote <源名> --scope <库> --group <组> --refs <ref> --out <目录>`。
-- 两条链接都返回 404 时：要么服务端关闭了下载接口（`downloadApi`），要么附件已被删除 —— 清单仍可用，取件需让运维开启下载接口。
+知识库文档正文里的图片（`![](assets/x.png)` 这类）不会以图片内容返回，读文档时只给**清单**：`ki_get_module_info` 的返回体带一个 `images` 数组，每张图带 `ref`、格式、字节数、`supported`（文件在不在、内容与后缀是否相符）。
 
 **清单里不会出现的**（标 `supported: false` 并给原因，不会静默消失）：外链图片（`https://…` 之类）、`../` 越出文档所在目录的引用、文件缺失、超限的单图、GIF / BMP / ICO / AVIF。
 
-**两点使用提示**：
-
-- `ki_event_get` 只给成员/参考文档的 `group + 名称`，不返回图片清单 —— 要看图先读那篇文档拿 `ref`。
-- 同一轮对话里看过的图只保留最近一次，更早的会变成「[图片×N（已省略）]」，需要重看时再取一次即可（不是丢了，是不会每轮重复上传）。
-
-**成本提醒**：图片不计入上下文的字符预算，但每轮都要重新上传一次。一张约 1024×1024 的图大致相当于同一轮里多 650 字中文的开销，且**只跟像素尺寸有关**，把图压小体积并不省 —— 真要省只能降分辨率。
+**使用提示**：`ki_event_get` 只给成员/参考文档的 `group + 名称`，不返回图片清单 —— 要拿 `ref` 得先读那篇文档。
