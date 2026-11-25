@@ -87,10 +87,13 @@ ki-client remote remove prod   # 删掉
 ## 自检：ping
 
 ```bash
-ki-client ping --remote prod
+ki-client ping --remote prod --scope kb
 ```
 
-它回答四件事：地址通不通、Token 有没有效、服务端是哪一版契约、**取件与上传能力是否开启**（以及单次请求体、单张附件的上限）。
+它回答四件事：地址通不通、Token 有没有效、服务端是哪一版契约、**取件与上传能力是否开启**（以及单次请求体、单张附件的上限），并列出当前 Token 能访问的库（「授权库」一行）。
+
+- Token **只授权了部分库时必须带 `--scope`**：不带时服务端按 `default` 库判断权限，Token 没授权 `default` 就直接报 403 `OPEN_API_SCOPE_FORBIDDEN` —— 看着像 Token 失效，其实只是没指明库，补 `--scope <你的库>` 即可。
+- 想确认自己到底能访问哪些库，就看 ping 成功时的「授权库」一行；ping 本身 403 时响应不含这份清单，只能在 ki 所在机器执行 `ki mcp token list` 查看。
 
 配完源先跑一次；升级服务端或换机器之后也跑一次。报 `CONTRACT_TOO_OLD` 时，原因就在这四项里。
 
@@ -132,7 +135,9 @@ ki-client doc get --remote prod \
 ```
 
 - 正文还原成 `<out>/<文档名>.md`，文中引用的附件按相对路径一并落盘（目录结构保持原样）。
-- `--no-assets` 只取正文，不取图（正文里会留下指向缺失图片的引用）。
+- **`--relation` 填文档在库里的名字**（导入时的文件名去掉 `.md`），不是正文里的标题；`--group` 也要与库里一致。两者对不上会提示 `OPEN_API_NOT_FOUND`，先用 `ki_get_module_info` 核对再取。同名冲突后来加了后缀的，以导入结果里显示的名字为准。
+- **正文与附件分开处理**：正文先保存，附件再逐个取。文中引用的**外链图片取不到属正常现象**（它们不是库内附件），这时退出码会是非 0，但正文已经完整落盘 —— 不要据此判定整体失败。
+- `--no-assets` 只取正文、完全不取图（正文里会留下指向缺失图片的引用），此时退出码为 0。
 - `--overwrite` 允许覆盖已存在文件。
 
 适合跨机归档、把知识库内容接到别的系统里。
@@ -219,6 +224,10 @@ remotes:
 | `CONTRACT_TOO_OLD` | 服务端缺能力：没开取件接口、没开上传接口、或不支持图集远程部署 → 升级服务端，或请运维打开对应开关 |
 | `FILE_EXISTS` | 目标文件已存在 → 加 `--overwrite` |
 | `CONFIG_INVALID` | 配置文件解析或结构不对 → 按提示修正；未知配置项不会被静默忽略 |
+| `OPEN_API_SCOPE_FORBIDDEN` | Token 未被授权访问这个库。**最常见的原因是命令里根本没带 `--scope`**（服务端按 `default` 库判断权限）→ 补上 `--scope <你的库>` 重试；403 时的响应不含授权清单，要看清单得在 ki 所在机器执行 `ki mcp token list` |
+| `OPEN_API_NOT_FOUND` | 取件时 `--group` / `--relation` 与库里的落点对不上（`--relation` 是文档名，不是正文标题）；上传时路径或接口不对 |
+| `OPEN_API_TOKEN_READONLY` | 用的是只读 Token，不能上传 → 换读写 Token，或让管理员执行 `ki mcp token update <id> --read-write` |
+| `OPEN_API_SCOPE_READONLY` | 目标库被设成只读 → 让管理员执行 `ki scope readonly <库名> --off` |
 | `SERVER_ERROR` | 服务端返回非 2xx → 输出里带具体错误码与出路 |
 
 更细的服务端错误码见 [open-api.md](./open-api.md)。

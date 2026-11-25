@@ -31,7 +31,8 @@ const HELP = `ki-client —— ki 的远端取件客户端（多源，类比 git
   remote list              列出所有源
   remote show <名字>       看单个源的详情
   remote remove <名字>     删除一个源
-  ping                     连通性 / 鉴权 / 契约版本 / 取件能力自检
+  ping [--scope <库>]      连通性 / 鉴权 / 契约版本 / 取件能力自检
+                           只授权了部分库时必须带 --scope：不带则按 default 库判权 → 403
   asset get --scope <库> --group <组> --refs <ref[,ref]> --out <目录>
                            把附件（图片）落到本地，输出绝对路径 + sha256
   doc get --scope <库> --group <组> --relation <文档> --out <目录>
@@ -60,7 +61,7 @@ const HELP = `ki-client —— ki 的远端取件客户端（多源，类比 git
 示例：
   ki-client remote add prod http://127.0.0.1:7423 --token-stdin
   ki-client remote add test http://10.0.0.7:233 --token-stdin
-  ki-client ping --remote prod
+  ki-client ping --remote prod --scope kb
   ki-client asset get --remote prod --scope img-demo --group demo \\
       --refs shots/composer.png --out ./tmp
 

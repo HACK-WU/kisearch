@@ -59,6 +59,7 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" http://127.0.0.1:7423/open/v1/ping
 
 - `limits.maxFileSize` 是**单文件**上限，`limits.maxRequestBody` 是**整次请求**上限，两者是两回事。
 - 想确认某个库的上限，加 `?scope=<库名>`（不在 Token 授权范围内会返回 403）。
+- **不带 `?scope` 时按 `default` 库判权**：Token 只授权了别的库时，连自检都会返回 403 `OPEN_API_SCOPE_FORBIDDEN`，看起来像 Token 失效。而且 403 响应里**没有 `scopes` 清单**（库名不回显，防跨租户枚举），此时只能去 ki 所在机器执行 `ki mcp token list` 看授权范围。**不确定自己授权了哪些库时，直接带上已知库名 ping 一次**，成功响应里的 `scopes` 就是完整清单。
 - 上传前先看一眼这里，能避免拿着 5MB 文档去撞默认 1MB 的单文件上限。
 
 ### 上传一份文档

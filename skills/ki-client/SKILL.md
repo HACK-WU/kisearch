@@ -49,7 +49,7 @@ description: 用 ki-client 从远端 ki 取回图片附件与文档正文、上�
 
 1. **装了吗**：`ki-client --version`；没有则进 `ki-client/` 执行 `npm install && npm run build && npm i -g .`（或在仓内临时跑 `node ki-client/dist/cli.js`）
 2. **配源了吗**：`ki-client remote list`；没有则 `echo "$KI_TOKEN" | ki-client remote add <名> <地址> --token-stdin`（token 走 stdin，不进 shell history）
-3. **通吗、远端开没开**：`ki-client ping --remote <名>` —— 它会回 `capabilities` 与 `limits`（取件 / 上传 / 图集是否可用、请求体上限）
+3. **通吗、远端开没开**：`ki-client ping --remote <名> --scope <目标库>` —— 它会回「授权库」清单、`capabilities` 与 `limits`（取件 / 上传 / 图集是否可用、请求体上限）。**`--scope` 别省**：不传时服务端按 `default` 库判权，Token 没授权 `default` 就直接 403 `OPEN_API_SCOPE_FORBIDDEN` —— 看起来像「token 无效」，实际只是没指明库。**还不知道库名时**先 `ki mcp token list` 看授权范围（或先不带 `--scope` 探一次，这次 403 不代表 token 坏了），拿到库名再带上
 
 > 没有配置任何源时可用环境变量做一次性调用：`KI_URL=... KI_TOKEN=... ki-client ping`。
 
@@ -65,9 +65,16 @@ ki-client doc get --remote prod --scope kb --group wiki/部署 --relation 上线
 口径：
 - `ref` 直接用 `ki_get_module_info` 的 `images[].ref`（或 `doc get` 返回的 `images[].ref`）**原样传**，不要自己拼路径
 - 落盘**保留 ref 的相对子路径**（`shots/a.png` → `<out>/shots/a.png`），拍平会让正文里的图片引用全断
+- **`--scope` / `--group` 必须与库内落点完全一致**（`doc get` 还有 `--relation`），服务端只做精确匹配（无模糊匹配、无向量兜底），不一致一律 404 `OPEN_API_NOT_FOUND`
+- **`--relation` 是落库的文件名去掉 `.md`，不是正文里的 H1 / 文档标题**（中文文件名合法，所以中文 relation 也可能对——判据是「文件名」而不是「中文/英文」）。撞名走了后缀策略时会带后缀 → 以导入结果回显的 `relation` 或 `ki_get_module_info` 的返回为准
 - **默认不覆盖**已有文件，确认要覆盖加 `--overwrite`；`--json` 拿机器可读结果
 - 单张失败不中断其余，最后统一报告并返回非 0 → **不要因为退出码非 0 就认为全失败，读输出**
 - 输出里的 **绝对路径**就是交给读图能力的入参；**sha256** 是「拿到的确实是库里那份」的凭据
+
+`doc get` 的额外口径（**正文与附件是两件事**）：
+- **正文先落盘、附件逐个取**：退出码 1 只表示「有附件没取到」，正文通常已经完整保存
+- 外链图片（`https://…` 等外部地址，或服务端标记不可取）**必然取不到**，属正常现象，不要据此判定整体失败
+- 只要正文用 `--no-assets`（退出码即 0）；脚本判定看 `--json` 的 `markdown.file` 与 `failed`，别拿退出码当整体成败
 
 ## 上传：upload / upload-dir
 
@@ -104,6 +111,10 @@ ki-client atlas status --remote prod --scope kb
 | `CONTRACT_TOO_OLD` | 服务端缺能力（取件接口 / `downloadApi` 关闭 / 不支持图集）→ 升级服务端或请运维开启 |
 | `FILE_EXISTS` | 加 `--overwrite` |
 | `CONFIG_INVALID` | 配置文件形状不对，按提示改；未知配置项不会被静默忽略 |
+| `OPEN_API_SCOPE_FORBIDDEN` | Token 未授权该库。**最常见成因是根本没传 `--scope`**（服务端缺省判 `default` 库）→ 显式补 `--scope <已授权库>` 再试。403 响应刻意不回显授权清单（防跨租户枚举库名），要看清单只能靠 ping 成功时的「授权库」行，或去 ki 所在机器跑 `ki mcp token list` |
+| `OPEN_API_NOT_FOUND` | 取件：`group` + `relation` 与库内落点不一致（`relation` = 落库文件名去 `.md`，不是标题；撞名可能带后缀）；上传：路径/端点不对，或接口被关闭 |
+| `OPEN_API_TOKEN_READONLY` | 只读 Token 不能上传 → 换读写 Token 或 `ki mcp token update <id> --read-write` |
+| `OPEN_API_SCOPE_READONLY` | 目标库被设为只读 → `ki scope readonly <库名> --off` |
 | `SERVER_ERROR` | 输出里带 `OPEN_API_*` 码与出路，照着走 |
 
 ## 禁忌
