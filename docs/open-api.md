@@ -231,6 +231,7 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
 | 单次请求体总量 | 512MB | 配置 `mcp.http.uploadMaxBytes`（1 ~ 4GiB） |
 | 归档条目数 | 20000 | 分批上传 |
 | 解包后总量 | min(请求体 × 10, 4GiB) | 分批上传 |
+| 图集包大小 | **20MB** | 不可调；减少视图数量后重新打包（见「部署知识地图」） |
 
 > ⚠️ **默认的 1MB 单文件上限会挡住「一份大文档」这个首要场景**。部署时请按实际文档体积调大，否则第一次上传就会收到「超过单文件上限」。
 >
@@ -258,6 +259,7 @@ ki mcp status                      # 查看当前状态：uploadApi / uploadApiS
 也可以在配置里写 `mcp.http.uploadApi: false`，重启后生效。关闭后的行为：
 
 - `/open/v1/import/upload` 与 `/open/v1/import/status` 一律返回 **404**（不暴露接口是否存在）。
+- `/open/v1/atlas/package` 与 `/open/v1/atlas/status`（图集部署）同样返回 **404**——它们也属于「外部往库里写」。
 - `/open/v1/ping` 与 `/open/v1/events` 仍然可用（确认 Token、服务状态，以及有哪些事件可供挂载）。
 - Web 页面、`/api/*`、`/mcp` 工具、`/healthz` **完全不受影响**。
 
@@ -304,6 +306,52 @@ mcp:
 
 > 关闭只作用于这一条通道：Web 页面看图的 `/api/*` 不受影响（它是既有能力，不属于本接口）。
 
+### 部署知识地图（图集）
+
+「图集」是用 `project-atlas` 生成的单页知识地图（一个 zip，里面是一个可交互的 HTML）。
+**这套接口解决的是「图集在本机打好了，但要装进另一台机器上的 ki」**——两台机器之间只能走 HTTP。
+
+装了 `ki-client` 的机器一条命令即可：
+
+```bash
+ki-client atlas upload --scope prod --file dist/atlas.zip
+```
+
+没装的话，`curl` 同样能装（图集包原样作为请求体发过去，不要 base64、不要 multipart）：
+
+```bash
+curl -X POST -H "Authorization: Bearer $KI_TOKEN" -H "Content-Type: application/zip" \
+  --data-binary @dist/atlas.zip \
+  "http://127.0.0.1:7423/open/v1/atlas/package?scope=prod"
+```
+
+装完核对（客户端 `ki-client atlas status --scope prod` 是同一条查询）：
+
+```bash
+curl -s -H "Authorization: Bearer $KI_TOKEN" \
+  "http://127.0.0.1:7423/open/v1/atlas/status?scope=prod"
+```
+
+```json
+{"ok": true, "scope": "prod", "exists": true,
+ "title": "订单链路", "branch": "master", "baseline": "1c3dabf",
+ "generatedAt": "2026-11-24T10:00:00.000Z",
+ "size": 254753, "packageSize": 108195,
+ "sha256": "9bad814a…", "packageSha256": "3f21c0de…",
+ "archived": true, "uploadedAt": "2026-11-25T02:11:03.000Z", "uploadedBy": "open-api:8f3c2a1b"}
+```
+
+几条要知道的口径：
+
+- **两个指纹不是一回事**：`sha256` 是图集 HTML 的指纹，`packageSha256` 是你上传的那个 zip 的指纹。**判断「这个包是不是已经装过」要用 `packageSha256`**——用它比对 `sha256sum dist/atlas.zip` 即可。
+- **重复上传会覆盖，旧版进 `archive/`**（只留一版，可用于回滚）。内容没变就别重传：`ki-client atlas upload` 会先比对 `packageSha256`，一致就跳过（`--force` 强行重传）。手工 `curl` 时请自己先查一次 status。
+- **一次一整包，不支持分片**。图集包上限 **20MB**（解压后总量上限 50MB、单文件 10MB），超了请减少视图数量（建议 6~8 页）再重新打包，不要靠删代码快照瘦身。
+- **`scope` 走 query，且只能从 query 传**（请求体是原始 zip 字节，没有别的地方能放）。库不存在、只读库、Token 未授权、视图名这四种情况都在**收请求体之前**就拒掉，不会让你白传 20MB。
+- **装完页面立刻能看到**：图集落在该库的 `.atlas/` 目录，Web 的「知识地图」页读的是同一份数据，不需要重启服务。
+- 装之前请先确认这是**你自己生成的包**：图集 HTML 在页面里是带脚本权限的，等同可执行代码。来源不明的 zip 不要往这里传。
+
+关闭上传通道后，`/open/v1/atlas/package` 与 `/open/v1/atlas/status` 一并返回 404（与 `/open/v1/import/*` 同一个开关 `uploadApi`）；`ping` 里的 `capabilities.atlas.upload` 会变成 `false`，程序据此判断即可。
+
 ### 常见错误码
 
 | HTTP | code | 含义与出路 |
@@ -325,6 +373,8 @@ mcp:
 | 400 | `OPEN_API_VIEW_UNSUPPORTED` | 取件时传了视图名——附件按库存放，视图不能作为取件目标，改用成员库名 |
 | 403 | `OPEN_API_PATH_FORBIDDEN` | 附件路径非法或越界：`group` 含 `..`、`path` 带 `../`、或绝对路径 |
 | 404 | `OPEN_API_NOT_FOUND`（取件接口） | 文档 / 附件不存在、后缀不在白名单，或读出口被关闭（`downloadApi: false`） |
+| 404 | `OPEN_API_ATLAS_SCOPE_NOT_FOUND` | 装图集的目标库不存在（不会被就地创建）。先用 `ki scope add` 建库，或检查 `scope` 拼写 |
+| 400 / 413 | `OPEN_API_ATLAS_PACKAGE_INVALID` | 图集包不合格。`atlasCode` 给数字码（1401 未烘焙或有外链 / 1402 包内根目录没有唯一 HTML / 1403 超限 / 1404 条目路径不安全 / 1407 zip 形态不支持），`hint` 给修法；**用 `pack_atlas.py … --zip` 重新打包是最常见的解** |
 | 400 | `OPEN_API_BAD_MULTIPART` | multipart 请求缺 boundary 或结构不完整（请用 `curl -F`，不要手拼请求体） |
 | 400 | `OPEN_API_ARCHIVE_UNSAFE` | 归档里有越界路径或链接文件，整包拒收且不落盘 |
 | 400 | `OPEN_API_ARCHIVE_TOO_LARGE` | 条目数/解包体积/压缩比超限，分批上传 |

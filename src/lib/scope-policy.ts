@@ -97,6 +97,17 @@ export const BLOCKED_OPS: ReadonlySet<string> = new Set([
   'visibility-apply',
   // 外部结论上传（REQ-20261123-009 · S-01）：写事件分析产物，只读库同样不许改结论
   'analysis-import',
+  /**
+   * 图集安装/卸载（2026-11-25 补登记）。
+   *
+   * `atlas-upload` / `atlas-remove` 自 2026-11-24 起就在 `/api/atlas/package` 使用，
+   * 但漏登记 —— 登记表覆盖单测（scope-readonly.test.ts）因此一直有一条红。
+   * `atlas-upload-api` 是 `/open/v1/atlas/package` 的远程通道同款。
+   * 三条都属「改库内容」而非批量更新，只读库一律拦。
+   */
+  'atlas-upload',
+  'atlas-remove',
+  'atlas-upload-api',
 ]);
 
 /** 判定某 op 的归属；`unknown` = 未登记（按拦截处理，并由单测报警） */

@@ -19,11 +19,12 @@ import type { KiConfig } from '../config.js';
 import type { TokenAuth } from '../mcp-token.js';
 import { assertDaemonIdentityCurrent } from '../scope-collection.js';
 import { resolveOpenApiPrincipal, type OpenApiPrincipal } from './auth.js';
-import { OPEN_API_PREFIX, OPEN_API_READ_PATHS, OPEN_API_UPLOAD_PATH } from './constants.js';
+import { OPEN_API_ATLAS_PATH, OPEN_API_PREFIX, OPEN_API_READ_PATHS, OPEN_API_UPLOAD_PATH } from './constants.js';
 import { sendOpenApiError } from './respond.js';
 import { handleOpenApiPing } from './routes/ping.js';
 import { handleOpenApiImportStatus, handleOpenApiImportUpload } from './routes/import.js';
 import { handleOpenApiEvents } from './routes/events.js';
+import { handleOpenApiAtlasPackage, handleOpenApiAtlasStatus } from './routes/atlas.js';
 /**
  * 只读取件两端点（REQ-20261124-002 · S-02 / S-03）。
  *
@@ -90,7 +91,29 @@ const ROUTES: OpenApiRoute[] = [
    */
   { method: 'GET', path: `${OPEN_API_PREFIX}/asset`, handler: handleOpenApiAsset },
   { method: 'GET', path: `${OPEN_API_PREFIX}/doc`, handler: handleOpenApiDoc },
+  /**
+   * 图集远程部署（2026-11-25）：`ki atlas upload` 只能同机直写盘，远端客户端走这两条。
+   * 详情与设计约束见 `routes/atlas.ts` 文件头。
+   */
+  { method: 'POST', path: `${OPEN_API_ATLAS_PATH}/package`, handler: handleOpenApiAtlasPackage },
+  { method: 'GET', path: `${OPEN_API_ATLAS_PATH}/status`, handler: handleOpenApiAtlasStatus },
 ];
+
+/**
+ * 图集里受**上传开关**管的路径（写 + 上传流程内的状态查询）。
+ *
+ * 为什么 status 也归上传侧：它与 `GET /import/status` 同角色 —— 是上传流程的一部分
+ * （传前比指纹、传后核结果）。而 `GET /atlas/download` 是取件，归 `downloadApi`。
+ * 两侧各自语义单一，运维关掉「外部写入」时不会连带关掉取件。
+ */
+export function isAtlasUploadPath(pathname: string): boolean {
+  return pathname === `${OPEN_API_ATLAS_PATH}/package` || pathname === `${OPEN_API_ATLAS_PATH}/status`;
+}
+
+/** 图集的**写**路径（只有它需要 daemon 身份漂移守卫） */
+function isAtlasWritePath(pathname: string): boolean {
+  return pathname === `${OPEN_API_ATLAS_PATH}/package`;
+}
 
 /** 是否属于「上传通道」路径（上传开关只拦这里） */
 export function isUploadPath(pathname: string): boolean {
@@ -118,7 +141,10 @@ export async function handleOpenApiRequest(
   ctx: OpenApiContext,
 ): Promise<void> {
   // ① 开关：关闭时连鉴权都不做，直接按「路由不存在」回 404 —— 403 会泄露「接口存在但被关」
-  if (!ctx.uploadApi && isUploadPath(url.pathname)) {
+  //
+  // 图集上传/状态同受此开关（2026-11-25）：运维关掉「外部往我这儿写」时，图集不能被漏在外面。
+  // 这是**显式**加的判据 —— `isUploadPath` 只匹配 `/open/v1/import` 前缀，加端点时不会自动覆盖。
+  if (!ctx.uploadApi && (isUploadPath(url.pathname) || isAtlasUploadPath(url.pathname))) {
     sendOpenApiError(res, 404, 'OPEN_API_NOT_FOUND', 'Not Found');
     return;
   }
@@ -145,7 +171,8 @@ export async function handleOpenApiRequest(
   // 与 `/api/*` 同口径 fail-loud。但 `/ping` 必须豁免 —— 它是漂移/配置异常时唯一还能确认
   // 「服务活着、token 有效、上限多少」的通道，拦掉它等于把诊断入口一起关死
   // （`scope-collection.ts` 的注释点名了 `/healthz` 与 ping 这两个端点必须可用）。
-  if (isUploadPath(url.pathname)) {
+  // 图集写入同样罩：图集落在 `<kb>/<scope>/.atlas/`，kbDir 随配置变化，漂移时继续写等于写错库
+  if (isUploadPath(url.pathname) || isAtlasWritePath(url.pathname)) {
     try {
       assertDaemonIdentityCurrent(ctx.config);
     } catch (err) {

@@ -173,6 +173,8 @@ export function installPackage(scope: string, zipBuf: Buffer, opts: InstallOptio
     size: html.length,
     packageSize: zipBuf.length,
     sha256: createHash('sha256').update(html).digest('hex'),
+    // 原 zip 的指纹：远程客户端不解包，只能算这个（见 AtlasMeta.packageSha256 注释）
+    packageSha256: createHash('sha256').update(zipBuf).digest('hex'),
     uploadedAt: new Date().toISOString(),
     uploadedBy: opts.uploadedBy,
   };

@@ -49,6 +49,20 @@ export const OPEN_API_READ_PATHS: readonly string[] = [
 ] as const;
 
 /**
+ * 图集（atlas）远程部署的路径前缀（2026-11-25）。
+ *
+ * 为什么单开一条前缀而不复用 `/import`：图集不是知识文档，落点是 `<kb>/<scope>/.atlas/`
+ * 而不是 group，混进上传通道会让 `isUploadPath` 的语义（= 文档导入）失真，
+ * 将来任一侧加开关都会互相牵连。
+ *
+ * 开关归属（按「写 / 取」两侧各自语义，不合并）：
+ *   - `POST /atlas/package`（写）与 `GET /atlas/status`（上传流程内的状态查询）→ 受 `uploadApi` 管，
+ *     与 `POST /import/upload` + `GET /import/status` 同侧；
+ *   - `GET /atlas/download`（取件）→ 登记进 {@link OPEN_API_READ_PATHS}，受 `downloadApi` 管。
+ */
+export const OPEN_API_ATLAS_PATH = `${OPEN_API_PREFIX}/atlas`;
+
+/**
  * `/open/v1` 契约版本：**破坏性变更**才 +1，与 `package.json` 的发布版本解耦
  * （否则每次发版都等于宣称契约变更，客户端无法据此判断兼容性）。
  *
@@ -66,6 +80,21 @@ export interface OpenApiCapabilities {
   };
   /** 单附件上限（与 `limits.maxAssetSize` 同源同值）；`null` = 该基准库未配置 */
   maxAssetSize: number | null;
+  /**
+   * 图集远程部署（2026-11-25）。
+   *
+   * `upload` / `download` 分别反映 `uploadApi` / `downloadApi` 的真实开关状态 ——
+   * 客户端据此决定「能不能传、能不能取」，而不是先用一次 404 去试（那与「路径写错」同形，
+   * 无法区分）。
+   */
+  atlas: {
+    /** `POST /open/v1/atlas/package` 是否可用 */
+    upload: boolean;
+    /** `GET /open/v1/atlas/download` 是否可用 */
+    download: boolean;
+    /** 图集包上限（与 `MAX_ZIP_BYTES` 同源同值）：客户端据此预检，不必等 413 */
+    maxPackageSize: number;
+  };
 }
 
 /**
@@ -128,4 +157,13 @@ export type OpenApiErrorCode =
   /** 绑定的事件不存在（400）：`extra.available` 列出未收口事件（最多 5 个） */
   | 'OPEN_API_EVENT_NOT_FOUND'
   /** 绑定的事件已收口（400）：已收口事件不再接收新文档 */
-  | 'OPEN_API_EVENT_CLOSED';
+  | 'OPEN_API_EVENT_CLOSED'
+  /**
+   * 图集远程部署（2026-11-25）。
+   *
+   * 三条码刻意不复用 `OPEN_API_NOT_FOUND`：图集「没装」与「路由不存在」在客户端是两种
+   * 完全不同的处置（前者去上传，后者查版本/路径），混用会让 agent 无从分支。
+   * 具体包级原因仍走图集自己的 14xx 数字码（`extra.atlasCode` / `extra.atlasKey`）。
+   */
+  | 'OPEN_API_ATLAS_SCOPE_NOT_FOUND'
+  | 'OPEN_API_ATLAS_PACKAGE_INVALID';

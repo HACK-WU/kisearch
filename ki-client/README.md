@@ -96,6 +96,8 @@ remotes:
 | `doc get --scope --group --relation --out` | 正文还原成 `.md` + 文中附件按相对路径落盘（`--no-assets` 只取正文） |
 | `upload --scope <库> <文件...>` | 上传 markdown（可带 `--group` / `--tags` / `--lifecycle` / `--ttl-days` / `--event`） |
 | `upload-dir --scope <库> <目录>` | 上传整个目录（保留相对路径；只收 `.md` 与 `assets/` 下的图片；默认增量） |
+| `atlas upload --scope <库> --file <zip>` | 把图集包装进远端库（`--title` 补标题 / `--force` 强制重传 / `--json`） |
+| `atlas status --scope <库>` | 核对已部署图集的基线、体积、包指纹 |
 | `status --task <id>` | 查一次导入进度（`upload --wait` 会自动轮询到终态） |
 
 ### 上传：两条通道、分批、增量
@@ -134,6 +136,41 @@ ki-client upload-dir --scope kb ./docs --no-state  # 不读不写状态文件
 - **默认不覆盖**已有文件，确认要覆盖加 `--overwrite`
 - `ref` 越出输出目录会被本地拦下（不依赖服务端兜底）
 
+## 部署图集（知识地图）
+
+图集是一个单页 HTML 的 zip（由 `project-atlas` 生成）。`ki atlas upload` 只能装**本机**的 ki，
+跨机就用这两条：
+
+```bash
+ki-client atlas upload --scope prod --file dist/atlas.zip
+ki-client atlas status --scope prod
+```
+
+```
+via remote=prod (http://10.0.0.7:7423)
+已安装到 prod/.atlas/
+  标题   订单链路
+  基线   master@1c3dabf（生成 2026-11-24）
+  条目   2 个 · entry atlas.html
+  体积   248.8KB（zip 105.7KB）
+  sha    9bad814a
+  包指纹 3f21c0de4a1b
+上一版已归档到 archive/
+```
+
+口径：
+
+- **重复执行是安全的**：先查服务端 `packageSha256`，与本地算的一致就跳过（输出「已是最新」、退出码 0）。
+  加 `--force` 才无条件重传。这条比 `upload-dir` 的增量更硬——它不依赖本地状态文件，
+  所以别人（Web 页、另一台机器）传过一版也不会误跳。
+- **一次一整包**，不分片。包上限读 `ping` 的 `capabilities.atlas.maxPackageSize`（服务端 20MB），
+  超过时**本地就报错**，不会白传一遍。
+- **装完页面立刻可见**：图集落在该库的 `.atlas/`，Web 的「知识地图」页读同一份数据，不用重启。
+- **两个指纹别搞混**：回显里的 `sha` 是图集 HTML 的指纹，`包指纹` 才是你传的 zip 的 sha256
+  （可用 `sha256sum dist/atlas.zip` 核对）。上传后客户端会自己比一次，不一致直接失败。
+- **回滚**：重新上传上一版包即可（服务端保留一版在 `archive/`）。取回上一版包的能力尚未提供。
+- 服务端太旧（不支持图集远程部署）会报 `CONTRACT_TOO_OLD` 并指向升级，不会抛一个 404 让你猜。
+
 ## 错误码
 
 | code | 含义与出路 |
@@ -142,7 +179,7 @@ ki-client upload-dir --scope kb ./docs --no-state  # 不读不写状态文件
 | `UNKNOWN_REMOTE` | 源名不存在 → `remote list` 看可用源 |
 | `TOKEN_MISSING` | 该源没有可用 token → 设 `KI_TOKEN_<源名>` 或 `remote add --token-stdin` |
 | `REMOTE_UNREACHABLE` | 连不上 → 先 `ping`；跨机检查防火墙与端口 |
-| `CONTRACT_TOO_OLD` | 服务端没有取件能力（或 `downloadApi` 关闭）→ 升级服务端 / 请运维开启 |
+| `CONTRACT_TOO_OLD` | 服务端缺能力：没有取件接口（或 `downloadApi` 关闭）、`uploadApi` 关闭、或不支持图集远程部署 → 升级服务端 / 请运维开启 |
 | `FILE_EXISTS` | 目标文件已存在 → 加 `--overwrite` |
 | `CONFIG_INVALID` | 配置文件解析或形状不对 → 按提示修正；未知配置项不会被静默忽略 |
 | `SERVER_ERROR` | 服务端非 2xx，输出里带 `OPEN_API_*` 码与出路 |
@@ -153,9 +190,9 @@ ki-client upload-dir --scope kb ./docs --no-state  # 不读不写状态文件
 npm install
 npm run build       # tsc → dist/
 npm run typecheck
-npm test            # 先 build，再跑 node:test（72 例：参数解析 / URL 拼接 / 文件名净化 /
+npm test            # 先 build，再跑 node:test（84 例：参数解析 / URL 拼接 / 文件名净化 /
                     #   配置读写 / 源解析 / ustar 打包（含真 tar 解包校验）/ HTTP 层 /
-                    #   分批与通道选择 / md+附件分组）
+                    #   分批与通道选择 / md+附件分组 / 图集远程部署）
 node dist/cli.js --help
 ```
 

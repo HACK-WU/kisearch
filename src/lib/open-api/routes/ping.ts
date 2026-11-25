@@ -13,6 +13,9 @@ import type http from 'node:http';
 
 import { getScopeImportConfig } from '../../config.js';
 import { isScopeAuthorized } from '../../mcp-token.js';
+// 只取一个常量，走最轻的 `zip-read.js`（仅依赖 node:zlib）而不是图集内核门面：
+// 后者会把 package.ts → scope.ts → config.ts 一并拖进来，而 ping 是关闭开关后唯一的诊断入口
+import { MAX_ZIP_BYTES } from '../../atlas/zip-read.js';
 import { CONTRACT_VERSION, OPEN_API_PREFIX, type OpenApiCapabilities } from '../constants.js';
 import { sendJson, sendOpenApiError } from '../respond.js';
 import type { OpenApiContext } from '../index.js';
@@ -63,6 +66,22 @@ export async function handleOpenApiPing(input: {
       download: { asset: ctx.downloadApi, doc: ctx.downloadApi },
       /** 与下方 limits.maxAssetSize 同源同值（0 表示该基准库未配置上限） */
       maxAssetSize: importCfg?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE,
+      /**
+       * 图集远程部署（2026-11-25）。
+       *
+       * `maxPackageSize` 必须回显真实值：客户端拿它做本地预检，比「传上去等 413」省一次往返
+       * —— 而且 413 在部分客户端库（httpflex 之类）会丢掉响应体，只剩状态码。
+       */
+      atlas: {
+        upload: ctx.uploadApi,
+        /**
+         * ⚠️ 取回端点尚未上线（P1 批），此处刻意回 `false` —— 能力位是「现在能不能用」的
+         * 事实声明，提前报 true 会让客户端去打一个必然 404 的路径。
+         * P1 落地 `GET /open/v1/atlas/download` 后改为 `ctx.downloadApi`。
+         */
+        download: false,
+        maxPackageSize: MAX_ZIP_BYTES,
+      },
     } satisfies OpenApiCapabilities,
     ...(principal.tokenId ? { tokenId: principal.tokenId } : {}),
     scopes: principal.scopes,

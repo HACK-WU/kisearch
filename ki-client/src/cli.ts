@@ -17,6 +17,7 @@ import { runRemote } from './commands/remote.js';
 import { runAsset } from './commands/asset.js';
 import { runDoc } from './commands/doc.js';
 import { runUpload } from './commands/upload.js';
+import { runAtlas } from './commands/atlas.js';
 import { getJson } from './http.js';
 
 const HELP = `ki-client —— ki 的远端取件客户端（多源，类比 git remote）
@@ -38,6 +39,10 @@ const HELP = `ki-client —— ki 的远端取件客户端（多源，类比 git
   upload --scope <库> [--group <组>] <文件...>
   upload-dir --scope <库> [--group <组>] <目录>
                            上传 markdown 与 assets 下的图片，保留目录结构（--wait 等导入完成）
+  atlas upload --scope <库> --file <zip> [--title <标题>] [--force]
+                           把打包好的图集装进远端库（同包重传默认跳过，--force 强制）
+  atlas status --scope <库>
+                           核对已部署图集的基线 / 体积 / 包指纹
   status --task <id>       查看一次导入进度
 
 全局参数：
@@ -114,6 +119,12 @@ async function main(argv: string[]): Promise<number> {
       // 这两个命令的「命令名」本身就是子命令（与 remote/asset/doc 不同），
       // subArgs 已把命令名切掉 → 塞回首位，让 runUpload 统一按 [sub, ...rest] 解析
       return runUpload({ ...subArgs, positionals: [command, ...subArgs.positionals] }, remote);
+    }
+
+    case 'atlas': {
+      const remote = resolveRemote(readConfig(configPath), args.string('remote'));
+      // 与 upload 同一范式：命令名本身就是子命令（upload / status），塞回首位交给 runAtlas 解析
+      return runAtlas({ ...subArgs, positionals: [command, ...subArgs.positionals] }, remote);
     }
 
     case 'status': {

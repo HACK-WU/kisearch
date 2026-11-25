@@ -19,6 +19,18 @@ export interface PingInfo {
     asset: boolean;
     doc: boolean;
     maxAssetSize: number | null;
+    /**
+     * 图集远程部署（2026-11-25）。
+     *
+     * 旧服务端（含 `/open/v1/atlas/*` 上线前的全部版本）没有这一项 → 三个都按 false / null，
+     * 于是 `atlas upload` 会明确报「服务端不支持」而不是打到一个 404 上去猜。
+     */
+    atlas: {
+      upload: boolean;
+      download: boolean;
+      /** 服务端图集包上限；`null` = 服务端没回显（按客户端默认值兜底） */
+      maxPackageSize: number | null;
+    };
   };
   /** 原始返回体，`--json` 时原样输出 */
   raw: Record<string, unknown>;
@@ -213,14 +225,24 @@ export async function postBinary<T = Record<string, unknown>>(
 export async function pingRemote(remote: ResolvedRemote, scope?: string): Promise<PingInfo> {
   const raw = await getJson<Record<string, unknown>>(remote, '/open/v1/ping', scope ? { scope } : undefined);
   const contractVersion = typeof raw.contractVersion === 'number' ? raw.contractVersion : 0;
-  const caps = (raw.capabilities ?? {}) as { download?: { asset?: unknown; doc?: unknown }; maxAssetSize?: unknown };
+  const caps = (raw.capabilities ?? {}) as {
+    download?: { asset?: unknown; doc?: unknown };
+    maxAssetSize?: unknown;
+    atlas?: { upload?: unknown; download?: unknown; maxPackageSize?: unknown };
+  };
   const download = caps.download ?? {};
+  const atlas = caps.atlas ?? {};
   return {
     contractVersion,
     capabilities: {
       asset: download.asset === true,
       doc: download.doc === true,
       maxAssetSize: typeof caps.maxAssetSize === 'number' ? caps.maxAssetSize : null,
+      atlas: {
+        upload: atlas.upload === true,
+        download: atlas.download === true,
+        maxPackageSize: typeof atlas.maxPackageSize === 'number' ? atlas.maxPackageSize : null,
+      },
     },
     raw,
   };
@@ -242,4 +264,26 @@ export function assertCapability(info: PingInfo, need: 'asset' | 'doc', remoteNa
       `让运维在服务端配置 mcp.http.downloadApi: true 后重启（当前 ping 显示 download.${need}=false）`,
     );
   }
+}
+
+/**
+ * 图集上传前的能力与上限确认（2026-11-25）。
+ *
+ * 两件事一起做，因为两者的失败出路完全不同：
+ * ① 服务端有没有这个端点 —— 没有就是版本问题，不要让它去撞 404（404 与「路径写错」同形）；
+ * ② 服务端认的包上限是多少 —— 客户端据此本地预检，省一次 20MB 的往返。
+ *
+ * 返回值是**实际生效**的上限（服务端没回显时用 `DEFAULT_MAX_PACKAGE_SIZE` 兜底）。
+ */
+export const DEFAULT_MAX_PACKAGE_SIZE = 20 * 1024 * 1024;
+
+export function assertAtlasUpload(info: PingInfo, remoteName: string): number {
+  if (!info.capabilities.atlas.upload) {
+    throw new ClientError(
+      'CONTRACT_TOO_OLD',
+      `源 "${remoteName}" 不支持图集远程部署（缺少 POST /open/v1/atlas/package）`,
+      '升级 ki 服务端到包含 /open/v1/atlas/* 的版本；旧版本只能用同机的 ki atlas upload',
+    );
+  }
+  return info.capabilities.atlas.maxPackageSize ?? DEFAULT_MAX_PACKAGE_SIZE;
 }

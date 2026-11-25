@@ -22,12 +22,16 @@ const VALUE_FLAGS = new Set([
   'chunk-size', 'chunkSize',
   'chunk-overlap', 'chunkOverlap',
   'batch-bytes', 'batchBytes',
+  // 图集远程部署（2026-11-25）
+  'file', 'title',
 ]);
 
 /** 纯布尔 flag */
 const BOOL_FLAGS = new Set([
   'json', 'help', 'version', 'overwrite', 'wait', 'no-assets', 'token-stdin',
   'archive', 'force', 'no-state',
+  // 图集：取回 archive 里那一版（`--version` 已是「看版本号」的布尔，故用 --previous 区分）
+  'previous',
 ]);
 
 export interface ParsedArgs {

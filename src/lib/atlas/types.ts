@@ -34,6 +34,16 @@ export interface AtlasMeta {
   packageSize: number;
   /** entry html 的 sha256（十六进制） */
   sha256: string;
+  /**
+   * 原 zip 字节的 sha256（十六进制，2026-11-25）。
+   *
+   * 与 `sha256` 的分工：那个是 **entry html** 的指纹，而远程客户端（ki-client）零依赖、
+   * 不会解 zip，**算不出它**。因此「同包重传跳过 / 取回校验 / 回滚确认版本」一律以本字段
+   * 为基准 —— 用 `packageSize` 代判会把「同大小不同内容」的包误判成未变更，那是静默不更新。
+   *
+   * ⚠️ 可选：2026-11-25 之前写入的 meta.json 没有它，读取侧必须按缺失兜底（不许抛错）。
+   */
+  packageSha256?: string;
   /** 服务端写入时间 */
   uploadedAt: string;
   /** 上传方标识：`cli:<用户名>` 或 `http:<登录用户>` */

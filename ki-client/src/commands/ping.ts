@@ -34,6 +34,11 @@ export async function runPing(args: ParsedArgs, remote: ResolvedRemote): Promise
   const caps = info.capabilities;
   console.log(`取件能力：附件 ${caps.asset ? '开' : '关'} / 文档 ${caps.doc ? '开' : '关'}`);
   if (caps.maxAssetSize !== null) console.log(`单附件上限：${caps.maxAssetSize} 字节`);
+  // 图集远程部署（2026-11-25）：远程部署前先看这一行，比撞一次 404 再猜便宜
+  console.log(`图集部署：上传 ${caps.atlas.upload ? '开' : '关'} / 取回 ${caps.atlas.download ? '开' : '关'}`);
+  if (caps.atlas.upload && caps.atlas.maxPackageSize !== null) {
+    console.log(`图集包上限：${caps.atlas.maxPackageSize} 字节`);
+  }
 
   const limits = raw.limits as { maxFileSize?: number; maxRequestBody?: number } | undefined;
   if (limits) {
