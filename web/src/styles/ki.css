@@ -8395,6 +8395,52 @@ select.ki-chat-cfg__ta--select {
   line-height: 1.6;
 }
 
+/* ── 命令表（分组 · 骨架命令，取件客户端页）──
+   为什么不用 `.res-params`：那边是「--flag → 说明」，命令短、固定 210px 够用。命令表原本把整条
+   命令（`asset get --scope <库> --group <组> --refs … --out …`）塞进固定列，会在 `--` 中间折行，
+   7 条里 3 条折成两行、行高 20/36 交替（2026-11-25 用户反馈「命令一栏有点乱」）。两条一起改：
+   · 命令收到骨架（≤34 字符，单测锁死），一行放得下；
+   · 命令列宽随内容走（`max-content`），说明列占满剩余并照常换行。 */
+.res-cmds { display: grid; gap: 14px; }
+.res-cmds__group { display: grid; gap: 7px; }
+/* 组与组之间给一条淡分割线：三组混在一起时光靠 14px 间距分不出边界 */
+.res-cmds__group + .res-cmds__group {
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ki-color-border);
+}
+.res-cmds__label {
+  color: var(--ki-color-text-subtle);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+.res-cmds__item {
+  display: grid;
+  /* 固定 260px 而不是 max-content：骨架命令实测最长 229px（34 字符上限 ≈251px），
+     取固定值才能让**说明列左边缘对齐**——用 max-content 时每条命令宽度不同，
+     说明列起点会一行一行参差，看着比折行还乱。 */
+  grid-template-columns: minmax(0, 260px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: baseline;
+}
+.res-cmds__cmd {
+  color: var(--ki-color-text);
+  font: 600 12px/1.6 var(--ki-font-mono);
+  white-space: nowrap;
+}
+.res-cmds__desc {
+  margin: 0;
+  color: var(--ki-color-text-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+/* 窄屏：命令在上、说明在下（与资源页 1100 单栏同一思路，只是这里更早换行） */
+@media (max-width: 760px) {
+  .res-cmds__item { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+  .res-cmds__cmd { white-space: normal; overflow-wrap: anywhere; }
+}
+
 /* ── 小节标题 / 说明 / 页脚 ── */
 /* 小节标题：上 12(+14 内距)、下 10 —— 原先只有上边距，标题紧贴自己的内容，
    多段叠起来就"一节挤一节"（用户 2026-10-28 反馈拥挤）。 */
