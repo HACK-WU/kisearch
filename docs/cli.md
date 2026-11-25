@@ -1231,11 +1231,11 @@ stdio 模式无需任何参数，启动后通过 JSON-RPC 协议与 AI Agent 通
 >
 > **并发写入**：Token 创建/更新/删除/归属迁移使用 `~/.ki/mcp-tokens.json.lock` 文件锁串行化；锁等待超过 5 秒返回 `MCP_TOKEN_LOCKED`，异常退出后 30 秒可自动恢复 stale 锁。纯读取不加锁。
 
-> **只读 Token**：远程 MCP 客户端连上后只看到 6 个读工具（写工具不出现在 `tools/list`），且即使构造 `tools/call` 调用写工具也会被 `403 TOKEN_READONLY` 拒绝；会话还会通过 MCP `instructions` 告知 AI「当前为只读」。改动对所有新请求立即生效，但已连接的客户端需重连才会刷新工具列表。只读只约束 MCP 通道（`/api/*` 与 chat 通道不受限），语义细节与已知边界见 [MCP HTTP 共享单例模式](./mcp-http.md#只读-token动作维度)。
+> **只读 Token**：远程 MCP 客户端连上后只看到 6 个读工具（写工具不出现在 `tools/list`），且即使构造 `tools/call` 调用写工具也会被 `403 TOKEN_READONLY` 拒绝；会话还会通过 MCP `instructions` 告知 AI「当前为只读」。改动对所有新请求立即生效，但已连接的客户端需重连才会刷新工具列表。只读同时约束 `/mcp`、`/api/*` 写接口与 `/open/v1` 写接口（`/api` 写接口返回 `403 TOKEN_READONLY`，chat 里的写工具也不可见）；读取与检索不受影响，但**发起 AI 追问**会被拒绝（`403 TOKEN_MODEL_FORBIDDEN`，与 `/mcp` 的 `ki_ask` 同口径），查看历史追问记录与停止追问仍可用。语义细节与已知边界见 [MCP HTTP 共享单例模式](./mcp-http.md#只读-token动作维度)。
 
 > **默认回环（secure by default）**：`ki mcp --http` 默认绑定 `127.0.0.1`，无网络暴露面、开箱即用，覆盖本机多 IDE 共享；需远程/跨机共享时才显式 `--host 0.0.0.0` 主动开启（配合多 Token 存储、`--token` 全权临时 Token 或 `ki user` 创建 Web 账号）。
 >
-> **条件鉴权 + scope 越权校验**：绑定回环地址时本机免登录（`--no-local-admin` 可关闭）；绑定非回环地址（`0.0.0.0`/外网 IP）时，启动需有 Bearer Token 或至少一个启用的 Web 账号。MCP 请求须携带 `Authorization: Bearer <token>`，按 Token 明文在存储中匹配（常量时间比较）得到授权 scope 集合，再校验请求（MCP `tools/call` 的 `scope` 参数 / `/api/*` 的 scope）是否在授权内，越权返回 403。Token 来源：`--token`/`KI_MCP_TOKEN`（全权临时）优先于多 Token 存储 `~/.ki/mcp-tokens.json`，**绝不写入配置文件**。Web 账号与 Token 相互独立，账号只用于页面登录。
+> **条件鉴权 + scope 越权校验**：绑定回环地址时本机免登录（`--no-local-admin` 可关闭）；绑定非回环地址（`0.0.0.0`/外网 IP）时，启动需有 Bearer Token 或至少一个启用的 Web 账号。MCP 请求须携带 `Authorization: Bearer <token>`，按 Token 明文在存储中匹配（常量时间比较）得到授权 scope 集合，再校验请求（MCP `tools/call` 的 `scope` 参数 / `/api/*` 的 scope）是否在授权内，越权返回 403；只读 Token 调用 `/api` 写接口另行返回 `403` + `TOKEN_READONLY`。Token 来源：`--token`/`KI_MCP_TOKEN`（全权临时）优先于多 Token 存储 `~/.ki/mcp-tokens.json`，**绝不写入配置文件**。Web 账号与 Token 相互独立，账号只用于页面登录。
 >
 > **幂等单例**：`ki mcp --http` 启动时先探活 `GET /healthz`（在启动预检之前），若目标地址已有健康的 kisearch 实例则复用并退出——即使当前 shell 环境不完整（如缺 embedding Key）也能正常复用，重复运行在任何环境下都安全。运行中写 `~/.ki/mcp-http-<fingerprint>.lock`（记录 pid/host/port）供排查。
 >

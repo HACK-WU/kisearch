@@ -72,9 +72,12 @@ import {
   ALL_CAPABILITIES,
   WRITE_CAPABILITIES,
   permissionsForRole,
+  withoutWriteCapabilities,
   type Capability,
 } from './auth/capabilities.js';
 import { matchRoute } from './auth/route-permissions.js';
+// 只读 Token 的拒绝错误码（与 /mcp 同码）：唯一事实源在 mcp-tools/tool-access.ts
+import { TOKEN_MODEL_FORBIDDEN, TOKEN_READONLY } from './mcp-tools/tool-access.js';
 import { handleGovernanceRoutes } from './governance-http.js';
 import { handleViewsApi } from './views-api.js';
 import { readJsonBody as readApiJsonBody } from './http-body.js';
@@ -838,6 +841,41 @@ function denyCapability(
   sendJson(res, 403, { ok: false, code: 'FORBIDDEN', error: '当前账号无此操作权限' });
 }
 
+/**
+ * 只读 Token 调用 `/api` 写接口的统一拒绝（#96）。
+ *
+ * 错误码复用 `/mcp` 的 `TOKEN_READONLY`（`/open/v1` 是 `OPEN_API_TOKEN_READONLY`，
+ * 三通道同语义不同前缀，调用方按通道识别）；文案必须给双出路，且不可与
+ * `SCOPE_READONLY`（库级只读，出路是 `ki scope readonly <scope> --off`）混用 ——
+ * 混用会让人顺手把整个库的写保护关掉。
+ */
+function denyReadonlyToken(res: http.ServerResponse, tokenId?: string): void {
+  const idText = tokenId ? `（id: ${tokenId}）` : '';
+  sendJson(res, 403, {
+    ok: false,
+    code: TOKEN_READONLY,
+    error: `Forbidden: 该 Token${idText}为只读，不能调用写接口`,
+    hint: '改用读写 Token，或由管理员执行 ki mcp token update <id> --read-write 切换为读写',
+  });
+}
+
+/**
+ * 只读 Token 调用**模型消耗型**接口的统一拒绝（#96 · 与 `/mcp` 对 `ki_ask` 同口径）。
+ *
+ * 必须与 `TOKEN_READONLY` 分开：这不是"权限不足不能写"，而是"只读 Token 不许触发上游模型调用"。
+ * 混码会把调用方引去查写权限 —— 归因错误比不给原因更浪费时间（`/mcp` 侧同一取舍）。
+ */
+function denyReadonlyModel(res: http.ServerResponse, tokenId?: string): void {
+  const idText = tokenId ? `（id: ${tokenId}）` : '';
+  sendJson(res, 403, {
+    ok: false,
+    code: TOKEN_MODEL_FORBIDDEN,
+    error: `Forbidden: 该 Token${idText}为只读，不能调用会消耗模型额度的接口`,
+    hint: '改用读写 Token，或由管理员执行 ki mcp token update <id> --read-write 切换为读写；'
+      + '只读 Token 仍可读取、检索与查看历史追问，只是不会触发上游模型调用',
+  });
+}
+
 async function handleAuthLogin(
   req: http.IncomingMessage,
   res: http.ServerResponse,
@@ -1094,6 +1132,37 @@ export async function handleApiRequest(
   if (route.kind === 'permission' && route.capability) {
     if (!capabilities.has(route.capability)) {
       denyCapability(res, principal, route.capability);
+      return;
+    }
+    /*
+     * 只读 Token 不放行写能力（2026-11-25 · #96）。
+     *
+     * 第二道判定而不是靠能力集本身：`capabilitiesForPrincipal(token)` 返回固定的
+     * `TOKEN_CAPABILITIES`（按设计**保留** knowledge.write 等既有能力，只防扩权），
+     * 所以只读 Token 在这里天然"有能力"；真正的动作维度门禁 `readOnly` 此前只在
+     * `/mcp`（rejectReadOnlyRequest）与 `/open/v1`（OPEN_API_TOKEN_READONLY）落地，
+     * `/api` 全程没读过它 —— viewer 账号自助建的只读 Token 因此能直调写接口。
+     *
+     * ⚠️ 顺序必须排在能力判定**之后**：放前面会让 viewer 会话的 error code
+     * 从 `USER_READONLY` 变成 `TOKEN_READONLY`（`test/web-auth-api.test.ts` 直接红），
+     * 而两者的出路文案不同（账号权限 vs 换读写 Token）。
+     */
+    if (principal.kind === 'token' && principal.readOnly
+      && WRITE_CAPABILITIES.has(route.capability)) {
+      denyReadonlyToken(res, principal.tokenId);
+      return;
+    }
+    /*
+     * 模型消耗型路由同样拒绝只读 Token（#96 · 与 `/mcp` 的 `ki_ask` 同口径）。
+     *
+     * 维度与写入正交：发起 AI 追问不写数据，但会调上游模型并外发库内片段，
+     * 而只读 Token 的语义是「不许烧模型额度、不许外发」。
+     * 标记挂在路由上（`route.modelConsuming`）而不是能力上 —— `knowledge.ask`
+     * 同时覆盖「发起 / 停止 / 读记录」，只有发起（含 SSE）消耗模型，按能力判会连
+     * 停止追问和读记录一起拦掉，反而比 /mcp 更严且不合理。
+     */
+    if (principal.kind === 'token' && principal.readOnly && route.modelConsuming) {
+      denyReadonlyModel(res, principal.tokenId);
       return;
     }
   }
@@ -1796,7 +1865,17 @@ export async function handleApiRequest(
     if (await handleGovernanceRoutes(req, res, url, { authScopes })) return;
     if (await handleChatRoutes(req, res, url, {
       authScopes,
-      capabilities,
+      /*
+       * 只读 Token 的对话通道同样收窄（2026-11-25 · #96）：chat 的工具面由
+       * `chat/retrieval/tool-loop.ts` 用 `canUseTool(capabilities, name)` 过滤，
+       * 而 token 身份的 `capabilities` 是固定的 `TOKEN_CAPABILITIES`（含 knowledge.write），
+       * 不收窄的话只读 Token 仍能借对话驱动 `ki_store` 等写工具。
+       * ⚠️ 不动 role：token 没有 userId，降级成 'viewer' 会让会话读取在
+       *    `chat-routes.ts` 的归属校验处直接 403（会话列表 / 详情全不可用）。
+       */
+      capabilities: principal.kind === 'token' && principal.readOnly
+        ? withoutWriteCapabilities(capabilities)
+        : capabilities,
       userId: principal.kind === 'session' ? principal.userId : undefined,
       role: principal.kind === 'session' ? principal.role : 'admin',
       configSnapshot: requestConfig,

@@ -109,6 +109,23 @@ export const WRITE_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   'ops.write',
 ]);
 
+/**
+ * 从能力集合里剔除全部写能力（2026-11-25 · #96）。
+ *
+ * 用于**只读身份**的下游消费点：`/api` 中央闸门自己会 403（要给出 `TOKEN_READONLY` 这个明确错误码），
+ * 但 chat 这类「按能力集过滤工具」的通道只能靠能力集本身收窄
+ * （`chat/retrieval/tool-loop.ts` 用 `canUseTool(capabilities, name)` 过滤），
+ * 不收窄的话只读 Token 仍能借对话驱动 `ki_store` 等写工具。
+ *
+ * ⚠️ 不处理 `views.write`：它不在 `WRITE_CAPABILITIES` 里（viewer 也要能建自己的视图），
+ * 且 `TOKEN_CAPABILITIES` 本就把它剔除了，只读 Token 拿不到。
+ */
+export function withoutWriteCapabilities(caps: ReadonlySet<Capability>): ReadonlySet<Capability> {
+  const out = new Set<Capability>();
+  for (const cap of caps) if (!WRITE_CAPABILITIES.has(cap)) out.add(cap);
+  return out;
+}
+
 export function permissionsForRole(role: Role): Capability[] {
   return [...ROLE_CAPABILITIES[role]];
 }

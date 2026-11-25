@@ -16,6 +16,14 @@ export type RouteKind = 'public' | 'authenticated' | 'permission';
 export interface RouteMatch {
   kind: RouteKind | 'unknown';
   capability?: Capability;
+  /**
+   * 会触发**上游模型调用**的路由（#96 · 与 `/mcp` 的 `TOKEN_MODEL_FORBIDDEN` 同口径）。
+   *
+   * 与「写能力」是两条正交的维度：发起 AI 追问不写数据，但会消耗模型额度并外发知识库片段，
+   * 只读 Token 一律拒绝。标记挂在路由上而不是能力上 —— `knowledge.ask` 同时覆盖
+   * 「发起 / 停止 / 读记录」，只有**发起**两个（含 SSE）消耗模型，按能力判会连停止与读记录一起拦掉。
+   */
+  modelConsuming?: true;
 }
 
 interface Rule {
@@ -23,6 +31,7 @@ interface Rule {
   test: (path: string) => boolean;
   kind: RouteKind;
   capability?: Capability;
+  modelConsuming?: true;
 }
 
 function exact(method: string, path: string, kind: RouteKind, capability?: Capability): Rule {
@@ -31,6 +40,17 @@ function exact(method: string, path: string, kind: RouteKind, capability?: Capab
 
 function pattern(method: string, regex: RegExp, kind: RouteKind, capability?: Capability): Rule {
   return { method, test: (p) => regex.test(p), kind, ...(capability ? { capability } : {}) };
+}
+
+/** 模型消耗型路由：`permission` + 指定能力 + `modelConsuming` 标记 */
+function modelRoute(method: string, regex: RegExp, capability: Capability): Rule {
+  return {
+    method,
+    test: (p) => regex.test(p),
+    kind: 'permission',
+    capability,
+    modelConsuming: true,
+  };
 }
 
 const RULES: Rule[] = [
@@ -150,15 +170,19 @@ const RULES: Rule[] = [
   pattern('GET', /^\/governance\/events\/[^/]+\/analysis$/, 'permission', 'knowledge.read'),
   // 追问（B2）：提问与读记录都要 knowledge.ask（viewer 有该能力）；
   // 清空是写操作，要求 knowledge.write。
-  pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
-  // 流式追问（SSE）：与普通 POST 同权限
-  pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask\/stream$/, 'permission', 'knowledge.ask'),
+  // 发起追问是**模型消耗型**（#96）：不写数据但会调上游模型 + 外发库内片段，只读 Token 拒绝，
+  // 与 `/mcp` 对 `ki_ask` 返回 `TOKEN_MODEL_FORBIDDEN` 同口径。
+  modelRoute('POST', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'knowledge.ask'),
+  // 流式追问（SSE）：与普通 POST 同权限，同属模型消耗型
+  modelRoute('POST', /^\/governance\/events\/[^/]+\/analysis\/ask\/stream$/, 'knowledge.ask'),
   /*
    * 停止追问（2026-11-24）：与**发起**同权限，而不是跟分析停止一样要 `knowledge.write`。
    * 理由：能发起就能收回 —— viewer 有 `knowledge.ask`，若这里要写权限，
    * 他发起的追问就只能等超时。分析停止之所以要 write，是因为发起分析本身就要 write。
+   * ★ 不标 `modelConsuming`：停止不调模型（#96 只拦"发起"，否则连收回都做不到）。
    */
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/ask\/cancel$/, 'permission', 'knowledge.ask'),
+  // 读追问记录：纯读，不调模型
   pattern('GET', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.ask'),
   pattern('DELETE', /^\/governance\/events\/[^/]+\/analysis\/ask$/, 'permission', 'knowledge.write'),
   pattern('POST', /^\/governance\/events\/[^/]+\/analysis\/confirm$/, 'permission', 'knowledge.write'),
@@ -202,6 +226,7 @@ export function matchRoute(method: string, path: string): RouteMatch {
     return {
       kind: rule.kind,
       ...(rule.capability ? { capability: rule.capability } : {}),
+      ...(rule.modelConsuming ? { modelConsuming: true as const } : {}),
     };
   }
   return { kind: 'unknown' };

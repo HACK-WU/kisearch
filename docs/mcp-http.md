@@ -96,7 +96,7 @@ ki mcp --http --host 0.0.0.0 --port 7423   # 鉴权基于多 Token 存储，无�
 - **AI 可感知**：只读会话建连时即告知 AI「当前为只读」，无需靠工具缺失反推，也不必反复重试。
 - **生效时机**：`update` 后**下一个请求即生效**；但 `tools/list` 是**建连时的快照**，改权限后已连接的客户端需重连（或重启 IDE）才能刷新工具列表（只读→读写后写工具才会重新出现）。
 - **不影响的范围**：`--token` / `KI_MCP_TOKEN` 进程级临时 Token 始终全权（不参与降权）；stdio 与本机回环访问本就免登录，不受只读约束。
-- **安全边界**：只读只约束 **MCP 通道**。`/api/*` 扩展路由与 chat 工具通道仍按 scope 授权放行——只读 Token 仍可经这些通道写入。请只把只读 Token 发给不需要写权限的客户端。
+- **安全边界**：只读同时约束 **`/mcp`、`/api/*` 写接口与 `/open/v1` 写接口**——`/api` 写接口返回 `403 TOKEN_READONLY`，chat 对话里的写工具也不再对只读 Token 可见。**读取、检索、查看历史追问记录与停止追问不受影响**；但**发起 AI 追问**会被拒绝（`403 TOKEN_MODEL_FORBIDDEN`）——它与 `/mcp` 的 `ki_ask` 同属「会调上游模型并把库内片段外发」，只读 Token 一律不触发。仍请只把只读 Token 发给不需要写权限的客户端。
 - **与「只读库」的区别**：`ki scope readonly <scope> --on` 是**整个 scope 对所有身份禁写**（错误码 `SCOPE_READONLY`，出路是 `--off`）；Token 只读只约束**这一个 Token**（错误码 `TOKEN_READONLY`，出路是改用读写 Token 或 `ki mcp token update <id> --read-write`）。两者可叠加，写操作需同时通过两道门禁。
 
 > ⚠️ Windows / WSL 挂载盘（如 NTFS 路径）上 POSIX 0600 权限语义可能不严格生效，托管文件的保护强度依赖文件系统；此类环境建议确保用户主目录位于 Linux 原生文件系统（如 ext4）。

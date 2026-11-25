@@ -63,6 +63,16 @@ describe('capability coverage', () => {
     assert.equal(matchRoute('POST', '/import/cancel').capability, 'tasks.cancel');
     assert.equal(matchRoute('POST', '/doc/edit').capability, 'knowledge.write');
     assert.equal(matchRoute('GET', '/doc/edit').capability, 'knowledge.read');
+    /*
+     * 模型消耗型标记（#96 · Q2）：只有「发起追问」两个入口带 `modelConsuming`，
+     * 停止与读记录不带 —— 能力都是 knowledge.ask，若按能力判会连收回一起拦掉。
+     */
+    assert.equal(matchRoute('POST', '/governance/events/e1/analysis/ask').modelConsuming, true);
+    assert.equal(matchRoute('POST', '/governance/events/e1/analysis/ask/stream').modelConsuming, true);
+    assert.equal(matchRoute('POST', '/governance/events/e1/analysis/ask/cancel').modelConsuming, undefined);
+    assert.equal(matchRoute('GET', '/governance/events/e1/analysis/ask').modelConsuming, undefined);
+    // 写能力路由不该被误标（两条维度正交）
+    assert.equal(matchRoute('POST', '/doc/edit').modelConsuming, undefined);
     assert.equal(matchRoute('POST', '/auth/password').kind, 'authenticated');
     assert.equal(matchRoute('GET', '/nope').kind, 'unknown');
   });
