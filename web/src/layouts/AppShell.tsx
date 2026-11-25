@@ -103,21 +103,38 @@ const NAV_WORKSPACE: NavItem[] = [
   { to: '/import', label: MERGED_WRITE_LABEL, icon: 'edit', also: ['/write'] },
 ];
 
-/** 侧栏第二组「接入与运维」：知识从哪来、在跑什么、怎么共享与接入 */
+/** 侧栏第二组「接入与运维」：知识从哪来、在跑什么、怎么组织成一个检索入口 */
 const NAV_OPS: NavItem[] = [
   { to: '/datasource', label: '数据源', icon: 'database' },
   { to: '/tasks', label: '后台任务', icon: 'clock' },
-  // 知识视图（REQ-20261104-004）：多库聚合视图的团队共享管理页
-  { to: '/views', label: '知识视图', icon: 'layers' },
-  // 资源（MCP 接入 / Agent Skill 安装）
+  /**
+   * 视图（REQ-20261104-004）：多库聚合视图的团队共享管理页。
+   * 2026-11-25 用户拍板改名：原「知识视图」的"知识"是冗余前缀（本产品所有东西都是知识），
+   * 且与「知识库浏览 / 知识地图 / 知识治理」四词同首、扫读区分度低。
+   * 只改导航与 H1：CLI（`ki view`）、MCP（`ki_view_list`）、后端错误文案与 docs 仍用全称
+   * 「知识视图」—— 导航是位置索引（短词够用），正文是概念解释（全称更清楚）。
+   */
+  { to: '/views', label: '视图', icon: 'layers' },
+];
+
+/**
+ * 侧栏最末一组「帮助与接入」（2026-11-25 用户拍板）：只有一个静态参考入口。
+ * 为什么不并入「接入与运维」：那三项都是**有状态、要操作、要盯**的管理页（列表 + 详情 + 写动作），
+ * 而资源页是接入手册（MCP 配置样例 / CLI / 客户端安装），零状态、零计数、零操作对象 ——
+ * 混在一起会让用户点「资源」时预期看到资源清单，拿到的却是文档页。
+ * 语序上也应靠底：它属"查手册"，越低频越靠后，且与页脚（版本 / 主题）同为"关于这个产品本身"。
+ */
+const NAV_HELP: NavItem[] = [
+  // 资源（MCP 接入 / Agent Skill 安装 / 接入手册）
   { to: '/resources', label: '资源', icon: 'compass' },
 ];
 
 /**
  * 扁平全量表：顶栏 H1 查表（`currentLabel`）与权限过滤都按它走。
- * 侧栏**渲染不走这里**，而是按上面两组分别渲染（分组标题需要独立节点）。
+ * 侧栏**渲染不走这里**，而是按三组分别渲染（分组标题需要独立节点，治理组还要挂计数）。
+ * ⚠️ 新增侧栏入口必须并进来，否则该页 H1 会落到兜底的「总览」。
  */
-const NAV_MAIN: NavItem[] = [...NAV_WORKSPACE, ...NAV_OPS];
+const NAV_MAIN: NavItem[] = [...NAV_WORKSPACE, ...NAV_OPS, ...NAV_HELP];
 
 /**
  * 知识治理三页的顶栏标题（与侧栏「知识治理」分组的 label 保持一致）。
@@ -305,13 +322,17 @@ export function AppShell(): JSX.Element {
   const navItems = NAV_MAIN.filter(canSeeNavItem);
   /**
    * 侧栏渲染分组（2026-11-16 用户确认方案 A）：工作台 / 接入与运维 + 下方硬编码的「知识治理」。
-   * 顺序刻意让「知识治理」留在最底部 —— 分类/事件/回收站三项位置不变，只有四个配置类项下落三行。
+   * 2026-11-25 用户再次拍板（IA 重排）：从「接入与运维」拆出「资源」独立成组「帮助与接入」，
+   * 置于**知识治理之后、页脚之上**；理由是静态手册与"有状态要操作"的管理页不同类。
+   * 最终顺序：工作台 → 接入与运维 → 知识治理 → 帮助与接入。
    * 空组不渲染（某角色无任何可见项时不该留一个孤零零的组标题）。
    */
   const navGroups: ReadonlyArray<{ label: string; items: NavItem[] }> = [
     { label: '工作台', items: NAV_WORKSPACE.filter(canSeeNavItem) },
     { label: '接入与运维', items: NAV_OPS.filter(canSeeNavItem) },
   ];
+  /** 末组「帮助与接入」的可见项（资源目前无能力门禁，过滤后恒为 1 项；留着以防将来加门禁） */
+  const helpItems = NAV_HELP.filter(canSeeNavItem);
   /** 单个侧栏项：两个分组共用同一渲染（图标 + 名称 + AI 对话进行中标记） */
   const renderNavItem = (item: NavItem): JSX.Element => {
     /** 「AI 对话」进行中标记（用户需求 2026-10-14）：挂在图标上，侧栏收起态同样可见 */
@@ -701,8 +722,8 @@ export function AppShell(): JSX.Element {
           </span>
         </div>
 
-        {/* aria-label：侧栏现在有三个 `<nav>` 地标，无名地标在屏幕阅读器里只会读成
-            "导航、导航、导航"，用户分不清哪组是哪组 */}
+        {/* aria-label：侧栏现在有四个 `<nav>` 地标（工作台 / 接入与运维 / 知识治理 / 帮助与接入），
+            无名地标在屏幕阅读器里只会读成"导航、导航、导航、导航"，用户分不清哪组是哪组 */}
         {navGroups.map((group) => (
           group.items.length > 0 ? (
             <nav className="ki-sidebar__section" key={group.label} aria-label={group.label}>
@@ -743,6 +764,18 @@ export function AppShell(): JSX.Element {
             </NavLink>
           ))}
         </nav>
+
+        {/* 帮助与接入（2026-11-25 用户拍板）：静态参考手册类入口，独立成组置于最底。
+            与上方三组都不同类 —— 无状态、无计数、无操作对象，用户来是「查怎么接入」，
+            所以不并入「接入与运维」（那组三项都是有状态要操作的管理页）。 */}
+        {helpItems.length > 0 ? (
+          <nav className="ki-sidebar__section" aria-label="帮助与接入">
+            <div className="ki-sidebar__section-head">
+              <span className="ki-sidebar__section-label">帮助与接入</span>
+            </div>
+            {helpItems.map(renderNavItem)}
+          </nav>
+        ) : null}
 
         <div className="ki-sidebar__spacer" />
 
