@@ -56,6 +56,11 @@ export function registerEventTypeListTool(server: McpServer): void {
             'fts-only': '仅全文可命中（语义检索不召回）',
             hidden: '都不可检索，只能按名读取',
           },
+          /**
+           * `fallbackDays` 是预留字段（事件 #76），刻意单列一句：不写这句，AI 会把
+           * 「90 天」当保障转述给用户（"到期会自动收口"是假的，全仓没有清理任务）。
+           */
+          fallbackDaysNote: '预留字段：当前没有到期清理任务，fallbackDays 配了也不会自动收口',
           hint: '选类型时优先依据 description（说明这类事件装什么），不要只看 name；流转用 ki_event_edit stage（stage 可传阶段 key 或名称）；创建事件用 ki_event_create（type 可传 id 或名称）；类型本身只能在页面增删改',
         };
 

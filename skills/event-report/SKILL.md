@@ -12,7 +12,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 **功能**：
 - 三档分流：结论进记忆 / 事情进事件 / 本次就做的不建
 - 三道上报门 + 两个必然触发点（越界即报、收尾强扫）
-- 固定字段模板（title / type / stage / description 首行来源行）
+- 固定字段模板（title / type / stage / description / expectedEffect；description 首行写来源行）
 - 建前查重（`ki_event_list`），命中则挂证据不新建
 - **文档三分法**（§5）：产物挂 `docs`（改分类、随阶段）、证据挂 `refs`（不改属性）、独立知识不挂
 - 读详情（`ki_event_get`）：结论全文 / 未确认点 / 已确认位置 / 引用；`ki_event_list` 只有 120 字预览，**判断"解决了没有"必须用 get**
@@ -92,7 +92,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
      ├─ 同一件 → 补挂文档：产物 ki_event_edit(action=members, docAction=add|remove) / 证据 ki_event_edit(action=references, docAction=add|remove)（§5）   # 结束，不新建
      └─ 不同件 → 走 ④（description 里注明「与 #N 相关但不同事」）
    ② 未命中 → 走 ④
-④ ki_event_create(scope, title, type, description, docs?, refs?)   # 产物→docs，证据→refs（§5）
+④ ki_event_create(scope, title, type, description, expectedEffect?, docs?, refs?)   # 产物→docs，证据→refs（§5）
 ⑤ 回执一行（§10）
 ```
 
@@ -105,6 +105,7 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 | `type` | bug → `bug 排查`；慢 / 内存 / CPU → `性能优化`；缺失功能 / 改造 → `需求实现`；都不像 → 用最接近的，并在描述首行写 `分类：<自定义说法>` | **类型建后不可改**（无改类型工具），只能删了重建 → 不确定先问一句 |
 | `stage` | **不传**（缺省首阶段） | 从中间阶段起步会让文档可见性提前放开；阶段可从首阶段逐步推进，类型不能 |
 | `description` | 三段固定模板（见下），≤ 4000 字 | 会注入事件 AI 分析的上下文 |
+| `expectedEffect` | 「修好之后应当看到什么」——期望现象 / 验收口径，≤ 4000 字；**想不出就留空，不要编造** | 与 `description`（现状与证据）是两个面；同样注入分析上下文，缺了模型只能按现象盲找、收口时也没有对照物 |
 | `docs` | 只传**产物文档**（这次任务产出的 debug 报告 / 需求报告 / 复盘 / 验收等，`group` + `name`）；没有就留空 | 会把文档分类改成 `event`、可见性随阶段；挂前按 §5 看 `terminalAction` 与数据源锁 |
 | `refs` | 只在**已有**证据文档时传（`group` + `name`，各 ≤50）；没有就留空 | 不要为了填 refs 现造文档；证据与产物是两种东西（§5） |
 
@@ -115,6 +116,15 @@ description: 把越界发现、bug 与新增需求上报为 ki 事件并推进�
 现象：{什么情况下出现什么，含 file:line / 命令 / 报错原文}
 为何不在本次做：{一句话}
 ```
+
+**事后补写 / 修改**（建时没想到、或用户后来才说清）走独立 action，不和描述合并：
+
+```text
+ki_event_edit(event: "#N", action: "expectedEffect", expectedEffect: "<正文>")   # 空串 = 清除该字段
+ki_event_edit(event: "#N", action: "description",   description: "<新描述>")
+```
+
+两者**一次只能改一个**（同时传会被判调用方式错误），要改两处就调两次。
 
 ---
 

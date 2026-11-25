@@ -39,7 +39,14 @@ export interface EventTypeRecord {
   stages: EventStage[];
   /** 类型级终态动作：收口时关联文档去留 */
   terminalAction: 'keep' | 'trash';
-  /** 未收口兜底天数（默认 90，null 关闭） */
+  /**
+   * 预留字段：未收口兜底天数（默认 90，null 关闭）。
+   *
+   * **当前没有任何清理任务消费它**（事件 #76）：全仓只在声明、内置类型赋值、
+   * create/update 入参、DTO 与 MCP 透传里出现，配了不会让事件自动收口。
+   * 留字段是为了将来真做清理时不用改存储格式与接口；在那之前别把它当保障 ——
+   * 末位阶段被停用的事件确实只能人工在页面捞。
+   */
   fallbackDays: number | null;
   /** 乐观锁（N12：两个标签页同时编辑） */
   revision: number;

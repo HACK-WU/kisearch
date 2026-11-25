@@ -27,11 +27,13 @@
 | `ki_event_type_list` | — | — | 只读，返回阶段链 + 收口动作 |
 | `ki_event_list` | — | `status`(open/closed/all) / `type` / `q` / `limit`≤100 / `offset` / `docs_preview_limit`≤10 / `locations_preview_limit`≤10 | 只读 |
 | `ki_event_get` | `event` | `members_limit` / `refs_limit` / `logs_limit` / `locations_limit` / `location_snippet_limit`（均 0 = 不返回该块） | 只读；**list 用来找，get 用来读**。返回描述全文、结论全文、未确认点、已确认位置、文档三元组（scope+group+name，可直接 `ki_get_module_info` 取正文）；过程与候选正文不返回 |
-| `ki_event_create` | `title` / `type` | `description`≤4000 / `stage` / `docs`≤50 / `refs`≤50 | 写事件 + 阶段日志（`by: 'ai'`） |
+| `ki_event_create` | `title` / `type` | `description`≤4000 / `expectedEffect`≤4000 / `stage` / `docs`≤50 / `refs`≤50 | 写事件 + 阶段日志（`by: 'ai'`）；`expectedEffect` = 「修好之后应当看到什么」，想不出就留空不编造 |
 | `ki_event_edit(action=analysis)` | `event` / `action` / `candidates` | `conclusion` / `chain[]`≤5 / `unconfirmed[]`≤20 / `dataFlow`（多行树，≤40 行 / ≤3000 字）/ `targetDir` / `overwrite` / `skipInvalidCandidates` / `expectedRunId` | 覆盖 AI 结论须 `overwrite=true`（不可恢复）；**不传 `dataFlow` = 该结论没有链路**（覆盖时随之清空）；超限整批拒绝不截断；候选逐条验真，`skipInvalidCandidates` 才剔除失败项 |
+| `ki_event_edit(action=description)` | `event` / `description` | — | 改描述正文；与 `expectedEffect` **一次只能改一个**（同传被判调用方式错误） |
+| `ki_event_edit(action=expectedEffect)` | `event` / `expectedEffect` | — | 补写 / 改「预期效果」；空串 = 清除该字段；同样与 `description` 互斥 |
 | `ki_event_edit(action=stage)` | `event` / `stage` | `note` | 唯一的状态写工具；到终态按 `terminalAction` 处理成员文档 |
-| `ki_event_edit(action=members)` | `event` / `action` / `docs` | `docs`≤50 | **add 会把文档分类改为 `event`，可见性随阶段走**；只用于产物文档，且必须在推终态之前 |
-| `ki_event_edit(action=references)` | `event` / `action` / `docs` | `docs`≤50 | 只建引用；与关联文档冲突的项会被拒 |
+| `ki_event_edit(action=members)` | `event` / `action` / `docRefs` | `docAction`: add / remove；`docRefs`≤50 | **add 会把文档分类改为 `event`，可见性随阶段走**；只用于产物文档，且必须在推终态之前；remove 只是解绑（文档回 wiki，不删除） |
+| `ki_event_edit(action=references)` | `event` / `action` / `docRefs` | `docAction`: add / remove；`docRefs`≤50 | 只建引用；与关联文档冲突的项会被拒 |
 | `ki_event_delete` | `event` / `doc_action` | `doc_action`: `wiki` \| `trash`；`force` + `confirm_title`（仅**无关联文档**的事件） | **事件须已收口**；清理测试空事件可 `force` + 标题逐字一致；有成员文档时拒绝（先解绑或先收口） |
 
 - `event` 两种写法都行：事件 id（`evt_…`）或 `#shortId`（如 `#37`）。
@@ -51,6 +53,7 @@
 | `STAGE_UNCHANGED` | 目标阶段 = 当前阶段 | 无需操作，别重试 |
 | `EVENT_CLOSED` | 事件已收口 | 停手；重新打开只能在页面 |
 | `EVENT_DESCRIPTION_TOO_LONG` | 描述 > 4000 字 | 压缩，保住"来源 / 现象 / 为何不做"三段 |
+| `EVENT_EXPECTED_EFFECT_TOO_LONG` | 预期效果 > 4000 字（编号 1628，与描述分开计） | 压缩成"修好后看到什么"的一两句，不搬现象与证据 |
 | `EVENT_MEMBER_LIMIT_EXCEEDED` | docs > 50 | 拆成多次或减少关联 |
 | `REF_LIMIT_EXCEEDED` | refs > 50 | 同上 |
 | `EVENT_FORCE_CONFIRM_REQUIRED` | 传了 `force` 但没带 `confirm_title` | 按报错回显的标题原样传 |

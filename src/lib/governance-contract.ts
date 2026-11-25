@@ -179,6 +179,7 @@ export interface EventTypeDto {
   builtin: boolean;
   stages: EventStageDto[];
   terminalAction: 'keep' | 'trash';
+  /** 预留：兜底天数（默认 90，null 关闭）。**当前无清理任务消费**，配了不会自动收口（事件 #76） */
   fallbackDays: number | null;
   revision: number;
 }
