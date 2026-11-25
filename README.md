@@ -44,6 +44,10 @@
 
 ![kisearch 架构](./assets/architecture.svg)
 
+**运行时架构总览**
+
+![kisearch 运行时架构总览](./assets/runtime-architecture.png)
+
 **Web 前端 · 知识库浏览**
 
 ![kisearch Web 前端 · 知识库浏览](assets/overview.png)
