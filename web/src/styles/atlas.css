@@ -144,23 +144,23 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  border: 1px solid var(--ki-line, #e3e6e2);
+  border: 1px solid var(--ki-color-border);
   border-radius: 10px;
-  background: var(--ki-surface, #fff);
+  background: var(--ki-color-surface);
 }
 
 .atlas-hint strong {
   font-size: 15px;
-  color: var(--ki-text, #17211c);
+  color: var(--ki-color-text);
 }
 
 .atlas-hint--err strong {
-  color: var(--ki-danger, #b4241c);
+  color: var(--ki-color-danger);
 }
 
 .atlas-hint__sub {
   font-size: 12px;
-  color: var(--ki-text-muted, #6b7770);
+  color: var(--ki-color-text-muted);
   line-height: 1.6;
 }
 
@@ -178,9 +178,9 @@
   display: inline-block;
   padding: 2px 6px;
   border-radius: 4px;
-  border: 1px solid var(--ki-line, #e3e6e2);
-  background: var(--ki-surface-sunken, #f4f6f4);
-  font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-muted);
+  font-family: var(--ki-font-mono);
   font-size: 12px;
   word-break: break-all;
 }
