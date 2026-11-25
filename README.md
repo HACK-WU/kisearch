@@ -118,6 +118,33 @@ npm install && npm link
 npm run build:zvec-engine   # 必需：运行时从 dist/zvec-engine 加载向量引擎
 ```
 
+#### 取件客户端（可选）
+
+`ki-client` 是配套的**取件客户端**：MCP 只回答「图在哪」，图片和正文的字节由它取回本地（输出绝对路径与 sha256）。不装不影响上面任何功能。
+
+```bash
+# 方式一：从 Release 附件装（不需要仓库源码）
+# 最新正式版（只有预发布版时这条会 404，用下一条）
+npm install -g https://github.com/HACK-WU/kisearch/releases/latest/download/ki-client.tgz
+# 指定版本（把 <主包tag> 换成具体值，如 v1.2.0-beta）
+npm install -g https://github.com/HACK-WU/kisearch/releases/download/<主包tag>/ki-client.tgz
+
+# 方式二：源码安装（在仓库的 ki-client 子目录里构建后再全局安装）
+git clone git@github.com:HACK-WU/kisearch.git
+cd kisearch/ki-client
+npm install && npm run build && npm i -g .
+
+# 装完确认
+ki-client --version
+```
+
+- **源码安装必须在 `ki-client` 目录里执行 `npm i -g .`**：在仓库根执行装的是主包 `ki`，不是客户端。
+- 与主包各自独立升级：客户端版本用 `ki-client --version` 看，不必与主包 tag 相同。
+- 需要 Node ≥ 18（主包要 ≥ 22.20）。
+- 上手三步：`ki-client remote add <名字> <地址> --token-stdin` 配源 → `ki-client ping` 自检 → `ki-client asset get --scope <库> --group <组> --refs <图> --out <目录>` 取图。
+- 完整命令、配置与错误码见 [`docs/ki-client.md`](./docs/ki-client.md)。
+- 注意：`npm i -g github.com/HACK-WU/kisearch/ki-client` 这种写法不成立 —— npm 不接受带子目录的 git 地址。
+
 ### 2. 初始化配置
 
 ```bash
@@ -231,7 +258,7 @@ ki mcp token delete <id>
 | `mcp` | MCP 服务（stdio / `--http` / `--status` / `token`） |
 
 > 完整参数：`ki <command> --help` 或 [`docs/cli.md`](./docs/cli.md)。
-> MCP 共暴露 **24 个工具**，参数见 [`docs/mcp-tools.md`](./docs/mcp-tools.md)。MCP 不提供 scope / doc 级联删除与 `--force` 操作，需要时用 CLI。
+> MCP 共暴露 **23 个工具**，参数见 [`docs/mcp-tools.md`](./docs/mcp-tools.md)。MCP 不提供 scope / doc 级联删除与 `--force` 操作，需要时用 CLI。
 
 ## <a id="web"></a>🖥️ 内置 Web 前端
 

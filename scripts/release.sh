@@ -13,6 +13,12 @@ PKG_NAME="kisearch"
 TARBALL="${PKG_NAME}-${VERSION}.tgz"
 REPO="HACK-WU/kisearch"
 
+# 取件客户端（同仓子包 ki-client）：源码同仓、发布物独立 —— 有自己的版本号与依赖，
+# 不进主包 tarball。附件名**固定为 ki-client.tgz**（不带版本），这样 README 里可以写
+# releases/latest/download/ki-client.tgz 这类稳定地址；实际版本看包内 version（ki-client --version）。
+CLIENT_DIR="ki-client"
+CLIENT_TARBALL="ki-client.tgz"
+
 echo "==> 发布版本: ${VERSION}"
 
 # 1. 确认版本号与 package.json 一致
@@ -32,7 +38,7 @@ fi
 
 # 3. 确认关键文件存在
 echo "==> 检查关键文件..."
-for f in bin/ki.mjs src/mcp-server.ts README.md package.json; do
+for f in bin/ki.mjs src/mcp-server.ts README.md package.json "${CLIENT_DIR}/package.json"; do
   if [ ! -f "$f" ]; then
     echo "错误: 关键文件 $f 不存在"
     exit 1
@@ -53,7 +59,14 @@ npm --prefix web ci --ignore-scripts
 echo "==> 构建 Web 前端..."
 npm --prefix web run build
 
-for f in dist/zvec-engine/index.js web/dist/index.html; do
+echo "==> 安装并构建 ki-client..."
+# 子包刻意不提交 package-lock.json（依赖只有 yaml）：
+#   · 用 install 而非 ci；
+#   · 加 --no-package-lock，避免发布机上凭空多出一个未跟踪文件
+npm --prefix "${CLIENT_DIR}" install --no-package-lock --no-audit --no-fund
+npm --prefix "${CLIENT_DIR}" run build
+
+for f in dist/zvec-engine/index.js web/dist/index.html "${CLIENT_DIR}/dist/cli.js"; do
   if [ ! -f "$f" ]; then
     echo "错误: 构建产物 $f 不存在"
     exit 1
@@ -71,6 +84,11 @@ if ! npm run test:zvec-engine; then
   echo "错误: zvec-engine 测试未通过，拒绝发布"
   exit 1
 fi
+# 客户端坏了不该被主包带出去：它自己的 test 脚本会先 build 再跑 node --test
+if ! npm --prefix "${CLIENT_DIR}" test; then
+  echo "错误: ki-client 测试未通过，拒绝发布"
+  exit 1
+fi
 echo "  ✅ 测试通过"
 
 # 6. 打包（npm pack 根据 package.json files 字段打包）
@@ -82,10 +100,28 @@ if [ ! -f "${TARBALL}" ]; then
   exit 1
 fi
 
+echo "==> 打包 ${CLIENT_TARBALL}（ki-client）..."
+CLIENT_VERSION=$(node -p "require('./${CLIENT_DIR}/package.json').version")
+rm -f "${CLIENT_TARBALL}" "ki-client-${CLIENT_VERSION}.tgz"
+# 子 shell 进子包：npm pack 按它的 files 白名单收 dist/，产物指回仓库根
+( cd "${CLIENT_DIR}" && npm pack --pack-destination .. >/dev/null )
+mv -f "ki-client-${CLIENT_VERSION}.tgz" "${CLIENT_TARBALL}"
+
+if [ ! -f "${CLIENT_TARBALL}" ]; then
+  echo "错误: 打包文件 ${CLIENT_TARBALL} 未生成"
+  exit 1
+fi
+# 包内必须有可执行入口，否则装出来是个空壳
+if ! tar -tzf "${CLIENT_TARBALL}" | grep -q 'package/dist/cli.js'; then
+  echo "错误: ${CLIENT_TARBALL} 内缺少 dist/cli.js"
+  exit 1
+fi
+
 echo "==> 打包内容:"
 tar -tzf "${TARBALL}" | head -20 || true
 echo "  ... (共 $(tar -tzf "${TARBALL}" | wc -l | tr -d ' ') 个文件)"
 echo "==> 打包文件大小: $(du -h ${TARBALL} | cut -f1)"
+echo "==> ki-client v${CLIENT_VERSION}: $(du -h ${CLIENT_TARBALL} | cut -f1)（$(tar -tzf "${CLIENT_TARBALL}" | wc -l | tr -d ' ') 个文件）"
 
 # 7. 创建/覆盖 git tag
 TAG="v${VERSION}"
@@ -102,11 +138,14 @@ echo "==> 推送 tag 到远程..."
 git push origin "$TAG" --force
 
 # 9. 创建 GitHub Release 并上传 tarball
+# ⚠️ 下面「本次更新」的条目是手写的：发版前按本次实际改动替换，脚本不会自动生成
+PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "首个版本")
 RELEASE_NOTES="## 📦 ${PKG_NAME} ${TAG}
 
-\`ki mcp\` 启动 MCP Server，暴露 13 个工具（检索 / 读取 / 写入 / 组织与删除 / Scope·Tag 管理）。
+\`ki mcp\` 启动 MCP Server，暴露全部 MCP 工具（检索 / 读取 / 写入 / 组织与删除 / Scope·Tag·事件管理），
+清单见 docs/mcp-tools.md。
 
-### 本次更新（v1.1.0-beta → v1.2.0-beta）
+### 本次更新（${PREV_TAG} → ${TAG}）
 
 - **数据源**：新增数据源登记与同步（CLI 登记/同步、Git URL 托管 clone、页面只读查看与详情抽屉）
 - **命令**：\`ki group\` 命令族上线，下线 \`manage-index\` / \`query-group\`（不兼容变更，见 docs/cli.md）
@@ -118,7 +157,11 @@ RELEASE_NOTES="## 📦 ${PKG_NAME} ${TAG}
 ### 安装
 
 \`\`\`bash
+# 主包（CLI + Web + MCP）
 npm install -g https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}
+
+# 取件客户端（可选，ki-client v${CLIENT_VERSION}）
+npm install -g https://github.com/${REPO}/releases/download/${TAG}/${CLIENT_TARBALL}
 \`\`\`"
 
 if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
@@ -133,12 +176,12 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
 
   echo "==> 创建 GitHub Release ${TAG}..."
   if [ "$PRERELEASE" = "true" ]; then
-    gh release create "$TAG" "${TARBALL}" \
+    gh release create "$TAG" "${TARBALL}" "${CLIENT_TARBALL}" \
       --title "${TAG}" \
       --notes "${RELEASE_NOTES}" \
       --prerelease
   else
-    gh release create "$TAG" "${TARBALL}" \
+    gh release create "$TAG" "${TARBALL}" "${CLIENT_TARBALL}" \
       --title "${TAG}" \
       --notes "${RELEASE_NOTES}"
   fi
@@ -146,24 +189,26 @@ if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
   echo "==> ✅ 发布完成!"
   echo ""
   echo "==> 安装命令:"
-  echo "    npm install -g https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}"
+  echo "    主包:   npm install -g https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}"
+  echo "    客户端: npm install -g https://github.com/${REPO}/releases/download/${TAG}/${CLIENT_TARBALL}"
 else
   echo ""
   echo "==> ⚠️  gh CLI 未认证，请手动创建 Release："
   echo ""
   echo "    1. 在 GitHub 上创建 Release: https://github.com/${REPO}/releases/new"
   echo "    2. Tag: ${TAG}"
-  echo "    3. 上传文件: ${TARBALL}"
+  echo "    3. 上传文件: ${TARBALL} 与 ${CLIENT_TARBALL}（两个都要传）"
   echo "    4. 或者运行以下命令（需要先 gh auth login）："
   echo ""
-  echo "    gh release create ${TAG} ${TARBALL} --title '${TAG}' --notes '${RELEASE_NOTES}'"
+  echo "    gh release create ${TAG} ${TARBALL} ${CLIENT_TARBALL} --title '${TAG}' --notes '${RELEASE_NOTES}'"
   echo ""
-  echo "    打包文件已保存在: ${TARBALL}"
+  echo "    打包文件已保存在: ${TARBALL} / ${CLIENT_TARBALL}"
   echo ""
   echo "==> 安装命令:"
-  echo "    npm install -g https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}"
+  echo "    主包:   npm install -g https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}"
+  echo "    客户端: npm install -g https://github.com/${REPO}/releases/download/${TAG}/${CLIENT_TARBALL}"
 fi
 
 # 10. 提示清理
 echo ""
-echo "==> 发布完成后可手动清理: rm -f ${TARBALL}"
+echo "==> 发布完成后可手动清理: rm -f ${TARBALL} ${CLIENT_TARBALL}"

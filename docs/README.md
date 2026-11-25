@@ -16,6 +16,7 @@
 | 我想… | 看这篇 |
 |---|---|
 | 查知识（索引直查 / 语义检索 / 未命中怎么办） | [query-kb.md](./query-kb.md) |
+| 把远端库里的图 / 正文取回本地，或把文档、知识地图推上去 | [ki-client.md](./ki-client.md) |
 | 管理 Group（创建 / 删除 / 列表 / 分区） | [group.md](./group.md) |
 | 备份与恢复 scope | [backup-restore.md](./backup-restore.md) |
 | 看几个完整的使用场景 | [workflows.md](./workflows.md) |

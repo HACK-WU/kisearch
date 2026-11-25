@@ -198,7 +198,7 @@ a:hover { text-decoration: underline; }
      主区标题文字中心 = 25px（= `.ki-content` 的 8px + 行内居中）
      ⇒ padding-top = 12px（实测中心差在 1px 内）。
      ⚠️ 与 `.ki-content` 的 padding-top、`.ki-logo` 尺寸、`.ki-sidebar__title` 字号**成组**：动其一要重算本值。 */
-  padding: 12px 12px 16px;
+  padding: 12px 12px 12px;
   background: var(--ki-color-bg-muted);
   border-right: 1px solid var(--ki-color-border);
   display: flex;
@@ -226,8 +226,9 @@ a:hover { text-decoration: underline; }
      本值给出约 110px 可用 —— 留 7px 余量抗字体渲染差异；再往左移只会让 logo
      与下方导航图标（左边缘 24px）错位更多，得不偿失。 */
   padding: 0 4px;
-  /* 32 → 24（2026-11-16）：与「组间 20 / 组标题→首项 8」构成递减阶梯（原为 32 / 0 / 12，倒挂） */
-  margin-bottom: 24px;
+  /* 32 → 24（2026-11-16）：与「组间 / 组标题→首项」构成递减阶梯（原为 32 / 0 / 12，倒挂）。
+     2026-11-25 组间与组标题间距同步压到 10 / 6（768 高兜底），本值随之收到 20 —— 阶梯 20 / 10 / 6 仍递减。 */
+  margin-bottom: 20px;
   flex-shrink: 0;
 }
 .ki-logo {
@@ -265,9 +266,13 @@ a:hover { text-decoration: underline; }
 /* 分组：项间距 2px；**组与组之间必须靠留白分开**（2026-11-16 用户反馈"分组是否合适"）。
    原实现两段 `<nav>` 直接相邻、组间 0px，而组标题离下一项有 12px ⇒「知识治理」读起来是
    上一组末项（资源）的兄弟项，而不是一个新组的开头 —— 空白阶梯必须是 组间 > 组标题→首项。 */
-.ki-sidebar__section { display: grid; gap: 2px; }
-.ki-sidebar__section + .ki-sidebar__section { margin-top: 20px; }
-.ki-sidebar__section-head { padding: 0 12px; margin-bottom: 8px; }
+.ki-sidebar__section { display: grid; gap: 1px; }
+/* 组间 20 → 14（2026-11-25）：第 4 组「帮助与接入」上线后侧栏多出一个组标题，
+   1440×768 实测内容 826px > 768，页脚被挤出视口（见 `.ki-sidebar__footer` 的 sticky 说明）。
+   先压到 14，仍差 28px（「资源」整项被页脚压住）⇒ 再压到 10，与组标题间距 6 的阶梯保持成立。 */
+.ki-sidebar__section + .ki-sidebar__section { margin-top: 10px; }
+/* 8 → 6：同为 768 高兜底，四项累计省 8px */
+.ki-sidebar__section-head { padding: 0 12px; margin-bottom: 6px; }
 /* 组标题的层级必须**弱于**可点项，靠"更小字号 + 更浅颜色 + 上方留白"拉开，不靠字重压制：
    原 700 比普通项的 500、激活项的 650 都重，看着比可点项还重要；字距原为 0.12em（那是给
    英文全大写小标签的口径），中文四个字被摊到约 60px，观感接近一个按钮。 */
@@ -333,9 +338,16 @@ a:hover { text-decoration: underline; }
 .ki-icon--sm { width: 15px; height: 15px; }
 
 .ki-sidebar__spacer { flex: 1; }
+/* 页脚恒贴底（2026-11-25，第 4 组「帮助与接入」上线后实测发现）：
+   1440×768 视口下侧栏内容 826px > 768，页脚（版本号 / GitHub / 主题切换）被推到视口外；
+   而滚动条是隐藏的（`::-webkit-scrollbar{width:0}`），用户没有任何"下面还有东西"的提示。
+   sticky 让页脚始终可见、导航区在它下方滚动 —— 不新增 DOM 包裹（`.ki-sidebar` 自己就是滚动容器）。
+   背景色必须有：滚动时内容会从页脚下方经过，不遮挡会叠字。
+   ⚠️ 与窄轨规则（≤959px 的 `.ki-sidebar__footer { padding: 12px 0 0 }`）成组，改 padding 要一起看。 */
 .ki-sidebar__footer {
-  margin-top: auto; padding: 16px 12px 0;
+  margin-top: auto; padding: 10px 12px 0;
   border-top: 1px solid var(--ki-color-border); flex-shrink: 0;
+  position: sticky; bottom: 0; background: var(--ki-color-bg-muted);
 }
 .ki-sidebar__footer-title { display: block; font-size: var(--ki-font-size-sm); font-weight: 650; color: var(--ki-color-text); }
 .ki-sidebar__footer-meta { display: block; margin-top: 2px; color: var(--ki-color-text-subtle); font: 10px var(--ki-font-mono); }

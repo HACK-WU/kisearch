@@ -24,6 +24,9 @@ npm-debug.log*
 .env.local
 .env.e2e
 knowledge-indexer-*.tgz
+# 发布脚本产物（scripts/release.sh）：主包 tarball + 取件客户端附件
+kisearch-*.tgz
+ki-client.tgz
 
 # 本地配置（可能含明文 apiKey，防止误提交）
 .ki/config.yaml

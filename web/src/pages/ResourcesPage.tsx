@@ -53,9 +53,18 @@ import {
   formatTimeoutSeconds,
   GENERIC_INSTALL_COMMAND,
   GROUP_LABEL,
+  KI_CLIENT_COMMANDS,
+  KI_CLIENT_INSTALL_COMMANDS,
+  KI_CLIENT_INSTALL_NOTES,
+  KI_CLIENT_NODE_REQUIREMENT,
+  KI_CLIENT_NOTES,
+  KI_CLIENT_WHY,
+  kiClientDocUrl,
+  kiClientQuickStart,
   LLM_FIELD_NOTES,
   LLM_PROTOCOL_NOTE,
   LLM_RELOAD_HINT,
+  MCP_CLIENT_HINT,
   MCP_TOOL_COUNT,
   MCP_TOOLS,
   MCP_TOOLS_NOTE,
@@ -392,7 +401,8 @@ function McpSection(): JSX.Element {
           </div>
         ))}
       </div>
-      <p className="res-note res-mt-3">{MCP_TOOLS_NOTE}</p>
+      <p className="res-note res-mt-3">{MCP_CLIENT_HINT}</p>
+      <p className="res-note res-mt-2">{MCP_TOOLS_NOTE}</p>
       <p className="res-foot res-mt-2">
         <Icon name="info" className="ki-icon res-foot__icon" />
         <span>
@@ -504,6 +514,99 @@ function SkillSection(): JSX.Element {
       <div className="res-mt-2">
         <CodeBlock code={GENERIC_INSTALL_COMMAND} label="skill-install.sh" ariaLabel="通用安装脚本命令" />
       </div>
+    </>
+  );
+}
+
+// ─── 接入 3：取件客户端（ki-client）──────────────────────────────────────
+
+/**
+ * 取件客户端。
+ *
+ * 刻意不做两件事：
+ *   · 不检测「你本机装没装」—— 本页由服务端的 ki 提供，探不到访问者那台机器，做出来就是个假绿灯；
+ *   · 不复述完整手册 —— 命令与参数以 docs/ki-client.md 为准，这里只给「装 → 配源 → 自检 → 取图」主链。
+ */
+function KiClientSection(): JSX.Element {
+  const scope = useScopeValue();
+  const origin = window.location.origin;
+  const quickStart = useMemo(() => kiClientQuickStart(scope, origin), [scope, origin]);
+
+  return (
+    <>
+      <p className="res-help">{KI_CLIENT_WHY}</p>
+
+      <h3 className="res-subhead">
+        安装
+        <span className="res-subhead__hint">两种来源，选一种</span>
+      </h3>
+      <div className="res-examples">
+        {KI_CLIENT_INSTALL_COMMANDS.map((item) => (
+          <div className="res-example" key={item.purpose}>
+            <span className="res-example__label">{item.purpose}</span>
+            <CodeBlock code={item.command} label="Terminal" ariaLabel={`安装 ki-client：${item.purpose}`} />
+          </div>
+        ))}
+      </div>
+      <ul className="res-notes">
+        {KI_CLIENT_INSTALL_NOTES.map((note) => <li key={note}>{note}</li>)}
+      </ul>
+
+      <h3 className="res-subhead">
+        三步上手
+        <span className="res-subhead__hint">scope 已按「{scope}」填好</span>
+      </h3>
+      {quickStart.map((step, index) => (
+        <div className="res-step" key={step.title}>
+          <span className="res-step__no" aria-hidden="true">{index + 1}</span>
+          <div className="res-step__body">
+            <h3 className="res-step__title">{step.title}</h3>
+            <p className="res-help">{step.detail}</p>
+            <CodeBlock code={step.command} label="Terminal" ariaLabel={`第 ${index + 1} 步：${step.title}`} />
+          </div>
+        </div>
+      ))}
+      <p className="res-note res-mt-2">
+        示例里 <code className="res-inline-cmd">prod</code> 是源名，
+        {' '}<code className="res-inline-cmd">wiki</code> 与
+        {' '}<code className="res-inline-cmd">shots/demo.png</code> 是组与图 ref —— 换成你自己的即可。
+      </p>
+
+      <h3 className="res-subhead">
+        命令一览
+        <span className="res-subhead__hint">参数细节见文档</span>
+      </h3>
+      {/* 分组 + 骨架命令：整条命令塞进固定列会在 `--` 中间折行（2026-11-25 用户反馈「有点乱」），
+          排版规则见 ki.css 的 `.res-cmds` */}
+      <div className="res-cmds">
+        {KI_CLIENT_COMMANDS.map((group) => (
+          <div className="res-cmds__group" key={group.label}>
+            <span className="res-cmds__label">{group.label}</span>
+            {group.items.map((item) => (
+              <div className="res-cmds__item" key={item.command}>
+                <code className="res-cmds__cmd">{item.command}</code>
+                <p className="res-cmds__desc">{item.purpose}</p>
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <h3 className="res-subhead">前提与行为</h3>
+      <ul className="res-notes">
+        {KI_CLIENT_NOTES.map((note) => <li key={note}>{note}</li>)}
+      </ul>
+
+      <p className="res-foot res-mt-3">
+        <Icon name="info" className="ki-icon res-foot__icon" />
+        <span>
+          完整命令、配置文件与错误码见
+          <a className="res-link" href={kiClientDocUrl()} target="_blank" rel="noopener noreferrer">
+            取件客户端文档 ↗
+          </a>
+          （docs/ki-client.md）
+        </span>
+      </p>
     </>
   );
 }
@@ -1287,12 +1390,14 @@ export function ResourcesPage(): JSX.Element {
             <h2 className="ki-card__title" id="res-detail-title">{topic.title}</h2>
           </div>
           {topic.id === 'skill' ? <span className="ki-badge">{NODE_REQUIREMENT}</span> : null}
+          {topic.id === 'client' ? <span className="ki-badge">{KI_CLIENT_NODE_REQUIREMENT}</span> : null}
         </div>
         <div className="ki-card__body">
           {topic.id === 'mcp' ? <McpSection /> : null}
           {topic.id === 'skill' ? <SkillSection /> : null}
           {topic.id === 'llm' ? <LlmSection /> : null}
           {topic.id === 'embedding' ? <EmbeddingSection /> : null}
+          {topic.id === 'client' ? <KiClientSection /> : null}
           {/* 功能组与配置组共用同一套「说明 + 示例 / 配置片段」渲染 */}
           {topic.group !== 'access' ? <FeatureSection topic={topic} /> : null}
         </div>

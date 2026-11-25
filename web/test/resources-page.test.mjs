@@ -44,7 +44,16 @@ const {
   GENERIC_INSTALL_COMMAND,
   GROUP_LABEL,
   isLoopbackHost,
+  KI_CLIENT_COMMANDS,
+  KI_CLIENT_INSTALL_COMMANDS,
+  KI_CLIENT_INSTALL_NOTES,
+  KI_CLIENT_NODE_REQUIREMENT,
+  KI_CLIENT_NOTES,
+  KI_CLIENT_WHY,
+  kiClientDocUrl,
+  kiClientQuickStart,
   KI_UPLOAD_TRIGGER,
+  MCP_CLIENT_HINT,
   MCP_TOOL_COUNT,
   MCP_TOOLS,
   MCP_TOOLS_NOTE,
@@ -191,9 +200,12 @@ describe('命令常量', () => {
 // ─── v2：双栏目录 + 功能示例 + LLM / wikiSync 文案 ───────────────────────
 
 describe('目录定义（左栏）', () => {
-  it('分三组：接入 4 + 功能 9 + 配置 4', () => {
+  it('分三组：接入 5 + 功能 10 + 配置 4', () => {
     assert.deepEqual(TOPIC_GROUPS, ['access', 'feature', 'config']);
-    assert.deepEqual(topicsByGroup('access').map((t) => t.id), ['mcp', 'skill', 'llm', 'embedding']);
+    assert.deepEqual(
+      topicsByGroup('access').map((t) => t.id),
+      ['mcp', 'skill', 'llm', 'embedding', 'client'],
+    );
     assert.deepEqual(
       topicsByGroup('feature').map((t) => t.id),
       ['search', 'import', 'openApi', 'datasource', 'rebuild', 'deleteDoc', 'export', 'backup', 'group', 'scopeOps'],
@@ -202,7 +214,7 @@ describe('目录定义（左栏）', () => {
       topicsByGroup('config').map((t) => t.id),
       ['doctor', 'scope', 'token', 'concurrency'],
     );
-    assert.equal(RESOURCE_TOPICS.length, 18);
+    assert.equal(RESOURCE_TOPICS.length, 19);
     assert.deepEqual(GROUP_LABEL, { access: '接入', feature: '功能', config: '配置' });
   });
 
@@ -241,6 +253,100 @@ describe('目录定义（左栏）', () => {
     assert.equal(resolveTopic('not-a-topic').id, 'mcp');
     assert.equal(resolveTopic('import').id, 'import');
     assert.equal(resolveTopic('token').id, 'token');
+  });
+});
+
+// ─── 接入：取件客户端（ki-client，2026-11-25）────────────────────────────
+
+describe('取件客户端（接入组第 5 项）', () => {
+  const findClient = () => RESOURCE_TOPICS.find((t) => t.id === 'client');
+
+  it('挂在接入组末尾，kicker 为 05（不动既有四项编号）', () => {
+    assert.equal(findClient().group, 'access');
+    assert.equal(findClient().kicker, '05 · CLIENT');
+    assert.equal(topicsByGroup('access').at(-1).id, 'client');
+  });
+
+  it('文档指向 docs/ki-client.md（不塞进 cli.md 锚点）', () => {
+    assert.equal(kiClientDocUrl(), `${REPO_DOCS_BASE}/ki-client.md`);
+    assert.equal(findClient().docUrl, kiClientDocUrl());
+    assert.equal(findClient().docAnchor, undefined);
+  });
+
+  it('三步上手的 scope 实填当前库、源地址跟随页面 origin', () => {
+    const scope = 'my-project';
+    const steps = kiClientQuickStart(scope, 'http://10.0.0.9:9000/');
+    assert.equal(steps.length, 3);
+    assert.ok(steps[0].command.includes('remote add prod http://10.0.0.9:9000'), '尾随斜杠要剥掉');
+    assert.ok(steps[0].command.includes('--token-stdin'), 'Token 必须走 stdin');
+    assert.equal(steps[1].command, 'ki-client ping --remote prod');
+    assert.ok(steps[2].command.includes(`--scope ${scope}`));
+    for (const step of steps) {
+      assert.ok(
+        step.command.startsWith('ki-client ') || step.command.startsWith('echo '),
+        `第 ${step.title} 步的命令形态不对`,
+      );
+      assert.equal(step.command.includes('<scope>'), false, '不得留 <scope> 占位符');
+      assert.ok(step.title.length > 0 && step.detail.length > 0);
+    }
+  });
+
+  it('origin 为空时退回本机默认地址（地址不写死在组件里）', () => {
+    assert.ok(kiClientQuickStart('default', '').at(0).command.includes('http://127.0.0.1:7423'));
+  });
+
+  it('安装两条来源：Release 附件 + 源码（源码必须进子目录）', () => {
+    assert.equal(KI_CLIENT_INSTALL_COMMANDS.length, 2);
+    assert.ok(KI_CLIENT_INSTALL_COMMANDS[0].command.includes('/releases/latest/download/ki-client.tgz'));
+    assert.ok(KI_CLIENT_INSTALL_COMMANDS[1].command.includes('cd kisearch/ki-client'));
+    assert.ok(
+      KI_CLIENT_INSTALL_NOTES.some((note) => note.includes('在仓库根执行装的是主包 ki')),
+      '必须点明在仓库根装的是主包',
+    );
+  });
+
+  it('命令分三组，组内只列 ki-client 自己的子命令', () => {
+    assert.deepEqual(
+      KI_CLIENT_COMMANDS.map((group) => group.label),
+      ['源管理', '取回', '上传与部署'],
+    );
+    const verbs = new Set(['remote', 'ping', 'asset', 'doc', 'upload', 'upload-dir', 'atlas', 'status']);
+    for (const group of KI_CLIENT_COMMANDS) {
+      assert.ok(group.items.length >= 2, `${group.label} 组条目太少`);
+    }
+    const items = KI_CLIENT_COMMANDS.flatMap((group) => group.items);
+    assert.ok(items.length >= 8);
+    for (const item of items) {
+      const verb = item.command.split(/\s+/)[0];
+      assert.ok(verbs.has(verb), `未知子命令 ${verb}`);
+      assert.ok(item.purpose.length >= 6, `${item.command} 的说明过短`);
+    }
+  });
+
+  it('★ 命令列只放骨架（≤34 字符），可选参数一律进说明', () => {
+    for (const item of KI_CLIENT_COMMANDS.flatMap((group) => group.items)) {
+      assert.ok(
+        item.command.length <= 34,
+        `命令过长会在 -- 中间折行、把表格撑成锯齿：${item.command}（${item.command.length} 字符）`,
+      );
+      for (const optional of ['<ref[,ref]>', '--out', '--relation', '--file']) {
+        assert.equal(item.command.includes(optional), false, `${optional} 属于可选参数，应写进说明`);
+      }
+    }
+  });
+
+  it('前提覆盖两个独立开关、多源必须指定、Token 不明文入库', () => {
+    const text = KI_CLIENT_NOTES.join('\n');
+    for (const keyword of ['downloadApi', 'uploadApi', '--remote', '0600']) {
+      assert.ok(text.includes(keyword), `前提里缺 ${keyword}`);
+    }
+    assert.ok(KI_CLIENT_WHY.includes('sha256'), '为什么需要它要说清输出什么');
+    assert.equal(KI_CLIENT_NODE_REQUIREMENT, 'Node ≥ 18');
+  });
+
+  it('MCP 面板有一句指向它（否则入口等于没有）', () => {
+    assert.ok(MCP_CLIENT_HINT.includes('取件客户端'));
+    assert.ok(MCP_CLIENT_HINT.includes('MCP'));
   });
 });
 
@@ -308,7 +414,7 @@ describe('功能项的参数说明', () => {
     }
   });
 
-  it('接入组的 MCP / Skill 不需要 params（内容在各自面板）', () => {
+  it('接入组不在目录项里塞 params（内容在各自面板）', () => {
     for (const topic of topicsByGroup('access')) {
       if (topic.id === 'llm') continue;  // LLM 走配置示例 + 字段口径
       assert.equal(topic.params, undefined, `${topic.id} 不该有 params`);

@@ -84,6 +84,11 @@ export function openApiDocUrl(): string {
   return `${REPO_DOCS_BASE}/open-api.md`;
 }
 
+/** `docs/ki-client.md`（取件客户端用户手册；与「取件客户端」页同一份口径） */
+export function kiClientDocUrl(): string {
+  return `${REPO_DOCS_BASE}/ki-client.md`;
+}
+
 // ─── MCP 工具清单（接入后能用什么） ────────────────────────────────────────
 
 export interface McpToolItem {
@@ -177,13 +182,22 @@ export const MCP_TOOLS_NOTE =
   // 不说明会让拿只读 Token 接入的人以为"页面写了 19 个，我却只看到 9 个"是坏了。
   + '只读 Token 的会话里，写工具与 ki_ask 不会出现在 tools/list。';
 
+/**
+ * MCP 面板里指向「取件客户端」的那一句（2026-11-25 新增该目录项后补）。
+ *
+ * 为什么必须放在 MCP 页：用户撞上「图显示不出来」时正在这一页 —— 让他去左栏找第 5 项，
+ * 不主动提示就等于没有入口。边界只有一句：MCP 报位置、字节由客户端取。
+ */
+export const MCP_CLIENT_HINT =
+  '要的是图本身（不是它的位置）时：MCP 不返回图片内容，用左栏「取件客户端」把字节取到本地，输出绝对路径与 sha256。';
+
 // ─── 目录（左栏） ────────────────────────────────────────────────────────
 
 export type TopicGroup = 'access' | 'feature' | 'config';
 
 export type ResourceTopicId =
   // 接入
-  | 'mcp' | 'skill' | 'llm' | 'embedding'
+  | 'mcp' | 'skill' | 'llm' | 'embedding' | 'client'
   // 功能（对数据做的操作）
   | 'import' | 'openApi' | 'datasource' | 'search' | 'backup' | 'export' | 'rebuild' | 'group' | 'deleteDoc' | 'scopeOps'
   // 配置（改配置 / 管凭据 / 诊断）
@@ -261,6 +275,14 @@ export const RESOURCE_TOPICS: ResourceTopic[] = [
   {
     id: 'embedding', group: 'access', label: '向量模型', title: '配置向量模型', kicker: '04 · EMBED',
     summary: '导入 / 检索 / 写入的向量化都用它（embedding）；不配置会降级为纯全文检索。',
+  },
+  {
+    // 2026-11-25 用户拍板：放在接入组末尾而不是紧跟「MCP 接入」——
+    // 好处是不动既有四项的 kicker 编号（diff 最小）；可发现性由 MCP 面板里那句引导兜住。
+    // 两者是同一件事的两半（MCP 报位置、客户端取字节），所以 docUrl 指向 docs/ki-client.md。
+    id: 'client', group: 'access', label: '取件客户端', title: '取件客户端', kicker: '05 · CLIENT',
+    summary: 'MCP 只告诉模型「图在哪」，图片与正文的字节由这个客户端取回本地；也能把文档与知识地图推到远端。',
+    docUrl: kiClientDocUrl(),
   },
   // ── 功能：对数据做的操作 ──
   {
@@ -573,6 +595,162 @@ export function topicExamples(id: ResourceTopicId, scope: string, origin = ''): 
       return [];
   }
 }
+
+// ─── 取件客户端（ki-client）─────────────────────────────────────────────
+//
+// 权威源：`docs/ki-client.md`（用户手册）与 `ki-client/README.md`（子包自述）。
+// 页面只给「装 → 配源 → 自检 → 取图」这条主链 + 命令表，参数细节一律外链 ——
+// 不在这里维护第二份会漂移的完整手册。
+
+/** 标题旁的能力徽标（与 Skill 页的 `NODE_REQUIREMENT` 同一位置） */
+export const KI_CLIENT_NODE_REQUIREMENT = 'Node ≥ 18';
+
+export interface KiClientCommand {
+  /** 命令骨架（只到必填参数为止；长度 ≤34 字符，保证一行放得下） */
+  command: string;
+  /** 一句话作用 + 还需要哪些参数 */
+  purpose: string;
+}
+
+/**
+ * 为什么需要它。
+ *
+ * 必须写在最前面：不然用户会以为「MCP 已经能读了，再装个客户端是重复的」。
+ * 边界只有一句 —— MCP 报位置、客户端取字节。
+ */
+export const KI_CLIENT_WHY =
+  'MCP 能回答「这篇文档有哪些图、各自的 ref 是什么」，但图片内容多数 MCP 客户端显示不了（会被当成长文本截断）。'
+  + '把字节拿下来是另一个程序的事：它落到本地并输出绝对路径与 sha256，再交给你的编辑器或读图能力。';
+
+/** 安装：两条路径都写（只有二进制的人与有仓库源码的人各取一条） */
+export const KI_CLIENT_INSTALL_COMMANDS: KiClientCommand[] = [
+  {
+    command: 'npm install -g https://github.com/HACK-WU/kisearch/releases/latest/download/ki-client.tgz',
+    purpose: '从 Release 附件装（不需要仓库源码）',
+  },
+  {
+    command: 'git clone git@github.com/HACK-WU/kisearch.git && cd kisearch/ki-client\nnpm install && npm run build && npm i -g .',
+    purpose: '源码安装（必须进 ki-client 子目录）',
+  },
+];
+
+export const KI_CLIENT_INSTALL_NOTES: string[] = [
+  '源码安装必须在 ki-client 目录里执行 npm i -g .；在仓库根执行装的是主包 ki。',
+  '只有预发布版时 latest 那条会 404，改成 .../releases/download/<主包tag>/ki-client.tgz。',
+  '与主包各自独立升级：客户端版本用 ki-client --version 看，不必与主包 tag 相同。',
+];
+
+/** 三步上手的单步（标题 + 说明 + 可复制命令） */
+export interface KiClientStep {
+  title: string;
+  detail: string;
+  command: string;
+}
+
+/**
+ * 三步上手。
+ *
+ * scope 按当前顶栏**实填**（本页既有约束）；源名固定 `prod`（与文档同名，用户只需改一处）；
+ * group / ref / 输出目录留示例值 —— 那些是用户自己库里的东西，猜不到也不该猜。
+ * 地址取 `window.location.origin`（沿用「不硬编码 7423」约束），传空时退回落环默认地址。
+ */
+export function kiClientQuickStart(scope: string, origin: string): KiClientStep[] {
+  const s = scopeOr(scope);
+  const base = origin.trim() ? origin.trim().replace(/\/+$/, '') : 'http://127.0.0.1:7423';
+  return [
+    {
+      title: '配一个源',
+      detail: '源 = 远端地址 + Token，类比 git remote。Token 走 stdin，不进 shell history、也不出现在 ps 里。',
+      command: `echo "$KI_TOKEN" | ki-client remote add prod ${base} --token-stdin`,
+    },
+    {
+      title: '自检',
+      detail: '一次问清四件事：地址通不通、Token 有没有效、服务端契约版本、取件与上传能力是否开启。',
+      command: 'ki-client ping --remote prod',
+    },
+    {
+      title: '取一张图',
+      detail: 'ref 从 ki_get_module_info 的 images[].ref 拿；落盘保留相对子路径，输出绝对路径 + sha256。',
+      command: `ki-client asset get --remote prod --scope ${s} --group wiki --refs shots/demo.png --out ./tmp`,
+    },
+  ];
+}
+
+/** 命令分组：同一个动作域放一组（源管理 / 取回 / 上传与部署） */
+export interface KiClientCommandGroup {
+  label: string;
+  items: KiClientCommand[];
+}
+
+/**
+ * 命令一览。
+ *
+ * 只写**骨架**：`--refs` / `--out` / `--relation` 这类参数放右边文字里或交给文档。
+ * 为什么（2026-11-25 用户反馈「命令一栏有点乱」）：整条命令塞进固定列会在 `--` 中间折行，
+ * 7 条里 3 条折成两行、行高 20/36 交替，栅格不成行；而且与副标题「参数细节见文档」自相矛盾。
+ * 骨架都控制在 34 字符内（单测锁死），这样一行放得下、也不需要在 `--` 中间断开。
+ */
+export const KI_CLIENT_COMMANDS: KiClientCommandGroup[] = [
+  {
+    label: '源管理',
+    items: [
+      {
+        command: 'remote add <名字> <地址>',
+        purpose: '新增 / 更新源；Token 用 --token-stdin 读，不进 shell history',
+      },
+      {
+        command: 'remote list / show / remove',
+        purpose: '查看、删除源；同名换地址会清空旧 Token（防把 A 环境凭据发给 B 环境）',
+      },
+      {
+        command: 'ping',
+        purpose: '连通性、鉴权、契约版本、取件与上传能力自检',
+      },
+    ],
+  },
+  {
+    label: '取回',
+    items: [
+      {
+        command: 'asset get --scope <库>',
+        purpose: '取图落盘：另需 --group / --refs / --out；一次 1~3 张，默认不覆盖',
+      },
+      {
+        command: 'doc get --scope <库>',
+        purpose: '正文还原 .md + 附图：另需 --group / --relation / --out（--no-assets 只取正文）',
+      },
+    ],
+  },
+  {
+    label: '上传与部署',
+    items: [
+      {
+        command: 'upload --scope <库> <文件...>',
+        purpose: '上传 Markdown（可带 --group / --tags / --wait 等导入完再返回）',
+      },
+      {
+        command: 'upload-dir --scope <库> <目录>',
+        purpose: '上传整个目录、保留相对路径；默认按文件增量，失败批不记状态',
+      },
+      {
+        command: 'atlas upload|status --scope <库>',
+        purpose: '知识地图装 / 核对（上传另需 --file <zip>）；同一个包重传自动跳过',
+      },
+      {
+        command: 'status --task <id>',
+        purpose: '查一次导入进度（upload --wait 会自己轮询到终态）',
+      },
+    ],
+  },
+];
+
+/** 前提与行为：装之前就该知道的四条 */
+export const KI_CLIENT_NOTES: string[] = [
+  '远端必须开着 HTTP 服务；取件与上传是两个独立开关（mcp.http.downloadApi / uploadApi，默认都开）。关掉时对应端点直接 404 —— 那不是路径写错，是运维关了这一侧。',
+  '配了多个源时每条命令都必须带 --remote：客户端刻意不设默认源，因为最常见的误操作是把测试库的东西传到生产库。',
+  '配置文件 ~/.ki-client/config.yaml（目录 0700 / 文件 0600）里有明文 Token，不要提交到仓库；它也不读工作区里的配置。',
+  '一次取图最多 3 张；知识地图包最大 20MB；单次上传批次受服务端请求体上限约束（客户端会自动分批）。',
+];
 
 // ─── Agent Skill：装的是什么、什么时候生效 ────────────────────────────────
 
