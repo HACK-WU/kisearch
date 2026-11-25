@@ -145,7 +145,9 @@ function recallIntRange(min: number, max: number, label: string) {
 }
 
 const recallThrottleRange = recallIntRange(1, 120, '每个调用方每分钟上限');
-const recallHardTimeoutRange = recallIntRange(1000, 45_000, '单次硬超时（毫秒）');
+// 2026-11-25：用户可配的超时已挪到「AI 查找」域（find.timeoutMs，默认 60s），
+// 这里降级为**部署级上限（cap）** —— 实际生效取 min(两者)。
+const recallHardTimeoutRange = recallIntRange(10_000, 600_000, '部署级超时上限（毫秒）');
 
 function httpUrl(value: unknown, path: string, add: AddFn): void {
   const s = value as string;

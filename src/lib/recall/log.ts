@@ -33,6 +33,12 @@ export interface RecallLogFields {
   durationMs?: number;
   /** 模型通道实际轮次（含收口轮）；排查「轮次耗尽拿不到结论」时最关键 */
   rounds?: number;
+  /**
+   * 本次**实际生效**过的 scope 并集（2026-11-25 Q4：模型可自选后必须留痕）。
+   *
+   * 与 `targets` 不同：`targets` 是调用方传入的默认范围，这里记的是模型真的查过哪些库。
+   */
+  scopes?: string[];
   /** 任务画像原文（内部截断） */
   task?: string;
 }
@@ -46,6 +52,7 @@ export function recallLog(event: RecallLogEvent, fields: RecallLogFields): void 
     ms: fields.durationMs,
   };
   if (fields.physicalCount !== undefined) payload.physical = fields.physicalCount;
+  if (fields.scopes && fields.scopes.length > 0) payload.scopes = fields.scopes;
   if (fields.candidates !== undefined) payload.hits = fields.candidates;
   if (fields.degraded === true) payload.degraded = true;
   if (fields.cached === true) payload.cached = true;

@@ -15,7 +15,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
-import { readPromptConfig, defaultFindConfig, RECALL_DEFAULT_ROUNDS, RECALL_DEFAULT_TOOL_CHARS, RECALL_SCENARIO_SKILL_ID } from '../chat/prompt-config.js';
+import { readPromptConfig, defaultFindConfig, FIND_DEFAULT_TOOL_CALLS, FIND_DEFAULT_TIMEOUT_MS, RECALL_ROUNDS_SAFETY_CAP, RECALL_DEFAULT_TOOL_CHARS } from '../chat/prompt-config.js';
 import { resolveLlmStatus, streamChat, type ChatTurn, type LlmStreamPart } from '../chat/llm-client.js';
 import { loadConfig, type KiConfig } from '../config.js';
 import { listAllScopes } from '../scope.js';
@@ -34,10 +34,11 @@ import {
 import { acquireRecallSlot, resolveRecallConfig, type RecallRuntimeConfig } from '../recall/limits.js';
 import { recallLog } from '../recall/log.js';
 import { runGroundedRecall, type GroundedToolRunner } from '../recall/run-recall.js';
-import { makeRecallToolRunner } from '../recall/tool-runner.js';
+import { makeRecallToolRunner, makeScopeResolver } from '../recall/tool-runner.js';
 import {
   buildRecallSystemPrompt,
   buildRecallUserMessage,
+  buildScopeNote,
   type RecallRuntimeCfg,
 } from '../recall/recall-prompt.js';
 import { resolveRecallTargets } from '../recall/targets.js';
@@ -60,6 +61,8 @@ const TOOL_DESCRIPTION = '拿到新任务 / 需求 / bug、还不知道该读哪
   + '必填的 `scope`（库名或知识视图，可多个），由 ki 自己的模型读正文判断后返回'
   + '「该先读哪几篇 + 为什么 + 整体结论 + 判断不了的点」。'
   + '工具不会替你挑库：不知道有哪些库就先调 `ki_scope_list` / `ki_view_list`，漏传会直接报错并回可用清单。'
+  + '`scope` 只是**默认检索范围**：内部模型可按问题需要换库 / 换视图（每次调用都可不同，受授权范围限制），'
+  + '实际用过的范围见返回的 `scopesUsed`。'
   + '单次调用、不提问、不写任何数据；**需要模型**，未配置模型或未确认外发时不可用（此时请改用 `ki_search` 自行检索）。'
   + '要精确读全文用 `ki_get_module_info`；已知关键词要片段用 `ki_search`；读完要综合结论用 `ki_ask`。';
 
@@ -114,6 +117,12 @@ export interface RecallToolOk {
   skipped: Array<{ name: string; reason: string }>;
   dropped: number;
   rounds: number;
+  /**
+   * 本次**实际生效**过的 scope 并集（2026-11-25 Q4 审计口径）。
+   *
+   * 与 `targets`（调用方传入的默认范围）分开：模型可自选，两者不一致时以这里为准。
+   */
+  scopesUsed: string[];
   partial?: boolean;
   durationMs: number;
 }
@@ -298,6 +307,15 @@ export async function executeRecall(
 
   // ── ⑥ 读配置 + 种子召回 + 模型循环（硬超时）──
   const recallCfg = deps.recallCfg ?? resolveRecallSection(config);
+  /*
+   * 硬超时取「用户配置」与「部署级 cap」的较小值：
+   *   · 用户侧：find.timeoutMs（默认 60s，界面可调 10~300s）
+   *   · 运维侧：config.recall.hardTimeoutMs（默认 300s，可一刀压住）
+   */
+  const effectiveTimeoutMs = Math.min(
+    typeof recallCfg.timeoutMs === 'number' && recallCfg.timeoutMs > 0 ? recallCfg.timeoutMs : FIND_DEFAULT_TIMEOUT_MS,
+    runtime.hardTimeoutMs,
+  );
 
   // 种子召回只是「给模型的起点」：失败不影响主流程（模型会自己 ki_search）
   let seed: Array<{ scope: string; group: string; name: string }> = [];
@@ -316,16 +334,47 @@ export async function executeRecall(
     seed = [];
   }
 
+  /*
+   * 2026-11-25（Q3/Q4）：入参 scope 只是**默认值** —— 模型可自选，逐次校验（存在 + 授权 + 视图展开）。
+   *
+   * 校验复用 `resolveRecallTargets`（与入参同一套判定），失败返回可行动错误，**不回落默认**
+   * （回落会让审计与排查分不清「模型换了库」还是「它传错了」）。
+   */
+  const resolver = makeScopeResolver({
+    config,
+    tokenScopes: deps.tokenScopes ?? null,
+    defaultTargets: pre.physicalTargets,
+    ...(Object.keys(scopeDeps).length > 0
+      ? { scopeDeps: { listScopes: scopeDeps.listScopes, listViews: scopeDeps.listViews } }
+      : {}),
+  });
+
   const runner = deps.runTool ?? makeRecallToolRunner({
     targets: pre.physicalTargets,
+    // 展示名用入参原名（可能含视图）；否则未传 scope 时 scopesUsed 会记成成员库名
+    defaultDisplay: pre.targets,
     toolChars: recallCfg.toolResponseChars,
+    resolveScope: resolver.resolveScope,
+    scopeCatalog: resolver.scopeCatalog,
   });
+
+  // 范围说明必须与运行期校验同源（模型据此换库），因此按本次实际授权生成
+  const cat = resolver.scopeCatalog();
+  const effectiveCfg = {
+    ...recallCfg,
+    scopeNote: buildScopeNote({
+      defaultTargets: pre.targets,
+      canSwitch: true,
+      scopes: cat.scopes,
+      views: cat.views,
+    }),
+  };
 
   let result;
   try {
     result = await withTimeout(
       runGroundedRecall({
-        systemPrompt: buildRecallSystemPrompt(recallCfg),
+        systemPrompt: buildRecallSystemPrompt(effectiveCfg),
         userMessage: buildRecallUserMessage({
           task,
           ...(hints.length > 0 ? { hints } : {}),
@@ -337,6 +386,8 @@ export async function executeRecall(
         limit,
         tools: recallCfg.tools,
         maxRounds: recallCfg.maxRounds,
+        // 2026-11-25（A 方案）：与页面「AI 查找 · 工具调用次数」同一份配置，缺省 15
+        maxToolCalls: recallCfg.maxToolCalls ?? FIND_DEFAULT_TOOL_CALLS,
         llm: {
           baseURL: config.llm?.baseURL ?? '',
           apiKey: config.llm?.apiKey ?? '',
@@ -349,7 +400,7 @@ export async function executeRecall(
         ...(runner ? { runTool: runner } : {}),
         now: nowFn,
       }),
-      runtime.hardTimeoutMs,
+      effectiveTimeoutMs,
       'ki_recall',
     );
   } catch (err) {
@@ -357,7 +408,7 @@ export async function executeRecall(
       recallLog('error', { principalKey, targets: pre.targets, channel: 'deep', code: RECALL_TOOL_CODES.TIMEOUT, task });
       return fail(
         RECALL_TOOL_CODES.TIMEOUT,
-        `预取超过 ${Math.round(runtime.hardTimeoutMs / 1000)} 秒仍未完成：请补强线索（错误码 / 路径 / 模块名）或缩小 scope；`
+        `预取超过 ${Math.round(effectiveTimeoutMs / 1000)} 秒仍未完成：请补强线索（错误码 / 路径 / 模块名）或缩小 scope；`
         + '本次未返回任何结论，不要当成「没有相关文档」。'
         + KI_SEARCH_FALLBACK,
         { retryAfterSec: 1 },
@@ -388,6 +439,8 @@ export async function executeRecall(
     skipped: pre.skipped.map((s) => ({ name: s.name, reason: s.reason })),
     dropped: result.dropped,
     rounds: result.rounds,
+    // 模型可能自己换过库：如实回显「实际查了哪些」，与入参 targets 分开
+    scopesUsed: result.scopesUsed,
     ...(result.partial ? { partial: true } : {}),
     durationMs: nowFn() - started,
   };
@@ -397,6 +450,7 @@ export async function executeRecall(
     channel: 'deep',
     candidates: result.candidates.length,
     rounds: result.rounds,
+    ...(result.scopesUsed.length > 0 ? { scopes: result.scopesUsed } : {}),
     durationMs: payload.durationMs,
     task,
     ...(result.partial ? { partial: true } : {}),
@@ -435,22 +489,31 @@ function listAvailableNames(config: KiConfig, deps: RecallToolDeps): string[] {
   return [...new Set([...views, ...scopes])].filter((n) => n !== ALL_SCOPES);
 }
 
-function resolveRecallSection(config: KiConfig): RecallRuntimeCfg {
+/** 读出预取运行期配置（A 方案：与「AI 查找」共用 `find` 域；导出供单测锁口径） */
+export function resolveRecallSection(config: KiConfig): RecallRuntimeCfg {
   const cfg = readPromptConfig(config).config;
   /*
    * 与「AI 查找」**共用同一个配置域**（2026-11-18 用户拍板：一套逻辑 + 一份配置）。
-   * 场景差异只靠 skill：这里只注入 `task-recall`，find 侧只注入 `refs-locate`。
+   *
+   * 2026-11-25 拍板结果：
+   *   · A 方案：页面「工具调用次数」必须真正生效到 MCP 预取 —— 从 find 域读出（缺字段按 15），
+   *     既传给内核截断，也写进系统提示词（此前预取落进内核唯一的「不限制」档）；
+   *   · Q1：该次数**替代**轮次成为唯一预算，轮次退化为防死循环的安全阀（见 RECALL_ROUNDS_SAFETY_CAP）；
+   *   · Q2：`ki_scope_list` 已并入 find 域工具集，预取不再额外强制开它；
+   *   · Q6：预取不加载任何内置 skill（`task-recall` 已移除）—— 任务画像与判断口径由
+   *     基础提示词 + `buildRecallUserMessage` 承载，两入口不再靠 skill 区分场景。
    */
   const section = cfg.find ?? defaultFindConfig();
-  const scenario = section.skills.filter((s) => s.enabled && s.id === RECALL_SCENARIO_SKILL_ID);
   return {
     prompt: section.prompt.content,
-    // 查找域的工具集是「知识库只读四件套」，预取额外需要列库能力
-    tools: { ki_scope_list: true, ...section.tools },
-    maxRounds: RECALL_DEFAULT_ROUNDS,
+    tools: { ...section.tools },
+    maxRounds: RECALL_ROUNDS_SAFETY_CAP,
     toolResponseChars: RECALL_DEFAULT_TOOL_CHARS,
+    maxToolCalls: section.maxToolCalls ?? FIND_DEFAULT_TOOL_CALLS,
+    // 2026-11-25 用户拍板：超时归「AI 查找」域（默认 60s），与部署级 cap 取 min 后生效
+    timeoutMs: section.timeoutMs ?? FIND_DEFAULT_TIMEOUT_MS,
     ...(section.reasoningEffort ? { reasoningEffort: section.reasoningEffort } : {}),
-    skills: scenario.map((s) => ({ id: s.id, name: s.name, content: s.content, enabled: s.enabled })),
+    skills: [],
   };
 }
 

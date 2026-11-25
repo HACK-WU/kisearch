@@ -54,12 +54,6 @@ import {
   REFS_LOCATE_REQUIRED_TOOL,
   REFS_LOCATE_SKILL_PROMPT,
 } from './retrieval/refs-locate-skill.js';
-import {
-  TASK_RECALL_REQUIRED_TOOL,
-  TASK_RECALL_SKILL_DESCRIPTION,
-  TASK_RECALL_SKILL_ID,
-  TASK_RECALL_SKILL_PROMPT,
-} from './retrieval/task-recall-skill.js';
 import { CHAT_BUDGET, type PromptInjectionSnapshot } from './chat-contract.js';
 
 // ─── 上限（服务端强制；前端字数提示只是辅助）─────────────────
@@ -287,20 +281,25 @@ function defaultAnalysisTools(): Record<string, boolean> {
 // 45s 硬超时保护（防挂死），不可配、不进设置页。
 
 /**
- * 「AI 查找」专属工具分组：只有知识库只读四件套。
+ * 「AI 查找」专属工具分组：知识库只读五件套。
  *
  * 🔴 刻意**不含** `fs_*`：文件工具属「AI 分析」专属，2026-11-16 需求明确本期不做。
  *    把 `fs_*` 放进查找面 = 给"检索候选文档"这个场景开一个读任意目录的口子。
+ *
+ * 2026-11-25（Q2 拍板）：补上 `ki_scope_list` —— 此前只有 `ki_recall` 侧固定多启它，
+ * 页面只显示 4 个，用户看到的与实际被调用的不一致。放进本域后两条链路共用同一份工具开关，
+ * 该工具也成为「模型自选 scope」时唯一能查有哪些库可用的入口。
  */
 export const FIND_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
   {
     key: 'kb-read',
     label: '知识库只读',
-    names: ['ki_search', 'ki_get_module_info', 'ki_group_list', 'ki_tag_list'],
+    names: ['ki_search', 'ki_get_module_info', 'ki_group_list', 'ki_scope_list', 'ki_tag_list'],
     descs: {
       ki_search: '混合 / 全文检索知识库',
       ki_get_module_info: '按 group 与文档名读取正文',
       ki_group_list: '查看 Group 树结构与文档清单',
+      ki_scope_list: '列出可用知识库（换库前确认有哪些）',
       ki_tag_list: '查看知识库标签',
     },
   },
@@ -314,56 +313,27 @@ function defaultFindTools(): Record<string, boolean> {
   return out;
 }
 
-// ─── AI 预取专属工具分组（REQ-20261118-004）──────────────
+// ─── AI 预取内核预算（非用户配置项）──────────────
+
+/*
+ * 2026-11-25（用户拍板）：
+ *   · A 方案 —— 此处原先的独立「AI 预取配置域」（含 `RECALL_TOOL_GROUPS` / `RECALL_LOCKED_TOOL_NAMES`
+ *     与轮次、字符上下界）已删除；页面「AI 查找」与 MCP `ki_recall` 共用 `find` 域，
+ *     工具集取 `FIND_TOOL_GROUPS`。
+ *   · Q1 —— 工具调用次数**替代**轮次成为唯一预算；轮次不再可配，降级为防死循环的安全阀
+ *     （模型不调工具时会自然结束，真正收口靠次数上限）。
+ *   · G3 —— 轮次与单次工具结果字符保持内核内部值，**不纳入** find 域；界面写明「内部预算，不可配」。
+ */
 
 /**
- * 「AI 预取」可用的工具：知识库只读五件套。
+ * 预取的轮次安全阀（**不是预算**）。
  *
- * 比「AI 查找」多一个 `ki_scope_list` —— 预取的范围由调用方传 `scope`，模型偶尔需要
- * 自己确认「这个库里到底有什么」，而查找的范围来自事件，不需要。
- * 不含 `fs_*`：预取只回答"该读哪几篇知识库文档"，不读源码目录。
+ * 唯一预算是工具调用次数（find.maxToolCalls，默认 15）：模型调满次数后内核即收口；
+ * 模型不再发起工具调用时也会自然结束。这个值只用于防「模型反复空转」的死循环兜底。
  */
-export const RECALL_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
-  {
-    key: 'kb-read',
-    label: '知识库只读',
-    names: ['ki_search', 'ki_get_module_info', 'ki_group_list', 'ki_scope_list', 'ki_tag_list'],
-    descs: {
-      ki_search: '混合 / 全文检索知识库',
-      ki_get_module_info: '按 group 与文档名读取正文',
-      ki_group_list: '查看 Group 树结构与文档清单',
-      ki_scope_list: '列出可用知识库（确认 scope 时用）',
-      ki_tag_list: '查看知识库标签',
-    },
-  },
-];
-
-export const RECALL_TOOL_NAMES: readonly string[] = RECALL_TOOL_GROUPS.flatMap((g) => [...g.names]);
-
-/**
- * **锁定工具**：不可取消勾选。
- *
- * 提示词的第一条硬规则是「必须先读正文才允许给候选」，而读正文只能靠它 —— 允许关掉
- * 就等于允许模型仅凭标题猜，规则直接失效。保存时强制归一化为 `true`（不报错）。
- */
-export const RECALL_LOCKED_TOOL_NAMES: readonly string[] = ['ki_get_module_info'];
-
-/** 预取的轮次上限默认值（硬规则：45s 硬顶内能跑完的值） */
-export const RECALL_DEFAULT_ROUNDS = 5;
-/** 单次工具结果字符上限默认值（≈ 一篇常规正文） */
+export const RECALL_ROUNDS_SAFETY_CAP = 30;
+/** 单次工具结果字符上限（内部值，≈ 一篇常规正文；预取侧 8000、查找侧 10000，未共享的理由见上） */
 export const RECALL_DEFAULT_TOOL_CHARS = 8000;
-/** 轮次下限 / 上限（配置校验边界，前端 limits 同源下发） */
-export const RECALL_MIN_ROUNDS = 2;
-export const RECALL_MAX_ROUNDS = 12;
-/** 工具结果字符上下界 */
-export const RECALL_MIN_TOOL_CHARS = 2000;
-export const RECALL_MAX_TOOL_CHARS = 40000;
-
-function defaultRecallTools(): Record<string, boolean> {
-  const out: Record<string, boolean> = {};
-  for (const name of RECALL_TOOL_NAMES) out[name] = true;
-  return out;
-}
 
 /** 默认开关：只读全开，写入/删除全关（危险工具默认不可见） */
 function defaultTools(): Record<string, boolean> {
@@ -481,13 +451,6 @@ export interface PromptConfig {
    * 老字段 `findPrompt` 存在时承接为 `find.prompt`，优先级低于 `find`。
    */
   find?: FindConfig;
-  /**
-   * **能力级配置 · AI 预取**（REQ-20261118-004）。
-   *
-   * ⚠️ 本域**只影响 `ki_recall`**（任务前预取），与 `find`（事件详情的 AI 查找）物理独立：
-   *    两条链路各有自己的提示词 / skill / 工具集，互不覆盖。
-   */
-  recall?: RecallSectionConfig;
 }
 
 export interface AnalysisTargetConfig {
@@ -528,32 +491,13 @@ export interface AnalysisConfig {
 }
 
 /**
- * **AI 查找 · 检索范围**（REQ-20261116-005）。
- *
- * 语义："当前事件所在库恒定在范围内"+ 本表列出的额外单元；当前库**不写入**本表，
- * 否则"默认当前库"就要在每个库各配一次。
- */
-export interface FindRangeConfig {
-  /** 额外放开的检索单元（scope 名或视图名） */
-  extraScopes: string[];
-  /**
-   * **预留（本期不实现、界面不暴露、校验时忽略）**：按事件所在库覆盖 `extraScopes`。
-   *
-   * 存在理由：`extraScopes` 是全局一份，而事件分散在不同库 —— 给 A 库事件配的
-   * "可查 B 库"会同样作用于 C 库事件。将来要差异化时，有这个字段只是"放开 UI +
-   * 解析取覆盖值"，没有它则要改结构 + 迁移配置。
-   */
-  byScope?: Record<string, string[]>;
-}
-
-/**
  * **AI 查找独立配置域**（REQ-20261116-005），与 `analysis` 同级、物理独立。
  *
- * ⚠️ 生效范围（2026-11-18 起「AI 查找」只剩模型通道，确定性快速查找已下线）：
- *    `ranges` 由 HTTP 层解析成本次的检索 targets，其余字段在模型工具循环里读取。
+ * ⚠️ 2026-11-25（批 3）：原 `ranges`（检索范围静态白名单）已**删除** ——
+ *    模型现在可以按问题自己换库 / 换视图（逐次鉴权），静态白名单既多余又容易与授权漂移。
+ *    查找的起点恒为「事件所在库」，实际用过哪些库见过程面板的 steps。
  */
 export interface FindConfig {
-  ranges: FindRangeConfig;
   /** 检索定位提示词（深度通道注入；快速通道不读） */
   prompt: CapabilityPrompt;
   /** AI 查找专属 skill（与对话 / 分析的 skill 互相独立） */
@@ -563,8 +507,7 @@ export interface FindConfig {
   /**
    * 思考级别（三级链同 analysis）。
    *
-   * ⚠️ 2026-11-18：原 `maxRounds` / `maxCandidates` / `timeoutMs` 三项预算已**整体取消**，
-   *    旧配置里的这些键读取时静默忽略（轮次与候选数不再设限，超时由内部 45s 兜底）。
+   * ⚠️ 2026-11-18：原 `maxRounds` / `maxCandidates` 两项预算已取消，旧键读取时静默忽略。
    */
   reasoningEffort?: string;
   /**
@@ -579,28 +522,20 @@ export interface FindConfig {
    * 同一份数会写进系统提示词，让模型提前规划调用顺序。
    */
   maxToolCalls?: number;
-}
-
-/**
- * **AI 预取独立配置域**（REQ-20261118-004），与 `analysis` / `find` 同级、物理独立。
- *
- * 与 find 的差异：
- *   - **没有 `ranges`**：预取的检索范围由调用方 `scope` 决定，服务端不设默认库
- *     （否则「查了哪个库」无法从入参复盘，见 D-02-1）
- *   - **有 `maxRounds` / `toolResponseChars`**：预取是"模型多轮读正文"的循环，
- *     这两项直接决定能不能在 45s 内跑完；查找侧对应预算是硬编码的
- */
-export interface RecallSectionConfig {
-  prompt: CapabilityPrompt;
-  /** 预取阶段可加载的 skill（默认空，无内置） */
-  skills: PromptSkill[];
-  /** 工具名 → 是否暴露；键必须是 `RECALL_TOOL_NAMES`，锁定项恒 true */
-  tools: Record<string, boolean>;
-  reasoningEffort?: string;
-  /** 模型循环轮次上限（读几篇正文的机会），默认 5 */
-  maxRounds: number;
-  /** 单次工具结果字符上限，默认 8000（≈ 一篇常规正文） */
-  toolResponseChars: number;
+  /**
+   * **单次运行硬超时（毫秒）**（2026-11-25 用户拍板，默认 60s）。
+   *
+   * 语义：一次「AI 查找」或一次 MCP `ki_recall` 从开始到收口的硬上限 ——
+   * 超时即中断并如实回报（`RECALL_TIMEOUT` / 查找侧 partial），**不会静默返回空结论**。
+   *
+   * 为什么放进 find 域：两个入口本就是同一份配置；此前超时只在 `config.yaml` 的
+   * `recall.hardTimeoutMs`（1000~45000 硬顶）里，用户既看不到也调不动，而唯一的预算是
+   * 工具调用次数（默认 15 次 ≈ 45s），两者天生顶牛 → 真机出现过 `RECALL_TIMEOUT`。
+   *
+   * 与 `config.recall.hardTimeoutMs` 的关系：后者降级为**部署级上限（cap）**，
+   * 实际生效 = `min(find.timeoutMs, cap)` —— 运维仍可一刀压住，用户在小范围内自调。
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -705,40 +640,36 @@ function builtinAnalysisSkill(id: string, at: string = BUILTIN_AT): PromptSkill 
 
 // ─── AI 查找内置 skill（REQ-20261116-005 · S-01）────────────────────
 
+/*
+ * 2026-11-25（Q6 拍板）：原第二个内置 skill `task-recall` 已移除。
+ *
+ * 理由：「AI 查找」与 MCP 的 `ki_recall` 是**同一套配置、同一条链路**（页面只是把检索过程显示出来），
+ * 预取不需要专属 skill —— 任务画像 / 强线索 / 已读清单由 `buildRecallUserMessage` 拼进用户消息，
+ * 判断口径由基础提示词承担。留着它会让预取看起来是另一个场景，也把同一份判断规则拆成两处维护。
+ *
+ * 老配置兼容：读取时丢弃 `find.skills` 里 id 为 `builtin-task-recall` 的条目（见 `normalizeFindSection`）。
+ */
+export const DEPRECATED_BUILTIN_SKILL_IDS: readonly string[] = ['builtin-task-recall'];
+
 /** AI 查找内置 skill 固定名称（与 `BUILTIN_SKILL_NAMES` 同一服务端强制模式） */
 export const BUILTIN_FIND_SKILL_NAMES: Readonly<Record<string, string>> = {
   [REFS_LOCATE_SKILL_ID]: 'refs-locate',
-  /**
-   * 第二个内置 skill：为「一次任务」挑先读文档（REQ-20261118-004）。
-   * 两个 skill 共用同一份提示词与工具集，**场景差异只由加载哪个 skill 决定**。
-   */
-  [TASK_RECALL_SKILL_ID]: 'task-recall',
 };
 export const BUILTIN_FIND_SKILL_IDS: readonly string[] = Object.keys(BUILTIN_FIND_SKILL_NAMES);
 
-/**
- * **场景 skill**：同一套内核 + 同一份配置，靠「加载哪个 skill」区分场景（2026-11-18 用户拍板）。
- * 入口各取其一，代码里不出现场景分支：
- *   · AI 查找（给用户）→ `refs-locate`
- *   · AI 预取（给 agent）→ `task-recall`
- */
+/** 场景 skill：页面「AI 查找」强制加载 `refs-locate`；预取侧不加载任何内置 skill */
 export const FIND_SCENARIO_SKILL_ID = REFS_LOCATE_SKILL_ID;
-export const RECALL_SCENARIO_SKILL_ID = TASK_RECALL_SKILL_ID;
 
 export const FIND_SKILL_REQUIRED_TOOLS: Readonly<Record<string, string>> = {
   [REFS_LOCATE_SKILL_ID]: REFS_LOCATE_REQUIRED_TOOL,
-  // 预取场景的核心动作是「读正文核对」，关掉它这个 skill 就无从执行
-  [TASK_RECALL_SKILL_ID]: TASK_RECALL_REQUIRED_TOOL,
 };
 
 const BUILTIN_FIND_SKILL_CONTENT: Readonly<Record<string, string>> = {
   [REFS_LOCATE_SKILL_ID]: REFS_LOCATE_SKILL_PROMPT,
-  [TASK_RECALL_SKILL_ID]: TASK_RECALL_SKILL_PROMPT,
 };
 
 const BUILTIN_FIND_SKILL_DESCRIPTIONS: Readonly<Record<string, string>> = {
   [REFS_LOCATE_SKILL_ID]: REFS_LOCATE_SKILL_DESCRIPTION,
-  [TASK_RECALL_SKILL_ID]: TASK_RECALL_SKILL_DESCRIPTION,
 };
 
 /**
@@ -747,7 +678,6 @@ const BUILTIN_FIND_SKILL_DESCRIPTIONS: Readonly<Record<string, string>> = {
  */
 const BUILTIN_FIND_SKILL_ENABLED: Readonly<Record<string, boolean>> = {
   [REFS_LOCATE_SKILL_ID]: true,
-  [TASK_RECALL_SKILL_ID]: true,
 };
 
 function builtinFindSkill(id: string, at: string = BUILTIN_AT): PromptSkill {
@@ -862,6 +792,19 @@ candidates 为空是**正常交付**。不允许为了"有输出"把疑似提级
  */
 const DEFAULT_FIND_PROMPT = `你在知识库里做一次「带证据的检索」：判断哪些文档真的与本次目标相关，只带回清单与结论。
 
+## 调用场景（同一套判定，产物去向不同）
+本提示词同时服务两个入口：
+- **页面「AI 查找」**：为**一个事件**挑「值得加入参考文档」的候选 → 清单显示在事件面板，由人勾选。
+- **MCP 预取（ki_recall）**：为**一次开发任务**挑「开工前该先读」的文档 → 清单直接交给写代码的 agent。
+
+本次是哪种场景、要挑什么，由本轮请求（用户消息）说明；你按下面的口径判断即可，不要自行假设检索范围。
+
+## 检索范围（默认值 ≠ 只能查这里）
+- 调用方传入的 scope 只是**默认范围**：工具参数不写 scope 时用它。
+- 你可以按问题需要**自己决定每次调用查哪个库 / 视图**，同一次检索里不同工具调用可以用不同范围。
+- 具体有哪些库可用、本次默认是哪几个，写在系统提示的【检索范围】一节里（由程序按你的授权生成），**以那段为准**，不要凭印象猜库名。
+- 传了不存在或无权访问的范围会**直接报错**并列出可用项，不会自动回落到默认范围 —— 报错后按提示换一个，不要反复试同一个。
+
 ## 一、必须先读正文再判断
 - 只凭文档名 / 片段 / 检索分数都不能下结论：至少要读完一篇正文（ki_get_module_info，且结果未被截断）
 - 每篇要进候选，必须答出「它对本次目标的哪一部分有用」；答不出来 → 不采纳
@@ -880,51 +823,7 @@ const DEFAULT_FIND_PROMPT = `你在知识库里做一次「带证据的检索」
 - 不得重复推荐排除清单（已关联 / 已参考 / 已读）里的文档
 - 不得用「相关资料」「可参考」这类空理由
 
-约束：只读，不修改任何文档。
-
-> 本次要挑的是「什么」，由随后加载的 skill 说明（refs-locate = 给事件挑参考文档；task-recall = 给任务挑先读文档）。`;
-
-/**
- * AI 预取的默认提示词（REQ-20261118-004）。
- *
- * 与 `DEFAULT_FIND_PROMPT` 同源思路：只写"任务与判定口径"，工具协议与输出格式由代码追加。
- * 三条硬规则（必须先读正文 / 宁少勿滥 / 不确定要说出来）是产品拍板的核心，不留给模型自由发挥。
- */
-const DEFAULT_RECALL_PROMPT = `为一次开发任务做「开工前的资料预取」：给出该先读哪几篇文档，以及为什么。
-**0 篇是合法结果**，且优于 3 篇讲不清用途的。
-
-## 一、必须先读正文再判断
-- 只凭文档名 / 片段 / 检索分数都不能下结论：至少要读完整一篇正文（ki_get_module_info，且结果未被截断）
-- 每篇要进候选，必须能答出「它对这个任务的哪一部分有用」（哪一环 / 哪个现象 / 哪个约束）
-- 答不出来 → 不采纳
-
-## 二、宁少勿滥
-- 3 篇讲得清用途，优于 8 篇看起来都沾边
-- 读到的内容与任务背景不符 → 主动排除，并在结论里说明「X 篇看似相关但讲的是另一件事」
-- 检索跑完、也换过同义表达仍没有 → 返回空数组，并说明查了什么、为什么没有
-
-## 三、不确定要说出来
-- 判断不了的事（两篇口径冲突 / 某模块是否已废弃 / 某篇读不到）写进「不确定」，不许猜成结论
-- 缺关键信息才能判断时，写进「还缺什么」，不要自己编
-
-## 四、禁止
-- 不得出现检索结果里没见过的 group 或文档名
-- 不得重复推荐调用方已读清单（exclude）里的文档
-- 不得用「相关资料」「可参考」这类空理由
-
 约束：只读，不修改任何文档。`;
-
-/** AI 预取的默认配置（`recall` 域缺失时的补齐来源；读取路径用它，不报 issue） */
-export function defaultRecallConfig(): RecallSectionConfig {
-  return {
-    prompt: { content: DEFAULT_RECALL_PROMPT, at: BUILTIN_AT },
-    // 默认没有任何内置 skill：预取阶段的 skill 由用户按需添加
-    skills: [],
-    tools: defaultRecallTools(),
-    maxRounds: RECALL_DEFAULT_ROUNDS,
-    toolResponseChars: RECALL_DEFAULT_TOOL_CHARS,
-  };
-}
 
 export function defaultAnalysisConfig(): AnalysisConfig {
   return {
@@ -939,13 +838,13 @@ export function defaultAnalysisConfig(): AnalysisConfig {
 /** AI 查找的默认配置（`find` 缺失时的补齐来源；读取路径用它，不报 issue） */
 export function defaultFindConfig(): FindConfig {
   return {
-    // 默认不放开任何额外库：与"只查当前事件所在库"的历史行为一致
-    ranges: { extraScopes: [] },
     prompt: { content: DEFAULT_FIND_PROMPT, at: BUILTIN_AT },
     skills: BUILTIN_FIND_SKILL_IDS.map((id) => builtinFindSkill(id)),
     tools: defaultFindTools(),
     // 默认就有上限（15 次）：AI 查找没有"不限制"档，缺字段按这个值算
     maxToolCalls: FIND_DEFAULT_TOOL_CALLS,
+    // 2026-11-25 用户拍板：默认 60s（旧版由 config.recall.hardTimeoutMs 45s 硬顶兜着）
+    timeoutMs: FIND_DEFAULT_TIMEOUT_MS,
   };
 }
 
@@ -962,7 +861,6 @@ export function defaultPromptConfig(): PromptConfig {
     findPrompt: { content: DEFAULT_FIND_PROMPT, at: BUILTIN_AT },
     analysis: defaultAnalysisConfig(),
     find: defaultFindConfig(),
-    recall: defaultRecallConfig(),
   };
 }
 
@@ -1015,13 +913,14 @@ export interface ReadPromptConfigResult {
  *   · 保存路径：只标记 `edited = content !== 当前代码默认`，不改内容；
  *   · 读取路径：`edited === false` ⇒ 换成代码最新默认（提示词 + skill 正文 + skill 描述）；
  *   · `edited` 缺省（历史配置）⇒ 保守保留，由界面标「内置已更新」引导用户点恢复默认。
- * 四个域一起处理：AI 对话 / AI 分析 / AI 查找 / AI 预取（各自的 prompt + skills 结构相同）。
+ * 三个域一起处理：AI 对话 / AI 分析 / AI 查找（各自的 prompt + skills 结构相同）。
+ *
+ * 2026-11-25（A 方案）：原先还有第四个「AI 预取」域 —— 已确认与「AI 查找」是同一套配置，随域一并删除。
  */
 function builtinSnapshots(): {
   chat: { prompt: string; skills: Map<string, { content: string; description: string }> };
   analysis: { prompt: string; skills: Map<string, { content: string; description: string }> };
   find: { prompt: string; skills: Map<string, { content: string; description: string }> };
-  recall: { prompt: string; skills: Map<string, { content: string; description: string }> };
 } {
   const snap = (list: readonly PromptSkill[] | undefined) =>
     new Map((list ?? []).map((sk) => [sk.id, { content: sk.content, description: sk.description }] as const));
@@ -1030,7 +929,6 @@ function builtinSnapshots(): {
     chat: { prompt: base.prompt.content, skills: snap(base.skills) },
     analysis: { prompt: base.analysis?.prompt.content ?? '', skills: snap(base.analysis?.skills) },
     find: { prompt: base.find?.prompt.content ?? '', skills: snap(base.find?.skills) },
-    recall: { prompt: base.recall?.prompt.content ?? '', skills: snap(base.recall?.skills) },
   };
 }
 
@@ -1127,15 +1025,6 @@ function applyBuiltinRefresh(
         },
       }
       : {}),
-    ...(config.recall
-      ? {
-        recall: {
-          ...config.recall,
-          prompt: prompt(config.recall.prompt, snap.recall.prompt, previous?.recall?.prompt) as RecallSectionConfig['prompt'],
-          skills: skills(config.recall.skills, snap.recall.skills, previous?.recall?.skills),
-        },
-      }
-      : {}),
   };
 }
 
@@ -1169,7 +1058,6 @@ export function readPromptConfig(config: KiConfig): ReadPromptConfigResult {
     capabilityPromptSoft: true,
     analysisSoft: true,
     findSoft: true,
-    recallSoft: true,
   });
   if (issues.length > 0) {
     return { config: defaultPromptConfig(), issue: `配置字段非法（已回退默认）：${issues.map((i) => i.path).join('、')}` };
@@ -1256,18 +1144,6 @@ export interface NormalizePromptConfigOptions {
    * 用户先前关掉的工具开关悄悄打开（工具默认全开），属静默丢失（S-01 D-01-5）。
    */
   existingFind?: FindConfig;
-  /**
-   * 读取路径软通道（REQ-20261118-004）：`recall` 是 2026-11-18 新增域，老配置里根本没有它；
-   * 域内字段非法时只忽略该项并写 `softNotes`，绝不触发「整份回退默认」（那会连带打回
-   * 对话提示词 / skill / 工具开关，而磁盘内容其实没变）。
-   */
-  recallSoft?: boolean;
-  /** 保存路径：磁盘既有值里出现过的 skill 名（改名口径的放行依据，与 find 同语义） */
-  existingRecallSkillNames?: ReadonlySet<string>;
-  /** 保存路径：磁盘既有思考级别（脱离清单时放行） */
-  existingRecallEffort?: string;
-  /** 保存路径：以既有域为基底做字段级增量（未提交的子字段沿用旧值） */
-  existingRecall?: RecallSectionConfig;
 }
 
 const FORBIDDEN_TARGET_ROOTS = new Set(['/', '/proc', '/sys', '/dev']);
@@ -1291,9 +1167,6 @@ function validateTargetDirString(raw: unknown): { ok: true; value: string } | { 
   return { ok: true, value: resolved };
 }
 
-/** 额外放开的检索单元上限（含视图；当前事件所在库不计入，故上限比较宽松） */
-export const FIND_MAX_TARGETS = 5;
-
 /**
  * 工具调用次数上限的取值边界（2026-11-19）。
  *
@@ -1312,6 +1185,17 @@ export const FIND_MAX_TOOL_CALLS = 30;
 export const FIND_DEFAULT_TOOL_CALLS = 15;
 
 /**
+ * 单次运行硬超时的取值边界与默认值（2026-11-25 用户拍板，默认 60s）。
+ *
+ * 下界 10s：低于它连「1 次检索 + 2 次读正文」都跑不完，等于必然超时；
+ * 上界 300s：再长就不是"预取/查找"而是批处理了，且调用方（IDE）会先放弃等待。
+ * 与 `config.recall.hardTimeoutMs`（部署级 cap）取 `min` 后生效。
+ */
+export const FIND_MIN_TIMEOUT_MS = 10_000;
+export const FIND_MAX_TIMEOUT_MS = 300_000;
+export const FIND_DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
  * `find` 独立配置域的归一化（REQ-20261116-005）。
  *
  * 与 `normalizeAnalysisSection` 同一范式：
@@ -1319,8 +1203,8 @@ export const FIND_DEFAULT_TOOL_CALLS = 15;
  *     （回退会把对话提示词 / skill / 工具一起显示成默认值，磁盘其实没变）；
  *   · **保存路径**（缺省）→ 进 `issues`（400 且不落盘）。
  *
- * `ranges.byScope` 本期**忽略**（预留字段，S-01 D-01-8）：传了不报错、也不写入 ——
- * 静默接受但不生效会给用户"已经按库差异化"的错觉，故在校验注释与界面文案里都说明"未启用"。
+ * 2026-11-25：`ranges`（检索范围静态白名单）已删除 —— 老配置里若还带 `ranges` 键，
+ * 读取时**静默忽略**（不报 issue，否则会整份回退默认把提示词/工具打回）；保存时不再写出。
  */
 function normalizeFindSection(
   raw: unknown,
@@ -1332,7 +1216,6 @@ function normalizeFindSection(
   const out: FindConfig = opts?.existingFind
     ? {
       ...opts.existingFind,
-      ranges: { ...opts.existingFind.ranges, extraScopes: [...opts.existingFind.ranges.extraScopes] },
       skills: opts.existingFind.skills.map((s) => ({ ...s })),
       tools: { ...opts.existingFind.tools },
     }
@@ -1352,43 +1235,8 @@ function normalizeFindSection(
   }
   const obj = raw as Record<string, unknown>;
 
-  // ── ranges.extraScopes ──
-  if (obj.ranges !== undefined) {
-    const r = obj.ranges;
-    if (r === null || typeof r !== 'object' || Array.isArray(r)) {
-      failField('find.ranges', '应为对象 { extraScopes }');
-    } else {
-      const rObj = r as Record<string, unknown>;
-      const rawScopes = rObj.extraScopes;
-      if (rawScopes !== undefined) {
-        if (!Array.isArray(rawScopes)) {
-          failField('find.ranges.extraScopes', '应为字符串数组');
-        } else if (rawScopes.length > FIND_MAX_TARGETS) {
-          failField('find.ranges.extraScopes', `最多 ${FIND_MAX_TARGETS} 项，实际 ${rawScopes.length}`);
-        } else {
-          const next: string[] = [];
-          for (const item of rawScopes) {
-            if (typeof item !== 'string') {
-              failField('find.ranges.extraScopes', '应为字符串数组');
-              continue;
-            }
-            const name = item.trim();
-            if (!name) {
-              // 空串不静默跳过：保存路径若接受它，界面会显示"配了 1 项"但实际没生效
-              failField('find.ranges.extraScopes', '库名不能为空');
-              continue;
-            }
-            if (FORBIDDEN_RECORD_KEYS.has(name)) {
-              failField(`find.ranges.extraScopes.${name}`, '库名称非法');
-              continue;
-            }
-            if (!next.includes(name)) next.push(name);
-          }
-          out.ranges = { extraScopes: next };
-        }
-      }
-    }
-  }
+  // 老配置里的 `find.ranges` 静默忽略（2026-11-25 删除该字段）：不报 issue、不写入。
+  // 报 issue 会触发「任一字段非法 → 整份回退默认」，把提示词 / skill / 工具开关一起打回。
 
   // ── prompt ──
   if (obj.prompt !== undefined) {
@@ -1467,6 +1315,9 @@ function normalizeFindSection(
           skillFailed = true;
           return;
         }
+        // 2026-11-25（Q6）：已移除的内置 skill 直接从老配置里丢掉 —— 静默、不报错
+        //（报 issue 会触发「任一字段非法 → 整份回退默认」，把用户的提示词 / 工具开关一起打回）
+        if (DEPRECATED_BUILTIN_SKILL_IDS.includes(id)) return;
         seenIds.add(id);
         const builtinName = BUILTIN_FIND_SKILL_NAMES[id];
         const name = builtinName ?? (typeof it.name === 'string' ? it.name.trim() : '');
@@ -1548,6 +1399,20 @@ function normalizeFindSection(
       );
     } else {
       out.maxToolCalls = v;
+    }
+  }
+
+  // ── 硬超时（2026-11-25）：越界 fail-loud，不静默钳制 ──
+  // 静默把 5s 提到 10s、把 999s 压到 300s，界面会显示"你设的值"而实际跑另一个 —— 属于说谎。
+  if (obj.timeoutMs !== undefined) {
+    const v = obj.timeoutMs;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < FIND_MIN_TIMEOUT_MS || v > FIND_MAX_TIMEOUT_MS) {
+      failField(
+        'find.timeoutMs',
+        `应为 ${FIND_MIN_TIMEOUT_MS}~${FIND_MAX_TIMEOUT_MS} 之间的整数毫秒，实际=${String(v)}`,
+      );
+    } else {
+      out.timeoutMs = v;
     }
   }
 
@@ -1840,184 +1705,6 @@ function normalizeAnalysisSection(
       }
     }
   }
-
-  return out;
-}
-
-/**
- * `recall` 域的归一化（REQ-20261118-004）。
- *
- * 与 `normalizeFindSection` 同结构，差异有意保留两处：
- *   · 没有 `ranges`（范围由调用方 `scope` 决定，服务端不设默认库）
- *   · 锁定工具 `RECALL_LOCKED_TOOL_NAMES` **强制 true**（不报错）—— 它失效等于「必须先读正文」失效
- */
-function normalizeRecallSection(
-  raw: unknown,
-  issues: PromptConfigIssue[],
-  opts?: NormalizePromptConfigOptions,
-): RecallSectionConfig {
-  const out: RecallSectionConfig = opts?.existingRecall
-    ? {
-      ...opts.existingRecall,
-      skills: opts.existingRecall.skills.map((s) => ({ ...s })),
-      tools: { ...opts.existingRecall.tools },
-    }
-    : defaultRecallConfig();
-  const soft = opts?.recallSoft === true;
-  const failField = (fieldPath: string, message: string): void => {
-    if (soft) {
-      opts?.softNotes?.push(`${fieldPath}：${message}（已忽略该项，其余配置照常读取）`);
-      return;
-    }
-    issues.push({ path: fieldPath, message });
-  };
-
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    failField('recall', '应为对象');
-    return out;
-  }
-  const obj = raw as Record<string, unknown>;
-
-  // ── prompt ──
-  if (obj.prompt !== undefined) {
-    const p = obj.prompt;
-    if (p === null || typeof p !== 'object' || Array.isArray(p)) {
-      failField('recall.prompt', '应为对象 { content }');
-    } else {
-      const pObj = p as Record<string, unknown>;
-      const content = pObj.content;
-      if (typeof content !== 'string') {
-        failField('recall.prompt.content', 'content 应为字符串');
-      } else if (content.length > CAPABILITY_PROMPT_MAX_CHARS) {
-        failField('recall.prompt.content', `不得超过 ${CAPABILITY_PROMPT_MAX_CHARS} 字，实际 ${content.length}`);
-      } else {
-        out.prompt = {
-          content,
-          at: typeof pObj.at === 'string' ? String(pObj.at) : BUILTIN_AT,
-          ...(typeof pObj.edited === 'boolean' ? { edited: pObj.edited } : {}),
-        };
-      }
-    }
-  }
-
-  // ── tools（白名单；锁定项强制 true）──
-  if (obj.tools !== undefined) {
-    const t = obj.tools;
-    if (t === null || typeof t !== 'object' || Array.isArray(t)) {
-      failField('recall.tools', '应为对象 { 工具名: 布尔值 }');
-    } else {
-      const tools: Record<string, boolean> = { ...out.tools };
-      for (const [name, value] of Object.entries(t as Record<string, unknown>)) {
-        if (!RECALL_TOOL_NAMES.includes(name)) {
-          failField(`recall.tools.${name}`, `未知预取工具名（可用：${RECALL_TOOL_NAMES.join(' | ')}）`);
-          continue;
-        }
-        if (typeof value !== 'boolean') {
-          failField(`recall.tools.${name}`, '应为布尔值');
-          continue;
-        }
-        tools[name] = value;
-      }
-      // 锁定项：无论提交什么值都强制 true（不报错 —— 前端把开关置灰，旧前端可能仍提交 false）
-      for (const name of RECALL_LOCKED_TOOL_NAMES) tools[name] = true;
-      out.tools = tools;
-    }
-  }
-
-  // ── skills（规则与 find 一致：id / 英文名 / 描述 / 正文长度）──
-  if (obj.skills !== undefined) {
-    const list = obj.skills;
-    if (!Array.isArray(list)) {
-      failField('recall.skills', '应为数组');
-    } else if (list.length > MAX_SKILLS) {
-      failField('recall.skills', `最多 ${MAX_SKILLS} 条，实际 ${list.length}`);
-    } else {
-      const seenIds = new Set<string>();
-      const seenNames = new Set<string>();
-      const skills: PromptSkill[] = [];
-      list.forEach((item, i) => {
-        const at = `recall.skills[${i}]`;
-        if (item === null || typeof item !== 'object' || Array.isArray(item)) {
-          failField(at, '应为对象');
-          return;
-        }
-        const it = item as Record<string, unknown>;
-        const id = typeof it.id === 'string' ? it.id : '';
-        if (!SKILL_ID_RE.test(id)) {
-          failField(`${at}.id`, 'id 需为小写字母/数字开头、可含连字符（≤64 字符）');
-          return;
-        }
-        if (seenIds.has(id)) {
-          failField(`${at}.id`, `id 重复：${id}`);
-          return;
-        }
-        seenIds.add(id);
-        const name = typeof it.name === 'string' ? it.name.trim() : '';
-        if (!name) {
-          failField(`${at}.name`, '名称不能为空');
-        } else if (name.length > SKILL_NAME_MAX_CHARS) {
-          failField(`${at}.name`, `名称不得超过 ${SKILL_NAME_MAX_CHARS} 字`);
-        } else {
-          const exempt = opts?.skillNameSoft === true
-            || opts?.existingRecallSkillNames?.has(name) === true;
-          if (!exempt && !SKILL_NAME_RE.test(name)) {
-            failField(`${at}.name`, `名称须为英文：${SKILL_NAME_RULE_HINT}（例：refs-locate）`);
-          } else if (seenNames.has(name.toLowerCase())) {
-            failField(`${at}.name`, `名称重复：${name}`);
-          }
-        }
-        seenNames.add(name.toLowerCase());
-        const description = typeof it.description === 'string' ? it.description.trim() : '';
-        if (description.length > SKILL_DESC_MAX_CHARS) {
-          failField(`${at}.description`, `描述不得超过 ${SKILL_DESC_MAX_CHARS} 字，实际 ${description.length}`);
-        }
-        const content = typeof it.content === 'string' ? it.content : '';
-        if (content.length > SKILL_MAX_CHARS) {
-          failField(`${at}.content`, `不得超过 ${SKILL_MAX_CHARS} 字，实际 ${content.length}`);
-        }
-        skills.push({
-          id,
-          name,
-          description,
-          content,
-          builtin: false,
-          ...(typeof it.edited === 'boolean' ? { edited: it.edited } : {}),
-          enabled: it.enabled === undefined ? true : it.enabled === true,
-          at: typeof it.at === 'string' ? String(it.at) : BUILTIN_AT,
-        });
-      });
-      out.skills = skills;
-    }
-  }
-
-  // ── reasoningEffort（口径同 find）──
-  if (obj.reasoningEffort !== undefined) {
-    const v = obj.reasoningEffort;
-    const known = typeof v === 'string' && v === opts?.existingRecallEffort;
-    if (typeof v !== 'string') {
-      failField('recall.reasoningEffort', '应为字符串');
-    } else if (!v.trim() || v.length > REASONING_EFFORT_MAX_CHARS) {
-      failField('recall.reasoningEffort', `应为 1–${REASONING_EFFORT_MAX_CHARS} 字符的非空字符串`);
-    } else if (v === REASONING_EFFORT_RESERVED && !known) {
-      failField('recall.reasoningEffort', `"${REASONING_EFFORT_RESERVED}" 是内部保留值，不应提交`);
-    } else {
-      out.reasoningEffort = v;
-    }
-  }
-
-  // ── maxRounds / toolResponseChars（越界 fail-loud，不静默钳制）──
-  const intField = (key: 'maxRounds' | 'toolResponseChars', min: number, max: number): void => {
-    const v = obj[key];
-    if (v === undefined) return;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < min || v > max) {
-      failField(`recall.${key}`, `应为 ${min}~${max} 之间的整数，实际=${String(v)}`);
-      return;
-    }
-    if (key === 'maxRounds') out.maxRounds = v;
-    else out.toolResponseChars = v;
-  };
-  intField('maxRounds', RECALL_MIN_ROUNDS, RECALL_MAX_ROUNDS);
-  intField('toolResponseChars', RECALL_MIN_TOOL_CHARS, RECALL_MAX_TOOL_CHARS);
 
   return out;
 }
@@ -2341,11 +2028,6 @@ export function normalizePromptConfig(
     }
   }
 
-  // recall 独立配置域（REQ-20261118-004）—— 无老字段承接（本域首次引入即终态）
-  if (obj.recall !== undefined) {
-    out.recall = normalizeRecallSection(obj.recall, issues, opts);
-  }
-
   return out;
 }
 
@@ -2369,9 +2051,6 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
     existingFindSkillNames: new Set((existing.find?.skills ?? []).map((s) => s.name)),
     existingFindEffort: existing.find?.reasoningEffort,
     ...(existing.find ? { existingFind: existing.find } : {}),
-    existingRecallSkillNames: new Set((existing.recall?.skills ?? []).map((s) => s.name)),
-    ...(existing.recall?.reasoningEffort !== undefined ? { existingRecallEffort: existing.recall.reasoningEffort } : {}),
-    ...(existing.recall ? { existingRecall: existing.recall } : {}),
     effortOptions: config.llm?.reasoningEfforts,
   });
   if (issues.length > 0) throw new PromptConfigError(issues);
@@ -2406,10 +2085,6 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
       ...(rawInput.findPrompt !== undefined && next.findPrompt ? { prompt: { ...next.findPrompt } } : {}),
     };
   }
-  if (rawInput.recall === undefined && existing.recall) {
-    // 同 analysis / find：旧前端（不认识 recall 域）保存时不得把用户的 AI 预取配置重置为默认
-    next.recall = existing.recall;
-  }
   const now = new Date().toISOString();
   // 时间戳由服务端打（客户端时间不可信）
   next.prompt.at = now;
@@ -2434,11 +2109,6 @@ export function savePromptConfig(config: KiConfig, input: unknown): PromptConfig
     if (rawInput.find !== undefined && rawInput.findPrompt === undefined) {
       next.findPrompt = { ...next.find.prompt };
     }
-  }
-  if (next.recall) {
-    // 时间戳由服务端打（与 prompt / skills 同口径）
-    next.recall.prompt = { ...next.recall.prompt, at: now };
-    next.recall.skills = next.recall.skills.map((s) => ({ ...s, at: now }));
   }
   const file = promptConfigPath(config);
   fs.mkdirSync(path.dirname(file), { recursive: true });

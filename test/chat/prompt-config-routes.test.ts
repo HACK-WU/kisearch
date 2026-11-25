@@ -288,65 +288,6 @@ describe('PUT /api/chat/prompt-config · 只读能力门禁', () => {
   });
 });
 
-/**
- * 检索范围的保存期预检（REQ-20261116-005 · A3）
- *
- * 保存期**复用运行期的 `resolveFindTargets`**：它返回的 `skipped` 就是"查找时会被剔除"
- * 的项。能改全局配置的 token 必然是 all-scope（`requireGlobalConfigWrite`），而 all-scope
- * 让授权类判定恒真，因此真正被拦下的是**名字不存在**与**视图无成员**两类。
- */
-describe('PUT · 检索范围预检（与运行期同口径）', () => {
-  const viewName = 'ops-view';
-  let viewsRoot = '';
-
-  before(() => {
-    viewsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-views-'));
-    fs.writeFileSync(
-      path.join(viewsRoot, 'views.json'),
-      JSON.stringify({
-        version: 2,
-        views: { [viewName]: { id: 'v_opsview', members: ['ops-a', 'ops-b'], revision: 1 } },
-        updatedAt: new Date().toISOString(),
-      }),
-      'utf-8',
-    );
-  });
-
-  /** `getViewsPath` 以 `_configPath` 的目录为锚；不给它会去读真实 `~/.ki/views.json` */
-  const snapshotWithViews = () => ({
-    dataDir: path.join(viewsRoot, 'kb'),
-    chatDir,
-    _configPath: path.join(viewsRoot, 'config.yaml'),
-  });
-
-  it('名字既不是库也不是视图 → 400，details 指向该项', async () => {
-    ctxExtra = { authScopes: ['all'], configSnapshot: snapshotWithViews() };
-    try {
-      const r = await api('PUT', '/api/chat/prompt-config', {
-        find: { ranges: { extraScopes: ['no-such-scope-xyz'] } },
-      });
-      assert.equal(r.status, 400, `不存在的名字应拒绝：${r.text}`);
-      const details = r.json?.details as Array<{ field: string }>;
-      assert.ok(details?.some((d) => d.field.includes('no-such-scope-xyz')), `details 应指向该项：${r.text}`);
-      assert.match(String(r.json?.error ?? ''), /不存在/, '文案要说明是"不存在"，不是"无权限"');
-    } finally {
-      ctxExtra = {};
-    }
-  });
-
-  it('视图存在（成员齐全）→ 200，且原样落盘', async () => {
-    ctxExtra = { authScopes: ['all'], configSnapshot: snapshotWithViews() };
-    try {
-      const r = await api('PUT', '/api/chat/prompt-config', { find: { ranges: { extraScopes: [viewName] } } });
-      assert.equal(r.status, 200, r.text);
-      const saved = r.json?.config as { find?: { ranges: { extraScopes: string[] } } };
-      assert.deepEqual(saved.find?.ranges.extraScopes, [viewName]);
-    } finally {
-      ctxExtra = {};
-    }
-  });
-});
-
 describe('护栏自检（可脚本化）', () => {
   it('守 #1：冻结契约未被改动（chat-contract.ts 不含本轮新增错误码）', () => {
     const contract = fs.readFileSync(

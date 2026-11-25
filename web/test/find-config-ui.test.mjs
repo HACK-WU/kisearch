@@ -34,7 +34,6 @@ const base = () => ({
   skills: [{ id: 'builtin-retrieval', name: 'knowledge-retrieval', description: '', content: 'c', builtin: true, enabled: true, at: 'a' }],
   tools: { ki_search: true },
   find: {
-    ranges: { extraScopes: ['kisearch-docs'], byScope: { other: ['x'] } },
     prompt: { content: '找文档', at: 'b' },
     skills: [{ id: 'builtin-refs-locate', name: 'refs-locate', description: 'd', content: 'c2', builtin: true, enabled: true, at: 'b' }],
     tools: { ki_search: true, ki_get_module_info: false, ki_group_list: true, ki_tag_list: true },
@@ -50,8 +49,6 @@ describe('① 草稿拷贝必须搬运 find（整份替换语义）', () => {
   it('子块全部保留，已取消的预算字段不再搬运', () => {
     const out = clonePromptConfig(base());
     assert.ok(out.find, 'find 域不得丢失');
-    assert.deepEqual(out.find.ranges.extraScopes, ['kisearch-docs']);
-    assert.deepEqual(out.find.ranges.byScope, { other: ['x'] }, '预留字段也要搬，否则手工配置被清掉');
     assert.equal(out.find.prompt.content, '找文档');
     assert.equal(out.find.skills.length, 1);
     assert.equal(out.find.tools.ki_get_module_info, false);
@@ -61,16 +58,15 @@ describe('① 草稿拷贝必须搬运 find（整份替换语义）', () => {
     // 2026-11-18：轮次 / 候选 / 超时预算整体取消 —— 草稿即使带着旧值也不再搬运
     assert.equal('maxRounds' in out.find, false, 'maxRounds 已取消');
     assert.equal('maxCandidates' in out.find, false, 'maxCandidates 已取消');
-    assert.equal('timeoutMs' in out.find, false, 'timeoutMs 已取消');
+    // 2026-11-25：超时重新启用（默认 60s），必须搬运（漏搬 = 改别的配置一保存就被清空）
+    assert.equal(out.find.timeoutMs, 45000, 'timeoutMs 必须被搬运');
   });
 
   it('深拷：改草稿不影响原对象（否则"没保存也生效了"）', () => {
     const src = base();
     const out = clonePromptConfig(src);
-    out.find.ranges.extraScopes.push('leak');
     out.find.tools.ki_search = false;
     out.find.prompt.content = 'changed';
-    assert.deepEqual(src.find.ranges.extraScopes, ['kisearch-docs']);
     assert.equal(src.find.tools.ki_search, true);
     assert.equal(src.find.prompt.content, '找文档');
   });
@@ -89,8 +85,9 @@ describe('② 渲染标记', () => {
 
   it('find 分组含：范围多选、工具开关、提示词卡（不再有「待生效」横幅）', () => {
     assert.match(layerSrc, /capability === 'find'/, '要有 find 专属分支');
-    assert.match(layerSrc, /检索范围/, '范围块标题');
-    assert.match(layerSrc, /ScopeMultiPicker[\s\S]{0,400}findScopeOptions/s, '范围选择复用 ScopeMultiPicker');
+    // 2026-11-25（批 3）：检索范围白名单已删除 —— 模型按问题自选 scope
+    assert.equal(/检索范围/.test(layerSrc), false, '范围块必须移除');
+    assert.equal(/findScopeOptions/.test(layerSrc), false, '范围选择器已随块删除');
     // REQ-20261118-004：取消 fast 后所有块都生效，「待生效」横幅必须消失
     assert.equal(/深度查找上线后生效/.test(layerSrc), false, '不得再出现「待生效」横幅');
     assert.match(layerSrc, /findToolGroups/, '工具清单由服务端下发，前端不硬编码');

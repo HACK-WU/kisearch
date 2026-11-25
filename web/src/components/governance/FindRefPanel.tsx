@@ -185,6 +185,14 @@ export function FindRefPanel(args: FindRefPanelProps): JSX.Element | null {
     args.onStatus?.({ state, count: candidates.length });
   }, [state, candidates.length]);
   const multiScope = (result?.targets?.length ?? 1) > 1;
+  /**
+   * 实际检索范围（2026-11-25，与 `ki_recall` 的 `scopesUsed` 同口径）。
+   *
+   * `targets` 只是默认范围；模型可能按问题换库，这里如实展示它真正查过哪些库，
+   * 并在"超出默认"时点明，避免用户以为只查了事件所在库。
+   */
+  const scopesUsed = result?.scopesUsed ?? [];
+  const scopesCrossed = scopesUsed.some((s) => !(result?.targets ?? []).includes(s));
   const pickedDocs = candidates.filter((c) => picked.has(keyOf(c)));
   const isDeepResult = candidates.length > 0 && candidates.every((c) => c.origin === 'deep');
 
@@ -366,6 +374,15 @@ export function FindRefPanel(args: FindRefPanelProps): JSX.Element | null {
             </p>
           ) : null}
         </div>
+      ) : null}
+
+      {state === 'done' && scopesUsed.length > 0 ? (
+        <p className="gov-hint" style={{ padding: '6px 12px' }}>
+          实际检索范围：<b>{scopesUsed.join('、')}</b>
+          {scopesCrossed
+            ? `（默认是 ${(result?.targets ?? []).join('、')}，AI 按问题自行扩大）`
+            : ''}
+        </p>
       ) : null}
 
       {state === 'done' && candidates.length > 0 ? (

@@ -49,15 +49,11 @@ export const clonePromptConfig = (c: PromptConfig): PromptConfig => ({
     : {}),
   /**
    * AI 查找域（REQ-20261116-005）：漏搬任何一项都会在「改别的配置保存」时被静默清空。
-   * `ranges.byScope` 是预留字段 —— 即使本期不渲染也必须搬，否则手工改过的文件会被清掉。
+   * 2026-11-25（批 3）：`ranges`（检索范围白名单）已删除，不再搬运。
    */
   ...(c.find !== undefined
     ? {
         find: {
-          ranges: {
-            extraScopes: [...c.find.ranges.extraScopes],
-            ...(c.find.ranges.byScope !== undefined ? { byScope: { ...c.find.ranges.byScope } } : {}),
-          },
           prompt: { ...c.find.prompt },
           skills: c.find.skills.map((s) => ({ ...s })),
           tools: { ...c.find.tools },
@@ -65,6 +61,8 @@ export const clonePromptConfig = (c: PromptConfig): PromptConfig => ({
           ...(c.find.reasoningEffort !== undefined ? { reasoningEffort: c.find.reasoningEffort } : {}),
           // 2026-11-19：工具调用次数上限（漏搬 = 改别的配置一保存就被清空）
           ...(c.find.maxToolCalls !== undefined ? { maxToolCalls: c.find.maxToolCalls } : {}),
+          // 2026-11-25：单次运行硬超时（同一份值作用于 AI 查找与 MCP 预取）
+          ...(c.find.timeoutMs !== undefined ? { timeoutMs: c.find.timeoutMs } : {}),
         },
       }
     : {}),

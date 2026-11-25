@@ -32,6 +32,13 @@ const THINKING_MAX_CHARS = 2000;
 export interface GroundedToolOutcome {
   /** 回给模型的文本（调用方负责按字符预算截断） */
   text: string;
+  /**
+   * 本次调用**实际生效**的 scope（可能是视图名；2026-11-25 Q4「审计实际 scope」）。
+   *
+   * 必须报实际值而不是模型请求值：模型可能传视图（展开成多个成员）或干脆没传（走默认范围），
+   * 只记入参会让审计看不出「这次到底查了哪个库」。
+   */
+  scopeUsed?: string[];
   /** 若读了文档正文，回填身份（用于校验「候选必须真读过」） */
   read?: { scope: string; group: string; name: string; truncated: boolean };
   /**
@@ -98,7 +105,14 @@ export interface GroundedResult {
    * 工具调用轨迹（按调用顺序）。**给过程面板用**：
    * 「AI 查找」把它映射成 steps，让用户看到"检索了什么、读了几篇"。
    */
-  toolTrace: Array<{ name: string; args: Record<string, unknown>; ms: number; ok: boolean }>;
+  toolTrace: Array<{ name: string; args: Record<string, unknown>; ms: number; ok: boolean; scope?: string }>;
+  /**
+   * 本次调用**实际生效**过的 scope 并集（含视图名；2026-11-25 Q4「审计实际 scope」）。
+   *
+   * 与入参 scope 不同：模型可能全程没传（用默认）或传了视图（展开成成员），
+   * 审计要看得见「这次到底查了哪些库」。
+   */
+  scopesUsed: string[];
   /**
    * 模型 reasoning 流（跨轮合并，截断到 `THINKING_MAX_CHARS`）。
    *
@@ -129,6 +143,12 @@ export interface GroundedResult {
 
 // ─── 工具定义（OpenAI function schema）──────────────────
 
+const SCOPE_PARAM = {
+  type: 'string' as const,
+  description: '检索范围：库名或视图名（多个用逗号）。**缺省用本次默认范围**；'
+    + '确实需要换库/换视图时才传，先调 ki_scope_list 看有哪些可用。传不存在的会被报错，不会自动回落。',
+};
+
 const TOOL_DEFS: Record<string, ToolDef> = {
   ki_search: {
     type: 'function',
@@ -141,6 +161,7 @@ const TOOL_DEFS: Record<string, ToolDef> = {
           query: { type: 'string', description: '检索词（短句或关键词组合，不要整段任务描述）' },
           mode: { type: 'string', enum: ['hybrid', 'fulltext'], description: '缺省 hybrid' },
           limit: { type: 'number', description: '返回条数 1~20，缺省 8' },
+          scope: SCOPE_PARAM,
         },
         required: ['query'],
       },
@@ -156,7 +177,7 @@ const TOOL_DEFS: Record<string, ToolDef> = {
         properties: {
           group: { type: 'string', description: '组路径' },
           relation: { type: 'string', description: '文档名（不含 .md）' },
-          scope: { type: 'string', description: '库名；缺省在当前范围内找' },
+          scope: { ...SCOPE_PARAM, description: '库名或视图名；缺省在默认范围内逐个找（视图会展开成员）' },
         },
         required: ['group', 'relation'],
       },
@@ -170,7 +191,7 @@ const TOOL_DEFS: Record<string, ToolDef> = {
       parameters: {
         type: 'object',
         properties: {
-          scope: { type: 'string', description: '库名' },
+          scope: SCOPE_PARAM,
           groups: { type: 'string', description: '只看某个组（可选）' },
           depth: { type: 'number', description: '展开层级，缺省 2' },
         },
@@ -181,7 +202,7 @@ const TOOL_DEFS: Record<string, ToolDef> = {
     type: 'function',
     function: {
       name: 'ki_scope_list',
-      description: '列出当前可用的知识库。',
+      description: '列出你**有权访问**的知识库与视图（换库 / 换视图前先看这个）。',
       parameters: { type: 'object', properties: {} },
     },
   },
@@ -190,7 +211,10 @@ const TOOL_DEFS: Record<string, ToolDef> = {
     function: {
       name: 'ki_tag_list',
       description: '列出知识库里出现过的标签。',
-      parameters: { type: 'object', properties: {} },
+      parameters: {
+        type: 'object',
+        properties: { scope: SCOPE_PARAM },
+      },
     },
   },
 };
@@ -295,6 +319,8 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
   let rounds = 0;
   let timedOut = false;
   let stopReason: 'timeout' | 'budget' | undefined;
+  /** 本次所有工具调用**实际生效**过的 scope 并集（审计用，2026-11-25 Q4） */
+  const scopesUsed = new Set<string>();
   /*
    * 工具调用预算：`undefined` = 不限制（**只有 `ki_recall` 会落到这一档** —— 预取不设上限；
    * 「AI 查找」的调用方 `deep-find-core` 恒传一个归一化过的整数，故查找永远有限）。
@@ -402,8 +428,13 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
         args,
         ms: now() - callStarted,
         ok: !outcome.text.startsWith('{"error"'),
+        // 生效 scope（模型可能传视图 / 不传；记实际值而非入参）
+        ...(outcome.scopeUsed && outcome.scopeUsed.length > 0
+          ? { scope: outcome.scopeUsed.join(',') }
+          : {}),
       };
       toolTrace.push(traceItem);
+      if (outcome.scopeUsed) for (const s of outcome.scopeUsed) scopesUsed.add(s);
       if (outcome.searchMode) sawSearchModes.add(outcome.searchMode);
       try {
         input.onToolCall?.({ ...traceItem, round });
@@ -474,6 +505,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
       partial: true,
       ...(stopReason ? { stopReason } : {}),
       toolTrace,
+      scopesUsed: [...scopesUsed],
       ...(thinking.trim()
         ? { thinking: { text: thinking.slice(0, THINKING_MAX_CHARS), chars: thinking.length } }
         : {}),
@@ -540,6 +572,7 @@ export async function runGroundedRecall(input: GroundedInput): Promise<GroundedR
     ...(timedOut || stopReason === 'budget' || snippetOnly > 0 ? { partial: true } : {}),
     ...(stopReason ? { stopReason } : {}),
     toolTrace,
+    scopesUsed: [...scopesUsed],
     ...(thinking.trim()
       ? { thinking: { text: thinking.slice(0, THINKING_MAX_CHARS), chars: thinking.length } }
       : {}),

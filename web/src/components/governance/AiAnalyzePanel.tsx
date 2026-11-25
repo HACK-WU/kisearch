@@ -488,7 +488,17 @@ export function AiAnalyzePanel(args: AiAnalyzePanelProps): JSX.Element {
 
                           {expandable && expanded ? (
                             <div className="gov-ai-step__detail">
-                              <StepMetrics data={step.metrics ?? {}} />
+                              {/*
+                               * 2026-11-25：本面板只把 `metrics` 交给 StepMetrics（不像查找面板会合并
+                               * `detail`），所以「实际检索范围」存在 `detail.scopes` 时必须显式合并，
+                               * 否则后端有数据、前端也不显示（真机就踩了这一下）。
+                               */}
+                              <StepMetrics
+                                data={{
+                                  ...(step.metrics ?? {}),
+                                  ...(Array.isArray(step.detail?.scopes) ? { scopes: step.detail.scopes } : {}),
+                                }}
+                              />
                               {/*
                                * 预取步骤的「建议先读」清单存在 detail 里（docs / summary）：
                                * 只渲染 metrics 的话用户只能看到一个数字，不知道建议读的是哪篇

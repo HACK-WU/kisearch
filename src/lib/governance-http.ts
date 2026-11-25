@@ -1108,6 +1108,9 @@ export async function handleGovernanceRoutes(
         const started = await startEventAnalysis(scope, id, {
           forceOverwrite: b.forceOverwrite === true,
           resume: b.resume === true,
+          // 2026-11-25（批 3-C）：把本次请求的授权集交给只读工具，模型才能安全自选 scope。
+          // 显式传（含 null = 本机不限权）才算开启；漏传 = 保持「只能查事件所在库」。
+          authScopes: ctx.authScopes ?? null,
         });
         return sendJson(res, started.reused ? 200 : 202, {
           ok: true,
@@ -1172,6 +1175,8 @@ export async function handleGovernanceRoutes(
               question: str(b.question) ?? '',
               onDelta: (text) => send({ type: 'delta', text }),
               onEvent: (progress) => send(progress),
+              // 与 startEventAnalysis 同口径：只读工具按本次请求授权集放开自选 scope
+              authScopes: ctx.authScopes ?? null,
             });
             /*
              * 结论补丁（S03 §3.5）：`done` **之前**下发，且带 `turnId` ——
@@ -1259,7 +1264,10 @@ export async function handleGovernanceRoutes(
               throw new GovernanceError('REVISION_CONFLICT', '分析结果已更新，请刷新后重新提问');
             }
             const question = str(b.question) ?? '';
-            const result = await askEventAnalysis(scope, event as unknown as AskTargetEvent, { question });
+            const result = await askEventAnalysis(scope, event as unknown as AskTargetEvent, {
+              question,
+              authScopes: ctx.authScopes ?? null,
+            });
             return sendJson(res, 200, { ok: true, scope, eventId: event.id, turn: result.turn });
           }
           if (method === 'DELETE') {
@@ -1611,12 +1619,14 @@ export async function handleGovernanceRoutes(
            *      避免发版瞬间整页 400）。
            */
           /**
-           * 检索范围：**[事件库] ∪ 配置里放开的额外库**，由服务端解析。
+           * 检索范围：起点恒为**事件所在库**（2026-11-25 批 3 删除了「额外库」白名单）；
+           * 需要跨库时由模型在工具调用里自行指定（逐次鉴权）。
            * 前端不得传 targets —— 那等于把越权入口开放给浏览器（且它拿不到完整授权集）。
            */
           const kiCfg = loadConfig();
+          // 查找域配置（提示词 / skill / 工具 / 次数）在下游 runDeepFindAsSearchResult 里读
           const promptCfg = readPromptConfig(kiCfg).config;
-          const { targets, skipped } = resolveFindTargets(scope, promptCfg.find, {
+          const { targets, skipped } = resolveFindTargets(scope, {
             tokenScopes: ctx.authScopes ?? [ALL_SCOPES],
             config: kiCfg,
           });
@@ -1681,6 +1691,8 @@ export async function handleGovernanceRoutes(
                 targets,
                 config: promptCfg.find ?? defaultFindConfig(),
                 kiConfig: kiCfg,
+                // 2026-11-25：与 ki_recall 同口径 —— 传入授权集后模型可在工具调用里自选 scope
+                tokenScopes: ctx.authScopes ?? null,
                 signal: abortCtl.signal,
                 ...(sseStep ? { onProgress: (call: { name: string; args: Record<string, unknown>; ms: number; ok: boolean; round: number }) => sseStep?.({ ...call, label: findToolLabel(call.name) }) } : {}),
               });

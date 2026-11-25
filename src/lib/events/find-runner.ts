@@ -202,6 +202,12 @@ export interface DeepFindResult {
   steps: RefSearchStep[];
   /** 实际发给检索的 query（模型自己生成的，这里给的是首轮线索，仅作面板展示） */
   query: string;
+  /**
+   * 本次**实际生效**过的 scope 并集（2026-11-25，与 `ki_recall` 同口径）。
+   *
+   * 模型可能换库/换视图：入参 `targets` 只是默认范围，这里才是真的查过哪些库。
+   */
+  scopesUsed: string[];
   durationMs: number;
   /**
    * 提前结束（结果不完整）：`timeout` = 硬超时；`budget` = 工具调用次数用尽（2026-11-19）。
@@ -243,6 +249,12 @@ export interface DeepFindDeps {
   runTool?: GroundedToolRunner;
   /** 视图名 → 成员库（默认读 `views.json`）；用于把视图名纠错成成员库 */
   viewMembers?: (name: string) => string[] | null;
+  /**
+   * 调用方授权集（2026-11-25，与 `ki_recall` 同口径）。
+   *
+   * **有该键**（含显式 `null` = 本机不限权）才允许模型自选 scope；不传 = 保持范围锁定。
+   */
+  tokenScopes?: string[] | null;
   /**
    * 工具调用进度回调（2026-11-19）：SSE 面板据此边跑边显示。
    * 只在 `stream=1` 时注入；不注入时行为与之前完全一致。

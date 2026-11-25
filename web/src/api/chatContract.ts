@@ -502,12 +502,9 @@ export interface PromptConfig {
   /**
    * **AI 查找独立配置域**（REQ-20261116-005）。
    *
-   * ⚠️ 生效范围：`ranges` 对快速通道立即生效；其余字段只在**深度通道**读取。
-   * 一期后端 `capabilities.findDeep=false` 时，设置页据此把后者标为「深度查找上线后生效」。
+   * 2026-11-25（批 3）：`ranges`（检索范围白名单）已删除 —— 模型按问题自行换库，逐次鉴权。
    */
   find?: FindConfig;
-  /** AI 预取（REQ-20261118-004） */
-  recall?: RecallSectionConfig;
 }
 
 export interface AnalysisTargetConfig {
@@ -555,32 +552,13 @@ export interface CapabilityPrompt {
   edited?: boolean;
 }
 
-/** AI 查找 · 检索范围（`extraScopes` 不含"当前事件所在库"，它恒定在范围内） */
-export interface FindRangeConfig {
-  /** 额外放开的检索单元（scope 名或视图名）；上限读 `limits.findMaxTargets` */
-  extraScopes: string[];
-  /** 预留（本期不实现、界面不暴露、校验时忽略）：按事件所在库覆盖 `extraScopes` */
-  byScope?: Record<string, string[]>;
-}
-
 /** AI 查找独立配置域（与后端 `FindConfig` 同形状） */
 /**
- * **AI 预取**配置域（REQ-20261118-004），与 find 同级、物理独立。
- *
- * 与 find 的差异：没有 `ranges`（范围由调用方 scope 决定）；多 `maxRounds` / `toolResponseChars`
- * （预取是多轮读正文的循环，这两项直接决定能不能在 45s 内跑完）。
+ * 2026-11-25（A 方案）：原「AI 预取」域已删除 —— 页面「AI 查找」与 MCP `ki_recall` 是同一套配置，
+ * 只有一份 `find`。内置 skill 只剩 `refs-locate`（页面侧挑参考文档）；
+ * 预取侧不加载 skill（原 `task-recall` 已按 Q6 移除，判断口径由基础提示词 + 用户消息承担）。
  */
-export interface RecallSectionConfig {
-  prompt: CapabilityPrompt;
-  skills: Array<{ id: string; name: string; description: string; content: string; builtin: boolean; enabled: boolean; at: string }>;
-  tools: Record<string, boolean>;
-  reasoningEffort?: string;
-  maxRounds: number;
-  toolResponseChars: number;
-}
-
 export interface FindConfig {
-  ranges: FindRangeConfig;
   /** 检索定位提示词（深度通道注入；快速通道不读） */
   prompt: CapabilityPrompt;
   /** AI 查找专属 skill（与对话 / 分析的 skill 互相独立） */
@@ -590,8 +568,8 @@ export interface FindConfig {
   /**
    * 思考级别（缺省 = 跟随部署默认）。
    *
-   * ⚠️ 2026-11-18：原 `maxRounds` / `maxCandidates` / `timeoutMs` 预算已整体取消，
-   *    后端不再读取（旧配置残留静默忽略）。
+   * ⚠️ 2026-11-18：`maxRounds` / `maxCandidates` 预算已整体取消（旧配置残留静默忽略）；
+   *    2026-11-25：`timeoutMs` **重新启用**（默认 60s，见下）。
    */
   reasoningEffort?: string;
   /**
@@ -602,6 +580,13 @@ export interface FindConfig {
    * 上下界与默认值都读 `limits`，前端不硬编码。
    */
   maxToolCalls?: number;
+  /**
+   * 单次运行硬超时（毫秒，2026-11-25 用户拍板，默认 60s）。
+   *
+   * 同一份值**同时**作用于「AI 查找」与 MCP `ki_recall`；
+   * 部署级上限在 `config.yaml` 的 `recall.hardTimeoutMs`，实际生效取两者 min。
+   */
+  timeoutMs?: number;
 }
 
 export interface PromptConfigLimits {
@@ -641,7 +626,6 @@ export interface PromptConfigLimits {
    * ⚠️ 2026-11-18：分析与检索的轮次 / 文件 / 候选 / 超时预算上下界已整体取消，
    *    服务端不再下发，前端也不再有对应的输入框。
    */
-  findMaxTargets?: number;
   /**
    * AI 查找 · 工具调用次数上限的边界与默认值（2026-11-19）。
    * **缺失 = 旧版 daemon 不认这个配置项** → 设置页据此提示重启，而不是让用户以为设上了。
@@ -650,11 +634,10 @@ export interface PromptConfigLimits {
   findMinToolCalls?: number;
   findMaxToolCalls?: number;
   findToolCallsDefault?: number;
-  /** AI 预取：轮次与单次工具结果字符的上下界（REQ-20261118-004） */
-  recallMaxRoundsMin?: number;
-  recallMaxRoundsMax?: number;
-  recallToolCharsMin?: number;
-  recallToolCharsMax?: number;
+  /** AI 查找 · 单次运行硬超时的边界与默认值（2026-11-25，毫秒；界面按秒展示） */
+  findMinTimeoutMs?: number;
+  findMaxTimeoutMs?: number;
+  findTimeoutDefaultMs?: number;
 }
 
 /** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */

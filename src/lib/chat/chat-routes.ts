@@ -101,8 +101,10 @@ import {
   CAPABILITY_PROMPT_MAX_CHARS,
   CONTEXT_CHARS_MAX,
   FIND_DEFAULT_TOOL_CALLS,
-  FIND_MAX_TARGETS,
   FIND_MAX_TOOL_CALLS,
+  FIND_DEFAULT_TIMEOUT_MS,
+  FIND_MAX_TIMEOUT_MS,
+  FIND_MIN_TIMEOUT_MS,
   FIND_MIN_TOOL_CALLS,
   FIND_SKILL_REQUIRED_TOOLS,
   FIND_TOOL_GROUPS,
@@ -110,10 +112,6 @@ import {
   MCP_TOOL_GROUPS,
   PROMPT_MAX_CHARS,
   PromptConfigError,
-  RECALL_MAX_ROUNDS,
-  RECALL_MAX_TOOL_CHARS,
-  RECALL_MIN_ROUNDS,
-  RECALL_MIN_TOOL_CHARS,
   SKILL_DESC_MAX_CHARS,
   SKILL_DESC_SUGGESTED_CHARS,
   SKILL_MAX_CHARS,
@@ -702,18 +700,19 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
       findPromptMaxChars: CAPABILITY_PROMPT_MAX_CHARS,
       // ── AI 查找（REQ-20261116-005）：范围上限，前端一律读这里 ──
       // 2026-11-18：分析 / 检索的轮次·文件·候选·超时预算整体取消，不再下发任何预算上下界
-      findMaxTargets: FIND_MAX_TARGETS,
       // ── AI 查找：工具调用次数上限的取值边界与默认值（2026-11-19）──
       // 缺字段 = 旧版 daemon（不认这个配置项，提交会被静默丢弃）→ 前端据此 fail-loud 提示重启
       // 默认值是「恢复默认」的目标值：查找没有"不限制"档，这个数必须由服务端给
       findMinToolCalls: FIND_MIN_TOOL_CALLS,
       findMaxToolCalls: FIND_MAX_TOOL_CALLS,
       findToolCallsDefault: FIND_DEFAULT_TOOL_CALLS,
-      // ── AI 预取（REQ-20261118-004）：轮次与工具结果字符的上下界，前端一律读这里 ──
-      recallMaxRoundsMin: RECALL_MIN_ROUNDS,
-      recallMaxRoundsMax: RECALL_MAX_ROUNDS,
-      recallToolCharsMin: RECALL_MIN_TOOL_CHARS,
-      recallToolCharsMax: RECALL_MAX_TOOL_CHARS,
+      // ── AI 查找：单次运行硬超时的边界与默认值（2026-11-25，单位毫秒；前端按秒展示）──
+      // 同一份值同时作用于「AI 查找」与 MCP 的 ki_recall；部署级 cap 在 config.yaml 的 recall 段
+      findMinTimeoutMs: FIND_MIN_TIMEOUT_MS,
+      findMaxTimeoutMs: FIND_MAX_TIMEOUT_MS,
+      findTimeoutDefaultMs: FIND_DEFAULT_TIMEOUT_MS,
+      // 2026-11-25（A 方案）：原「AI 预取」独立域的轮次 / 字符上下界随域一并删除 ——
+      // 页面「AI 查找」与 MCP ki_recall 共用 find 域，工具次数仍读上面三项。
     },
     /** 上下文上限的部署默认（「恢复默认」的目标值；不写死 1000K） */
     contextCharsDefault: status.contextChars,
@@ -778,64 +777,6 @@ export async function handlePromptConfigPut(
   if (!requireGlobalConfigWrite(res, ctx)) return;
   const cfg = snapshotConfig(ctx);
   const body = await readJsonBody(req);
-  /**
-   * 检索范围预检（REQ-20261116-005 · S-01 D-01-7）。
-   *
-   * 为什么在路由层而不是 `savePromptConfig` 内部：那里拿不到本次请求的授权集合。
-   * 为什么是 **400** 而不是 403：403 会被前端解读成"你不能改配置"，
-   * 而这里的事实是"这个值不可选"—— 用户需要改的是值，不是来要权限。
-   *
-   * ★ **直接复用运行期的 `resolveFindTargets`**：手写一份判定必然与运行期漂移，
-   *   而这里要回答的正是"这些名字在查找时会不会被剔除"—— `skipped` 就是答案。
-   *
-   * ★ 可达性（别误以为已覆盖授权）：能改全局配置的 token 必然是 all-scope
-   *   （见 `requireGlobalConfigWrite`），而 all-scope 会让 `isScopeAccessAllowed` 恒真，
-   *   所以实际拦下的是**名字不存在 / 视图无成员**这两类。授权分支保留是为了将来放宽
-   *   "按库管理员改全局配置"时不漏判。
-   */
-  if (ctx.authScopes !== null) {
-    const findRaw = (body as { find?: unknown }).find;
-    const extraRaw = findRaw && typeof findRaw === 'object' && !Array.isArray(findRaw)
-      ? (findRaw as { ranges?: { extraScopes?: unknown } }).ranges?.extraScopes
-      : undefined;
-    if (Array.isArray(extraRaw)) {
-      const extra = extraRaw
-        .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
-        .map((n) => n.trim());
-      if (extra.length > 0) {
-        const SKIP_TEXT: Record<SkippedTargetReason, string> = {
-          // forbidden 当前不可达（见下方注释），文案保留给"放宽门禁"后的场景
-          forbidden: '无权访问该库 / 视图',
-          missing: '这个名称不存在（既不是库也不是视图）',
-          'view-members-changed': '视图没有成员或成员已变更',
-        };
-        const { skipped } = resolveFindTargets('', { ranges: { extraScopes: extra } }, {
-          tokenScopes: ctx.authScopes,
-          // 用请求级配置读 views.json：与本次请求的 dataDir 同源，避免拿旧视图表判新配置
-          config: cfg,
-        });
-        /*
-         * 只拦**可达**的两类：名字不存在、视图无成员。
-         * `forbidden` 在这里恒不成立 —— 能走到本函数要求 all-scope token
-         * （`requireGlobalConfigWrite`），而 all-scope 会让 `isScopeAccessAllowed` 恒真。
-         * 授权问题留给运行期：`resolveFindTargets` 剔除并在 `skippedTargets` 里如实告知。
-         * ⚠️ 将来若放宽"按库管理员也能改全局配置"，必须把 forbidden 重新纳入这里。
-         */
-        const hard = skipped.filter((s) => s.reason !== 'forbidden');
-        if (hard.length > 0) {
-          throw new ChatApiError(
-            400,
-            PROMPT_CONFIG_INVALID,
-            `检索范围不可用：${hard.map((s) => `${s.name}（${SKIP_TEXT[s.reason]}）`).join('、')}`,
-            hard.map((s) => ({
-              field: `find.ranges.extraScopes.${s.name}`,
-              message: SKIP_TEXT[s.reason],
-            })),
-          );
-        }
-      }
-    }
-  }
   let saved: ReturnType<typeof savePromptConfig>;
   try {
     saved = savePromptConfig(cfg, body);

@@ -68,6 +68,9 @@ import { CONCLUSION_MAX_CHARS } from './analysis-edit.js';
 import { clearResume, readResume, writeResume, type ResumeState } from './analysis-resume.js';
 import { readRefs } from './refs-store.js';
 import { executeRecall } from '../mcp-tools/recall.js';
+import { resolveRecallTargets } from '../recall/targets.js';
+import { readViews } from '../scope-view.js';
+import { listAllScopes } from '../scope.js';
 import { readStageLogs } from './stage-log.js';
 import { findEventIn, getEventsDir, readAllEvents } from './store.js';
 import { getType } from './type-service.js';
@@ -476,12 +479,19 @@ function unwrapRecallPayload(raw: unknown): {
   summary?: string;
   candidates?: Array<{ group: string; name: string; why: string }>;
   uncertainties?: string[];
+  /** 实际生效过的 scope（2026-11-25）：过程面板据此展示「预取真的查了哪些库」 */
+  scopesUsed?: string[];
 } | null {
   if (!raw || typeof raw !== 'object') return null;
   const env = raw as { content?: Array<{ text?: string }> };
   if (!Array.isArray(env.content)) {
     // 裸 payload（旧实现 / 测试注入）：按声明的形状直接透传，不要用 Record<string, never> 撒谎
-    return raw as { ok?: boolean; code?: string; summary?: string; candidates?: Array<{ group: string; name: string; why: string }>; uncertainties?: string[] };
+    return raw as {
+      ok?: boolean; code?: string; summary?: string;
+      candidates?: Array<{ group: string; name: string; why: string }>;
+      uncertainties?: string[];
+      scopesUsed?: string[];
+    };
   }
   const text = env.content.find((c) => typeof c?.text === 'string')?.text ?? '';
   if (!text) return null;
@@ -504,6 +514,14 @@ async function runRecallPrefetch(args: {
   signal: AbortSignal;
   now: () => number;
   deps?: AnalysisRunnerDeps;
+  /**
+   * 调用方授权集（`null` = 本机不限权）。
+   *
+   * **必须透传给 `executeRecall`**：预取内部的「模型自选 scope」按它逐次鉴权；
+   * 不传会让 `resolveRecallTargets` 把 `null` 当成"不限权"，模型就能跨出调用方的授权范围
+   * （这是 2026-11-25 开自选后新增的越权面，challenger 复核时抓到）。
+   */
+  authScopes?: string[] | null;
 }): Promise<{ step: AnalysisStepRecord; text: string }> {
   const started = args.now();
   const task = buildRecallPrefetchTask(args);
@@ -513,7 +531,16 @@ async function runRecallPrefetch(args: {
       ?? ((input: { scope: string; task: string; limit: number }) =>
         executeRecall(
           { scope: input.scope, task: input.task, limit: input.limit },
-          { kiConfig: args.cfg, principalKey: 'analysis', signal: args.signal },
+          {
+            kiConfig: args.cfg,
+            principalKey: 'analysis',
+            signal: args.signal,
+            // 2026-11-25：授权集必须透传 —— 预取的「模型自选 scope」按它鉴权，
+            // 不传会被当成"不限权"，模型可跨出调用方授权范围
+            ...(Object.prototype.hasOwnProperty.call(args, 'authScopes')
+              ? { tokenScopes: args.authScopes ?? null }
+              : {}),
+          },
         ) as unknown as Promise<{
           ok: boolean;
           code?: string;
@@ -555,6 +582,8 @@ async function runRecallPrefetch(args: {
          */
         detail: {
           docs: hits.map((h) => `${h.group} | ${h.name}`),
+          // 实际检索范围（模型可自选 scope，入参只是默认值）：面板要能看出它真查了哪些库
+          ...(res.scopesUsed && res.scopesUsed.length > 0 ? { scopes: res.scopesUsed } : {}),
           ...(res.summary ? { summary: res.summary.slice(0, 300) } : {}),
         },
       },
@@ -586,6 +615,7 @@ function buildRuntimeEnv(
   targetDir: string,
   toolNames: readonly string[],
   warnings: readonly string[] = [],
+  extraLines: readonly string[] = [],
 ): string {
   /*
    * 只给**目录名**，不给绝对路径：这段文本随请求发往上游模型，绝对路径等于把用户名与
@@ -599,6 +629,7 @@ function buildRuntimeEnv(
       : '代码根目录：未配置（读不到代码；需先在事件页设置目标目录后重试）',
     `本次可用工具：${toolNames.length > 0 ? toolNames.join(' / ') : '（无，无法读取代码）'}`,
     '只使用上面列出的工具；不要调用未列出的工具。',
+    ...extraLines,
     ...warnings,
   ].join('\n');
 }
@@ -709,6 +740,26 @@ export function buildLightEventContext(args: {
   ].join('\n');
 }
 
+/** 模型一次调用里最多试几个物理库（视图可能展开出多个成员；防一次调用打满 IO） */
+const MAX_SCOPE_ATTEMPTS = 5;
+
+/** 只读工具的 `scope` 参数（五件套共用；2026-11-25 批 3-C） */
+const KB_SCOPE_PARAM = {
+  type: 'string' as const,
+  description: '库名或视图名（多个用逗号）。**缺省读事件所在库**；确实需要换库时才传，'
+    + '传不存在 / 无权的会直接报错，不会自动回落。',
+};
+
+/** 只读工具的 `scope` 入参归一化：字符串（可逗号分隔）或字符串数组 */
+function normalizeScopeArg(raw: unknown): string[] {
+  const toList = (v: string): string[] => v.split(',').map((s) => s.trim()).filter(Boolean);
+  if (typeof raw === 'string') return toList(raw);
+  if (Array.isArray(raw)) {
+    return raw.filter((s): s is string => typeof s === 'string').flatMap(toList);
+  }
+  return [];
+}
+
 /**
  * 知识库只读工具装配（2026-11-19 追问带工具再调查：导出供追问 runner 复用）。
  * ⚠️ 与 AI 分析共用同一份实现，避免 scope 注入 / OperationCoordinator 细节漂移。
@@ -717,14 +768,87 @@ export function buildKbReadToolEntries(
   scope: string,
   config: KiConfig,
   deps?: AnalysisRunnerDeps,
+  opts?: {
+    /**
+     * 调用方授权范围（`null` = 本机不限权）。
+     *
+     * **不传这个字段 = 保持范围锁定**（与 2026-11-25 之前一致）：旧调用与单测不会因为
+     * 这次改造突然获得"无鉴权的自由换库"。传了（含显式 `null`）才开启模型自选。
+     */
+    authScopes?: string[] | null;
+    /** 测试注入：可用库 / 视图清单来源（默认真实配置，测试不碰真实库） */
+    scopeDeps?: {
+      listScopes?: () => string[];
+      listViews?: () => Record<string, { members: string[] }>;
+    };
+  },
 ): readonly AnalysisToolEntry[] {
-  const runScopedRead = async <T>(toolName: string, fn: () => Promise<T>): Promise<T> => {
+  const runScopedRead = async <T>(toolName: string, effScope: string, fn: () => Promise<T>): Promise<T> => {
     const outcome = await getSharedOperationCoordinator().submit(
-      { operation: `chat-mcp-${toolName}`, params: { scope } },
+      // 排队互斥必须按**实际生效** scope：模型可换库，沿用装配期单值会让互斥判断失效
+      { operation: `chat-mcp-${toolName}`, params: { scope: effScope } },
       () => runWithConfigSnapshot(config, fn),
-      [scope],
+      [effScope],
     );
     return outcome.result as T;
+  };
+
+  /*
+   * ═══ 模型自选 scope（2026-11-25 批 3-C · Q3/Q4）═══
+   *   · 未传 `scope` → 事件所在库（默认范围）；
+   *   · 传了 → 逐次校验（存在 + 授权 + 视图展开成成员库），失败回可行动错误、**不回落**；
+   *   · 写工具**不参与**这套（Q5：仍锁事件所在库）。
+   */
+  const switchable = opts?.authScopes !== undefined;
+  const authScopes = opts?.authScopes ?? null;
+
+  const resolveReadScope = (
+    raw: unknown,
+  ): { ok: true; physical: string[]; display: string[] } | { ok: false; error: string } => {
+    const asked = normalizeScopeArg(raw);
+    if (asked.length === 0) return { ok: true, physical: [scope], display: [scope] };
+    if (!switchable) {
+      return { ok: false, error: `本次不允许改变检索范围；默认范围：${scope}` };
+    }
+    const r = resolveRecallTargets({
+      requested: asked,
+      tokenScopes: authScopes,
+      deps: {
+        config,
+        listScopes: opts?.scopeDeps?.listScopes ?? (() => listAllScopes()),
+        listViews: opts?.scopeDeps?.listViews ?? (() => readViews(config)),
+      },
+    });
+    if (r.forbiddenRequested.length > 0) {
+      const bad = r.forbiddenRequested.map((b) => `${b.name}（${b.reason}）`).join('、');
+      return { ok: false, error: `这些 scope 不可用：${bad}。默认范围是 ${scope}` };
+    }
+    if (r.physicalTargets.length === 0) {
+      return { ok: false, error: `这些 scope 都不可用；默认范围是 ${scope}` };
+    }
+    return { ok: true, physical: r.physicalTargets, display: r.targets };
+  };
+
+  /** 单库工具：视图展开后逐个试，命中即止（最多试 MAX_SCOPE_ATTEMPTS 个库） */
+  const tryEachScope = async <T>(
+    physical: string[],
+    fn: (s: string) => Promise<{ ok: boolean; value?: T; error?: string }>,
+  ): Promise<{ ok: true; scope: string; value: T } | { ok: false; error: string }> => {
+    let lastError = '';
+    for (const s of physical.slice(0, MAX_SCOPE_ATTEMPTS)) {
+      const r = await fn(s);
+      if (r.ok) return { ok: true, scope: s, value: r.value as T };
+      lastError = r.error ?? lastError;
+    }
+    return { ok: false, error: lastError || `未在 ${physical.join('、')} 中找到` };
+  };
+
+  /** 过程区展示用：传了 scope 时把它标出来（审计「实际查了哪个库」的一半；另一半在 args 里） */
+  const scopeTag = (a: Record<string, unknown>): string => {
+    const picked = resolveReadScope(a.scope);
+    return picked.ok && picked.display.length > 0 && picked.display[0] !== scope
+      ? `[${picked.display.join('+')}] `
+      : '';
   };
 
   return [
@@ -742,34 +866,45 @@ export function buildKbReadToolEntries(
               relation: { type: 'string', description: '文档名称（与清单一致）' },
               start_line: { type: 'integer', minimum: 1, description: '分段续读起始行（1-based）' },
               start_char: { type: 'integer', minimum: 0, description: '起始行内字符偏移' },
+              scope: KB_SCOPE_PARAM,
             },
             required: ['group', 'relation'],
           },
         },
       },
-      describe: (a) => ({ label: '读取知识库文档', summary: `${String(a.group ?? '')}/${String(a.relation ?? '')}` }),
+      describe: (a) => ({
+        label: '读取知识库文档',
+        summary: `${scopeTag(a)}${String(a.group ?? '')}/${String(a.relation ?? '')}`,
+      }),
       run: async (a) => {
         const group = String(a.group ?? '');
         const relation = String(a.relation ?? '');
         const startLine = typeof a.start_line === 'number' ? a.start_line : undefined;
         const startChar = typeof a.start_char === 'number' ? a.start_char : undefined;
         const maxChars = Math.max(PAGE_MIN_CHARS, Math.floor(ANALYSIS_TOOL_RESPONSE_CHARS * 0.75));
-        const res = deps?.kbExecutor?.getModuleInfo
-          ? await deps.kbExecutor.getModuleInfo({ scope, group, relation, startLine, startChar, maxChars })
-          : await runScopedRead('ki_get_module_info', () =>
-              withTimeout(
-                executeGetModuleInfo({
-                  scope,
-                  group,
-                  relation,
-                  ...(startLine !== undefined ? { startLine } : {}),
-                  ...(startChar !== undefined ? { startChar } : {}),
-                  maxChars,
-                }),
-                TOOL_TIMEOUT.READ,
-                'ki_get_module_info',
-              ));
-        return { doc: res };
+        const picked = resolveReadScope(a.scope);
+        if (!picked.ok) return { error: picked.error };
+        const got = await tryEachScope(picked.physical, async (eff) => {
+          const res = deps?.kbExecutor?.getModuleInfo
+            ? await deps.kbExecutor.getModuleInfo({ scope: eff, group, relation, startLine, startChar, maxChars })
+            : await runScopedRead('ki_get_module_info', eff, () =>
+                withTimeout(
+                  executeGetModuleInfo({
+                    scope: eff,
+                    group,
+                    relation,
+                    ...(startLine !== undefined ? { startLine } : {}),
+                    ...(startChar !== undefined ? { startChar } : {}),
+                    maxChars,
+                  }),
+                  TOOL_TIMEOUT.READ,
+                  'ki_get_module_info',
+                ));
+          const rec = res as { ok?: boolean; error?: string };
+          return { ok: rec?.ok !== false, value: res, error: rec?.error };
+        });
+        if (!got.ok) return { error: got.error };
+        return { doc: got.value };
       },
     },
     {
@@ -798,6 +933,7 @@ export function buildKbReadToolEntries(
                 maxItems: 3,
                 description: 'images[].ref 原样传回，1~3 张',
               },
+              scope: { ...KB_SCOPE_PARAM, description: '文档所在库或视图名；缺省用事件所在库' },
             },
             required: ['group', 'refs'],
           },
@@ -805,18 +941,29 @@ export function buildKbReadToolEntries(
       },
       describe: (a) => ({
         label: '查看文档图片',
-        summary: `${String(a.group ?? '')} · ${Array.isArray(a.refs) ? a.refs.length : 0} 张`,
+        summary: `${scopeTag(a)}${String(a.group ?? '')} · ${Array.isArray(a.refs) ? a.refs.length : 0} 张`,
       }),
       run: async (a) => {
         const group = String(a.group ?? '');
         const refs = Array.isArray(a.refs) ? a.refs.map((r) => String(r)) : [];
-        // allowSvg：知识库里绝大多数图是 SVG（实测 consul 1369/1370），必须服务端栅格化
-        return toRecordResult(await runScopedRead('ki_get_image', () =>
-          withTimeout(
-            executeGetImage({ scope, group, refs, allowSvg: true }),
-            TOOL_TIMEOUT.READ,
-            'ki_get_image',
-          )));
+        const picked = resolveReadScope(a.scope);
+        if (!picked.ok) return { error: picked.error };
+        const got = await tryEachScope(picked.physical, async (eff) => {
+          // allowSvg：知识库里绝大多数图是 SVG（实测 consul 1369/1370），必须服务端栅格化
+          const r = toRecordResult(await runScopedRead('ki_get_image', eff, () =>
+            withTimeout(
+              executeGetImage({ scope: eff, group, refs, allowSvg: true }),
+              TOOL_TIMEOUT.READ,
+              'ki_get_image',
+            ))) as Record<string, unknown>;
+          return {
+            ok: typeof r.error !== 'string',
+            value: r,
+            error: typeof r.error === 'string' ? r.error : undefined,
+          };
+        });
+        if (!got.ok) return { error: got.error };
+        return got.value;
       },
     },
     {
@@ -832,20 +979,28 @@ export function buildKbReadToolEntries(
               query: { type: 'string', description: '检索词' },
               mode: { type: 'string', enum: ['fulltext', 'hybrid'], description: '检索模式，默认 hybrid' },
               limit: { type: 'integer', minimum: 1, maximum: 20, description: '返回条数，默认 5' },
+              scope: { ...KB_SCOPE_PARAM, description: '库名或视图名（多个用逗号）；缺省查事件所在库' },
             },
             required: ['query'],
           },
         },
       },
-      describe: (a) => ({ label: '检索知识库', summary: String(a.query ?? '').slice(0, 60) }),
+      describe: (a) => ({
+        label: '检索知识库',
+        summary: `${scopeTag(a)}${String(a.query ?? '').slice(0, 60)}`,
+      }),
       run: async (a) => {
         const query = String(a.query ?? '');
         const mode = a.mode === 'fulltext' ? 'fulltext' : 'hybrid';
         const limit = typeof a.limit === 'number' ? Math.min(20, Math.max(1, Math.floor(a.limit))) : 5;
+        const picked = resolveReadScope(a.scope);
+        if (!picked.ok) return { error: picked.error };
+        // 一次多库：生效范围由本次调用决定（模型传了就用它的，没传用事件库）
+        const effScope = picked.physical.join(',');
         const res = deps?.kbExecutor?.search
-          ? await deps.kbExecutor.search({ scope, query, mode, limit })
-          : await runScopedRead('ki_search', () =>
-              withTimeout(executeSearch({ scope, query, mode, limit }), TOOL_TIMEOUT.WRITE, 'ki_search'));
+          ? await deps.kbExecutor.search({ scope: effScope, query, mode, limit })
+          : await runScopedRead('ki_search', effScope, () =>
+              withTimeout(executeSearch({ scope: effScope, query, mode, limit }), TOOL_TIMEOUT.WRITE, 'ki_search'));
         return { result: res };
       },
     },
@@ -862,21 +1017,28 @@ export function buildKbReadToolEntries(
               groups: { type: 'string', description: '逗号分隔 Group 路径过滤' },
               subtree: { type: 'string', description: '子树根路径' },
               depth: { type: 'integer', minimum: 1, maximum: 10 },
+              scope: KB_SCOPE_PARAM,
             },
           },
         },
       },
-      describe: (a) => ({ label: '查看知识树', summary: String(a.groups ?? a.subtree ?? '.') }),
+      describe: (a) => ({
+        label: '查看知识树',
+        summary: `${scopeTag(a)}${String(a.groups ?? a.subtree ?? '.')}`,
+      }),
       run: async (a) => {
         const groupsParam = typeof a.groups === 'string' ? a.groups : undefined;
         const subtreeParam = typeof a.subtree === 'string' ? a.subtree : undefined;
         const depth = typeof a.depth === 'number' ? a.depth : 4;
+        const picked = resolveReadScope(a.scope);
+        if (!picked.ok) return { error: picked.error };
+        const effScope = picked.physical[0]!;
         const res = deps?.kbExecutor?.groupList
-          ? await deps.kbExecutor.groupList({ scope, groupsParam, subtreeParam, depth })
-          : await runScopedRead('ki_group_list', () =>
+          ? await deps.kbExecutor.groupList({ scope: effScope, groupsParam, subtreeParam, depth })
+          : await runScopedRead('ki_group_list', effScope, () =>
               withTimeout(
                 executeQueryGroup({
-                  scope,
+                  scope: effScope,
                   groupsParam,
                   subtreeParam,
                   hotCount: 5,
@@ -896,15 +1058,18 @@ export function buildKbReadToolEntries(
         type: 'function',
         function: {
           name: 'ki_tag_list',
-          description: '列出当前知识库使用的标签（只读）。',
-          parameters: { type: 'object', properties: {} },
+          description: '列出知识库使用的标签（只读）。',
+          parameters: { type: 'object', properties: { scope: KB_SCOPE_PARAM } },
         },
       },
-      describe: () => ({ label: '列出标签', summary: scope }),
-      run: async () => {
+      describe: (a) => ({ label: '列出标签', summary: `${scopeTag(a)}${scope}` }),
+      run: async (a) => {
+        const picked = resolveReadScope(a.scope);
+        if (!picked.ok) return { error: picked.error };
+        const effScope = picked.physical[0]!;
         const res = deps?.kbExecutor?.tagList
-          ? await deps.kbExecutor.tagList({ scope })
-          : await withTimeout(executeTagList({ scope }), TOOL_TIMEOUT.READ, 'ki_tag_list');
+          ? await deps.kbExecutor.tagList({ scope: effScope })
+          : await withTimeout(executeTagList({ scope: effScope }), TOOL_TIMEOUT.READ, 'ki_tag_list');
         return { tags: res };
       },
     },
@@ -1110,7 +1275,18 @@ function buildFormatRetryInstruction(attempt: number): string {
 export async function startEventAnalysis(
   scope: string,
   eventRef: string,
-  opts?: { forceOverwrite?: boolean; resume?: boolean; deps?: AnalysisRunnerDeps },
+  opts?: {
+    forceOverwrite?: boolean;
+    resume?: boolean;
+    deps?: AnalysisRunnerDeps;
+    /**
+     * 调用方授权范围（`null` = 本机不限权；2026-11-25 批 3-C）。
+     *
+     * **必须由 HTTP 层传**：不传 = 只读工具保持「只能查事件所在库」的旧行为。
+     * 传了就允许模型在工具调用里自选 scope（逐次鉴权），写工具仍锁事件库（Q5）。
+     */
+    authScopes?: string[] | null;
+  },
 ): Promise<StartAnalysisResult> {
   const deps = opts?.deps;
   const nowFn = deps?.nowFn ?? (() => Date.now());
@@ -1321,6 +1497,8 @@ export async function startEventAnalysis(
     initialSteps: resume ? resume.steps : [contextStep],
     ...(resume ? { resume } : {}),
     deps,
+    // 2026-11-25（批 3-C）：显式传（含 null）才开启只读工具换库
+    ...(opts?.authScopes !== undefined ? { authScopes: opts.authScopes } : {}),
   }).catch((err) => {
     console.error(`[analysis] 后台任务未捕获异常 (${scope}/${event.id}):`, err);
   });
@@ -1347,6 +1525,8 @@ async function executeAnalysisBackground(input: {
   /** 断点续跑：带着上次的模型上下文与步骤继续（2026-11-20） */
   resume?: ResumeState;
   deps?: AnalysisRunnerDeps;
+  /** 授权范围（ = 本机不限权）；**有该键**才允许模型自选 scope（批 3-C） */
+  authScopes?: string[] | null;
 }): Promise<void> {
   const {
     scope, event, eventType, members, refs, logs, cfg, llmStatus,
@@ -1371,11 +1551,33 @@ async function executeAnalysisBackground(input: {
   };
   const allEntries = [
     ...createFsToolEntries(fsCtx),
-    ...buildKbReadToolEntries(scope, cfg, deps),
+    // 2026-11-25（批 3-C）：只有 HTTP 层显式传了 authScopes 才开启「模型自选 scope」；
+    // 未传（旧调用 / 单测）= 保持锁定，避免出现无鉴权的自由换库。
+    ...buildKbReadToolEntries(
+      scope,
+      cfg,
+      deps,
+      input.authScopes !== undefined ? { authScopes: input.authScopes } : undefined,
+    ),
     ...buildKbWriteToolEntries(scope),
   ];
   const enabledEntries = allEntries.filter((e) => isAnalysisToolEnabled(analysisCfg, e.name));
   const entryMap = new Map(enabledEntries.map((e) => [e.name, e] as const));
+
+  /**
+   * 知识库范围说明（2026-11-25 批 3-C，随运行环境一起注入）。
+   *
+   * 只在 HTTP 层传了 `authScopes`（= 开启模型自选）时才说"可以换库"；
+   * 否则明说不能换，避免模型去传 scope 然后吃一堆「不允许改变检索范围」。
+   */
+  const kbScopeEnv = (() => {
+    const canSwitch = input.authScopes !== undefined;
+    const base = `知识库默认范围：${scope}（只读工具不传 scope 就用它）`;
+    if (!canSwitch) return `${base}；本次不允许换库。`;
+    return `${base}；只读工具（ki_search / ki_get_module_info / ki_group_list / ki_tag_list / ki_get_image）`
+      + '可按需传 scope 换库或视图（每次调用可用不同；受你的授权范围限制，传错会报错而非回落）。'
+      + '写工具固定作用于事件所在库。';
+  })();
 
   const callableSkills = analysisCfg.skills.filter((s) => s.enabled);
   /*
@@ -1410,6 +1612,7 @@ async function executeAnalysisBackground(input: {
         ...(onDemandSkills.length > 0 ? ['use_skill'] : []),
       ],
       buildWriteWarnings(scope, analysisCfg, cfg),
+      [kbScopeEnv],
     ),
     buildOutputTail(inferAnalysisView(event.typeId)),
   ].filter(Boolean);
@@ -1479,6 +1682,8 @@ async function executeAnalysisBackground(input: {
         signal: controller.signal,
         now: nowFn,
         ...(deps ? { deps } : {}),
+        // 与只读工具同一份授权集：预取自选 scope 时按它鉴权（不传 = 不限权，会越权）
+        ...(input.authScopes !== undefined ? { authScopes: input.authScopes } : {}),
       });
       steps[recallIdx] = prefetch.step;
       if (prefetch.text) userBlocks.push(prefetch.text);

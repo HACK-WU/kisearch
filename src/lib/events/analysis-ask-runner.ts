@@ -242,6 +242,11 @@ export interface AskEventAnalysisArgs {
   question: string;
   /** 限流主体：HTTP 层无身份，固定 'local' */
   principalKey?: string;
+  /**
+   * 调用方授权范围（`null` = 本机不限权；2026-11-25 批 3-C）。
+   * 与 AI 分析同口径：不传 = 只读工具保持锁定；传了才允许模型自选 scope。
+   */
+  authScopes?: string[] | null;
   /** 流式答案增量回调（只吐最终 answer 文本，不掺工具响应） */
   onDelta?: (text: string) => void;
   /** 进度事件回调（tool / thinking，只推不落盘） */
@@ -369,6 +374,8 @@ function buildAskToolEntries(
   analysisCfg: AnalysisConfig,
   deps: AskEventAnalysisArgs['deps'],
   controller: AbortController,
+  /** 授权范围；**有该键**才允许模型自选 scope（2026-11-25 批 3-C） */
+  scopeOpts?: { authScopes?: string[] | null },
 ): { entries: readonly AnalysisToolEntry[]; targetDir: string | null } {
   const rawTargetDir = resolveAnalysisTargetDir(analysisCfg.targetDirs, scope);
   let fsEntries: readonly AnalysisToolEntry[] = [];
@@ -387,7 +394,12 @@ function buildAskToolEntries(
       targetDir = null;
     }
   }
-  const kbEntries = buildKbReadToolEntries(scope, cfg, deps?.kbExecutor ? { kbExecutor: deps.kbExecutor } : undefined);
+  const kbEntries = buildKbReadToolEntries(
+    scope,
+    cfg,
+    deps?.kbExecutor ? { kbExecutor: deps.kbExecutor } : undefined,
+    scopeOpts,
+  );
   // 写入组与分析共用同一份 `analysis.tools`（REQ-20261123-004 H4；与 REQ-20261123-002 REQ-06 一致）
   const writeEntries = buildKbWriteToolEntries(scope);
   const entries = [...fsEntries, ...kbEntries, ...writeEntries].filter(
@@ -501,7 +513,15 @@ export async function askEventAnalysis(
       analysisCfg = defaultPromptConfig().analysis!;
     }
 
-    const { entries, targetDir } = buildAskToolEntries(scope, cfg, analysisCfg, deps, controller);
+    const { entries, targetDir } = buildAskToolEntries(
+      scope,
+      cfg,
+      analysisCfg,
+      deps,
+      controller,
+      // 与 startEventAnalysis 同口径：显式传（含 null）才开启只读工具换库
+      Object.prototype.hasOwnProperty.call(args, 'authScopes') ? { authScopes: args.authScopes ?? null } : undefined,
+    );
     const toolDefs: ToolDef[] = entries.map((e) => e.def);
     const entryMap = new Map(entries.map((e) => [e.name, e] as const));
 

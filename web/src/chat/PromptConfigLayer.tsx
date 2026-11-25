@@ -22,11 +22,9 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
-  type ReactNode,
 } from 'react';
 
 import type { AnalysisConfig, FindConfig, PromptConfig, PromptSkill } from '@/api/chatContract';
-import type { ScopeInfo } from '@/api/mcpClient';
 import { PromptConfigModal, type PromptEditDraft } from '@/chat/PromptConfigModal';
 import { clonePromptConfig } from '@/chat/promptConfigClone';
 import { usePromptConfig } from '@/chat/usePromptConfig';
@@ -158,7 +156,6 @@ const EMPTY_ANALYSIS_CONFIG: AnalysisConfig = {
 
 /** `find` 缺失时的兜底（旧后端不返回 find 域时，界面不能崩） */
 const EMPTY_FIND_CONFIG: FindConfig = {
-  ranges: { extraScopes: [] },
   prompt: { content: '', at: '' },
   skills: [],
   tools: {},
@@ -373,6 +370,9 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
   const [findCallsText, setFindCallsText] = useState('');
   /** 用户是否清空过输入框；决定"空串"该不该判非法（见下方 findCallsInvalid 的注释） */
   const [findCallsTouched, setFindCallsTouched] = useState(false);
+  // ── AI 查找 · 单次运行硬超时（2026-11-25，界面单位：秒）──
+  const [findTimeoutText, setFindTimeoutText] = useState('');
+  const [findTimeoutTouched, setFindTimeoutTouched] = useState(false);
   // ── AI 分析独立配置（REQ-20261113-003 · S-01）──
   const [analysisDefaultDirText, setAnalysisDefaultDirText] = useState('');
   const [analysisByScopeRows, setAnalysisByScopeRows] = useState<Array<{ scope: string; dir: string }>>([]);
@@ -512,9 +512,9 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     });
   };
 
-  // ── AI 查找范围 / 工具（REQ-20261116-005 · S-01）──
+  // ── AI 查找工具（REQ-20261116-005 · S-01）──
+  // 2026-11-25（批 3）：范围白名单（find.ranges）已删除 —— 模型按问题自己换库，逐次鉴权
   const findCfg: FindConfig = draft?.find ?? data?.defaults.find ?? EMPTY_FIND_CONFIG;
-  const findMaxTargets = data?.limits.findMaxTargets ?? 5;
   /**
    * 工具调用次数上限的边界与默认值（2026-11-19）。
    *
@@ -540,32 +540,6 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     : findCallsParsed === null
       || (findCallsMin !== undefined && findCallsParsed < findCallsMin)
       || (findCallsMax !== undefined && findCallsParsed > findCallsMax);
-  /**
-   * 可选库 = 库 + 视图。
-   *
-   * 视图不是物理库，`ScopeMultiPicker` 只认 `ScopeInfo`，这里补一份最小载体：
-   * 仅用于选择与展示（`optionMeta` 会标出「视图 · N 成员」），不参与任何计数逻辑。
-   */
-  const findViewMap = useMemo(
-    () => new Map((scopeListData?.views ?? []).map((v) => [v.view, v])),
-    [scopeListData?.views],
-  );
-  const findScopeOptions: ScopeInfo[] = useMemo(() => [
-    ...(scopeListData?.scopes ?? []),
-    ...(scopeListData?.views ?? []).map((v) => ({
-      scope: v.view,
-      kb: true,
-      vector: true,
-      registered: true,
-      wikiCount: v.members.length,
-      ftsOnlyDocCount: 0,
-    })),
-  ], [scopeListData]);
-  const findScopeMeta = (info: ScopeInfo): ReactNode => {
-    const view = findViewMap.get(info.scope);
-    return view ? `视图 · ${view.members.length} 成员` : undefined;
-  };
-
   const mutateFind = (mutate: (f: FindConfig, root: PromptConfig) => FindConfig, debounced = false): void => {
     const fn = debounced ? commitDebounced : commit;
     fn((d) => {
@@ -606,6 +580,65 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     setFindCallsTouched(false);
     mutateFind((f) => ({ ...f, maxToolCalls: findCallsDefault }));
   };
+
+  /**
+   * 单次运行硬超时（2026-11-25 用户拍板，默认 60s）。
+   *
+   * 与服务端同口径：配置存**毫秒**，界面按**秒**填（用户填 60 就是 60 秒）。
+   * 上下界与默认值一律读 `limits`（`findMinTimeoutMs` 等），前端不硬编码。
+   */
+  const findTimeoutMinMs = data?.limits.findMinTimeoutMs;
+  const findTimeoutMaxMs = data?.limits.findMaxTimeoutMs;
+  const findTimeoutDefaultMs = data?.limits.findTimeoutDefaultMs;
+  const findTimeoutSupported = findTimeoutMinMs !== undefined && findTimeoutMaxMs !== undefined;
+  const findTimeoutEffectiveMs = findCfg.timeoutMs ?? findTimeoutDefaultMs;
+  const findTimeoutParsedSec = parseStrictInt(findTimeoutText);
+  const findTimeoutSec = findTimeoutParsedSec === null ? null : findTimeoutParsedSec * 1000;
+  const findTimeoutEmpty = findTimeoutText.trim() === '';
+  const findTimeoutInvalid = findTimeoutEmpty
+    ? findTimeoutTouched
+    : findTimeoutSec === null
+      || (findTimeoutMinMs !== undefined && findTimeoutSec < findTimeoutMinMs)
+      || (findTimeoutMaxMs !== undefined && findTimeoutSec > findTimeoutMaxMs);
+
+  const handleFindTimeoutInput = (v: string): void => {
+    setFindTimeoutText(v);
+    setFindTimeoutTouched(true);
+    const parsed = parseStrictInt(v);
+    const ms = parsed === null ? null : parsed * 1000;
+    const inRange = ms !== null
+      && (findTimeoutMinMs === undefined || ms >= findTimeoutMinMs)
+      && (findTimeoutMaxMs === undefined || ms <= findTimeoutMaxMs);
+    if (inRange) mutateFind((f) => ({ ...f, timeoutMs: ms }), true);
+  };
+  const handleFindTimeoutBlur = (): void => {
+    flushPending();
+    if (!findTimeoutInvalid) return;
+    setFindTimeoutText(findTimeoutEffectiveMs !== undefined ? String(Math.round(findTimeoutEffectiveMs / 1000)) : '');
+    setFindTimeoutTouched(false);
+  };
+  const handleFindTimeoutReset = (): void => {
+    if (findTimeoutDefaultMs === undefined) return;
+    setFindTimeoutText(String(Math.round(findTimeoutDefaultMs / 1000)));
+    setFindTimeoutTouched(false);
+    mutateFind((f) => ({ ...f, timeoutMs: findTimeoutDefaultMs }));
+  };
+  /**
+   * 输入框基线同步（2026-11-25）。
+   *
+   * `data` 是异步到达的：不铺一次基线，首次进入会看到空框（次数框此前就是这个表现）。
+   * `touched` 为真时不覆盖 —— 用户正在打字 / 刚清空，不能被远端基线冲掉。
+   */
+  useEffect(() => {
+    if (findCallsTouched) return;
+    setFindCallsText(findCallsEffective !== undefined ? String(findCallsEffective) : '');
+  }, [findCallsEffective, findCallsTouched]);
+  useEffect(() => {
+    if (findTimeoutTouched) return;
+    setFindTimeoutText(
+      findTimeoutEffectiveMs !== undefined ? String(Math.round(findTimeoutEffectiveMs / 1000)) : '',
+    );
+  }, [findTimeoutEffectiveMs, findTimeoutTouched]);
 
   // ── AI 查找思考级别 ──（2026-11-18：轮次 / 候选数 / 超时上限整体取消，只留思考级别）
   const findEffortCurrent = findCfg.reasoningEffort ?? data?.reasoningEffortDefault;
@@ -1923,70 +1956,6 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
 
         {capability === 'find' && draft && data && (
           <>
-            {/* 1. 检索范围 */}
-            <div className="ki-chat-cfg__field">
-              <span className="ki-chat-cfg__label">
-                检索范围
-                <em className="ki-chat-cfg__badge">
-                  {findCfg.ranges.extraScopes.length > 0
-                    ? `当前库 + ${findCfg.ranges.extraScopes.length} 个额外库`
-                    : '仅当前库'}
-                </em>
-              </span>
-              <p className="ki-chat-cfg__hint">
-                当前事件所在库<b>恒定在范围内</b>，无需添加；这里只配额外要查的库（最多 {findMaxTargets} 个）。
-                只能选你有权访问的库；视图需其全部成员都已授权。
-              </p>
-              {findCfg.ranges.extraScopes.length > 0 && (
-                <div className="ki-chat-cfg__list">
-                  {findCfg.ranges.extraScopes.map((name) => (
-                    <div className="ki-chat-cfg__dirrow" key={name}>
-                      <span className="ki-chat-cfg__tool-name" title={name}>{name}</span>
-                      {findViewMap.has(name) ? <span className="ki-chat-cfg__tool-desc">视图</span> : null}
-                      <span className="ki-chat-cfg__tool-sp" />
-                      <button
-                        type="button"
-                        className="ki-chat-btn ki-chat-btn--ghost"
-                        disabled={readOnly}
-                        aria-label={`移除 ${name}`}
-                        onClick={() => mutateFind((f) => ({
-                          ...f,
-                          ranges: { ...f.ranges, extraScopes: f.ranges.extraScopes.filter((x) => x !== name) },
-                        }))}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {readOnly ? null : (
-                <div className="ki-chat-cfg__dirrow ki-chat-cfg__dirrow--picker">
-                  <ScopeMultiPicker
-                    scopes={findScopeOptions.filter((s) => !findCfg.ranges.extraScopes.includes(s.scope))}
-                    value={[]}
-                    maxWidth={320}
-                    placeholder="搜索并添加额外检索库…"
-                    emptyHint="当前只查事件所在库"
-                    optionMeta={findScopeMeta}
-                    onChange={(next) => {
-                      const name = next[0];
-                      if (!name) return;
-                      if (findCfg.ranges.extraScopes.includes(name)) return;
-                      if (findCfg.ranges.extraScopes.length >= findMaxTargets) return;
-                      mutateFind((f) => ({
-                        ...f,
-                        ranges: { ...f.ranges, extraScopes: [...f.ranges.extraScopes, name] },
-                      }));
-                    }}
-                  />
-                </div>
-              )}
-              {findCfg.ranges.extraScopes.length >= findMaxTargets ? (
-                <p className="ki-chat-cfg__warn">已达上限 {findMaxTargets} 个；如需更多请先移除。</p>
-              ) : null}
-            </div>
-
             {/* 2. 基础提示词 */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
@@ -2019,8 +1988,10 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                 </em>
               </span>
               <p className="ki-chat-cfg__hint">
-                仅作用于「AI 查找」，与「AI 对话」「AI 分析」的 Skill 互相独立；正文由 AI 按需加载，
-                点卡片可查看与编辑（内置条目可恢复默认）。
+                作用于「AI 查找」<b>与 MCP 工具 ki_recall</b>（同一套配置、同一条链路，只是过程可见性不同：
+                页面渲染检索步骤，MCP 只回最终结论），与「AI 对话」「AI 分析」的 Skill 互相独立；
+                内置只剩一个（refs-locate，给页面挑参考文档），<b>MCP 预取不加载 skill</b>
+                —— 它的判断口径写在基础提示词里。正文由 AI 按需加载，点卡片可查看与编辑（内置条目可恢复默认）。
               </p>
               <div className="ki-chat-cfg__list">
                 {findCfg.skills.map((s) => {
@@ -2101,8 +2072,13 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                 </em>
               </span>
               <p className="ki-chat-cfg__hint">
-                单次查找最多让 AI 调用几次工具（检索 + 读正文合计）。这个次数会一并写进发给 AI 的提示词，让它先做规划。
+                单次查找最多让 AI 调用几次工具（检索 + 读正文合计）；<b>这是上限，不是必须用满</b>，够用就收口。
+                这个次数会一并写进发给 AI 的提示词，让它先做规划；MCP 工具 <b>ki_recall</b>（开工前预取）用的是同一个值。
                 {findCallsSupported ? `默认 ${findCallsDefault} 次，可填 ${findCallsMin}–${findCallsMax}；不能取消上限。` : ''}
+              </p>
+              <p className="ki-chat-cfg__hint">
+                <b>内部预算（不可配）</b>：模型轮次、单次工具结果字符上限由程序固定，只作防死循环与单次返回体积保护，
+                不占本页配置位。
               </p>
               <div className="ki-chat-cfg__ctxrow">
                 <input
@@ -2135,6 +2111,58 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               {findCallsInvalid && findCallsSupported && (
                 <p className="ki-chat-cfg__warn">
                   要填 {findCallsMin}–{findCallsMax} 之间的整数，不能留空（这一项没有「不限制」）。
+                </p>
+              )}
+            </div>
+
+            {/* 5.5 单次运行硬超时（2026-11-25）：同一份值作用于 AI 查找与 MCP 预取 */}
+            <div className="ki-chat-cfg__field">
+              <span className="ki-chat-cfg__label">
+                单次运行超时
+                <em className="ki-chat-cfg__badge">
+                  {findTimeoutEffectiveMs !== undefined ? `${Math.round(findTimeoutEffectiveMs / 1000)} 秒` : '—'}
+                </em>
+              </span>
+              <p className="ki-chat-cfg__hint">
+                一次「AI 查找」或一次 MCP 预取（<b>ki_recall</b>）从开始到收口的硬上限；超时即中断并如实回报，
+                不会静默返回空结论。次数与超时是两把尺：次数管「调几次」，超时管「跑多久」。
+                {findTimeoutSupported
+                  ? `默认 ${Math.round((findTimeoutDefaultMs ?? 0) / 1000)} 秒，可填 `
+                    + `${Math.round((findTimeoutMinMs ?? 0) / 1000)}–${Math.round((findTimeoutMaxMs ?? 0) / 1000)} 秒。`
+                  : ''}
+              </p>
+              <div className="ki-chat-cfg__ctxrow">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="ki-chat-cfg__ctxinput"
+                  aria-label="AI 查找单次运行超时（秒）"
+                  aria-invalid={findTimeoutSupported && findTimeoutInvalid || undefined}
+                  disabled={readOnly || !findTimeoutSupported}
+                  value={findTimeoutText}
+                  onChange={(e) => handleFindTimeoutInput(e.target.value)}
+                  onBlur={handleFindTimeoutBlur}
+                />
+                <span className="ki-chat-cfg__ctxunit">秒</span>
+                <span className="ki-chat-cfg__ctxsp" />
+                <button
+                  type="button"
+                  className="ki-chat-btn ki-chat-btn--ghost"
+                  disabled={readOnly || findTimeoutDefaultMs === undefined || findCfg.timeoutMs === findTimeoutDefaultMs}
+                  onClick={handleFindTimeoutReset}
+                >
+                  恢复默认
+                </button>
+              </div>
+              {!findTimeoutSupported && (
+                <p className="ki-chat-cfg__warn">
+                  后端没有返回这一项的取值边界（可能是旧版本服务仍在运行）：改不了，重启服务后再试。
+                </p>
+              )}
+              {findTimeoutInvalid && findTimeoutSupported && (
+                <p className="ki-chat-cfg__warn">
+                  要填 {Math.round((findTimeoutMinMs ?? 0) / 1000)}–{Math.round((findTimeoutMaxMs ?? 0) / 1000)}
+                  {' '}秒之间的整数，不能留空。
                 </p>
               )}
             </div>
@@ -2256,7 +2284,16 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               commit((d) => {
                 if (modal.kind === 'prompt') return { ...d, prompt: { ...d.prompt, content } };
                 if (modal.kind === 'find') {
-                  return { ...d, findPrompt: { content, at: new Date().toISOString() } };
+                  /*
+                   * 2026-11-25 修复：此前写的是 `d.findPrompt`（deprecated 镜像字段），
+                   * 而保存链路只认 `find.prompt` —— 编辑「检索定位提示词」实际不生效
+                   * （保存时被磁盘旧值覆盖）。改为走 `mutateFind`，镜像由它统一同步。
+                   */
+                  return {
+                    ...d,
+                    find: { ...(d.find ?? EMPTY_FIND_CONFIG), prompt: { content, at: new Date().toISOString() } },
+                    findPrompt: { content, at: new Date().toISOString() },
+                  };
                 }
                 if (modal.kind === 'find-skill') {
                   // 查找 skill 独立于对话 / 分析：只改 `find.skills`，不碰其它域的 skill 列表
@@ -2323,8 +2360,13 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               return;
             }
             if (modal.kind === 'find') {
-              const def = data!.defaults.findPrompt;
-              commit((d) => ({ ...d, findPrompt: { content: def?.content ?? '', at: new Date().toISOString() } }));
+              /*
+               * 2026-11-25 修复：恢复默认同样只写 `findPrompt`，`find.prompt` 保持不变
+               * → 用户点完仍显示「已修改」。改为写 `find.prompt`（服务端据「内容 === 代码默认」
+               * 自动把 edited 归 false，徽标才会回到「默认」）。
+               */
+              const def = data!.defaults.find?.prompt ?? data!.defaults.findPrompt;
+              mutateFind((f) => ({ ...f, prompt: { content: def?.content ?? '', at: new Date().toISOString() } }));
               setModal(null);
               return;
             }

@@ -16,13 +16,19 @@ import { RECALL_TOOL_CODES, type RecallToolCode } from './codes.js';
 export interface RecallRuntimeConfig {
   /** 每个调用方每分钟上限（1~120） */
   throttlePerMinute: number;
-  /** 单次硬超时（毫秒，1000~45000） */
+  /**
+   * **部署级硬超时上限（cap，毫秒）** —— 2026-11-25 语义调整。
+   *
+   * 用户可配的超时已挪到「AI 查找」域（`find.timeoutMs`，默认 60s）。
+   * 这里只作运维一刀切的上限：实际生效 = `min(find.timeoutMs, hardTimeoutMs)`。
+   */
   hardTimeoutMs: number;
 }
 
 export const DEFAULT_RECALL_CONFIG: RecallRuntimeConfig = {
   throttlePerMinute: 20,
-  hardTimeoutMs: 45_000,
+  /** 上限不宜低于用户默认值（60s），否则改了配置也永远被压住 */
+  hardTimeoutMs: 300_000,
 };
 
 /** 配置合并：非法/缺省项回落默认（**越界由 config-schema 在加载期拦截**，这里只做兜底） */
@@ -32,7 +38,7 @@ export function resolveRecallConfig(raw: RecallConfig | undefined): RecallRuntim
   );
   return {
     throttlePerMinute: pick(raw?.throttlePerMinute, DEFAULT_RECALL_CONFIG.throttlePerMinute, 1, 120),
-    hardTimeoutMs: pick(raw?.hardTimeoutMs, DEFAULT_RECALL_CONFIG.hardTimeoutMs, 1000, 45_000),
+    hardTimeoutMs: pick(raw?.hardTimeoutMs, DEFAULT_RECALL_CONFIG.hardTimeoutMs, 10_000, 600_000),
   };
 }
 

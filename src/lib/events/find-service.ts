@@ -151,6 +151,12 @@ async function runDeepFindSharedCore(
       tools,
       // 查找没有"不限制"档：配置缺字段按默认 15 次（内核同源再兜一次）
       maxToolCalls: findCfg.maxToolCalls ?? FIND_DEFAULT_TOOL_CALLS,
+      /*
+       * 2026-11-25：与 `ki_recall` 同口径 —— 只有调用方显式传了 `tokenScopes`（含 null）
+       * 才开启模型自选 scope；不传 = 保持「只能查本次 targets」。
+       */
+      ...(deps.tokenScopes !== undefined ? { tokenScopes: deps.tokenScopes } : {}),
+      kiConfig: cfg,
       llm: {
         baseURL: cfg.llm?.baseURL ?? '',
         apiKey: cfg.llm?.apiKey ?? '',
@@ -241,6 +247,8 @@ export async function runDeepFindAsSearchResult(
     total,
     totalByScope,
     targets: [...new Set(deps.targets)],
+    // 2026-11-25：入参 targets 只是默认范围，这里给「实际查过哪些库」（模型可能换库）
+    scopesUsed: result.scopesUsed,
     durationMs: Date.now() - started,
     query: result.query,
     // 由 runner 按轮次聚合：全部轮次都走全文才算 fulltext（面板据此如实显示"仅全文"）

@@ -21,6 +21,8 @@ const LABELS: Record<string, string> = {
   // 预取（2026-11-19）
   docs: '建议先读',
   uncertain: '待确认',
+  // 实际检索范围（2026-11-25）：模型可自选 scope，入参只是默认值
+  scopes: '实际检索范围',
   // 查找
   understand: '理解',
   extract: '提取',

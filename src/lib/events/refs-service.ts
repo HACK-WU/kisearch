@@ -119,8 +119,14 @@ export interface RefSearchResult {
    * ⚠️ 各行相加**不等于** `total` —— 视图成员与事件库重叠时会被算两遍。
    */
   totalByScope?: Array<{ scope: string; docs: number }>;
-  /** 本次实际参与检索的单元（库名或视图名），顺序 = [事件库, ...extraScopes] */
+  /** 本次**默认**检索范围（库名或视图名）；模型换库时以 `scopesUsed` 为准 */
   targets?: string[];
+  /**
+   * 本次**实际生效**过的 scope（2026-11-25，与 `ki_recall` 的 `scopesUsed` 同口径）。
+   *
+   * `targets` 只是默认范围，模型可能按问题换库/换视图 —— 面板据此展示"实际查了哪些库"。
+   */
+  scopesUsed?: string[];
   /** 部分 target 检索失败（其余结果仍有效；全部失败才是 503） */
   targetErrors?: Array<{ name: string; error: string }>;
   durationMs: number;

@@ -23,7 +23,7 @@ import { getKbDir, getLocalKbDir } from '../src/lib/scope.js';
 import { loadGroupCache, writeGroupCache } from '../src/lib/group-cache.js';
 import { createEvent } from '../src/lib/events/event-service.js';
 import { addRefs, listRefs, searchRefCandidates } from '../src/lib/events/refs-service.js';
-import { resolveFindTargets } from '../src/lib/events/find-targets.js';
+import { resolveFindTargets, resolveScopeSet } from '../src/lib/events/find-targets.js';
 import type { Relation } from '../src/lib/scoring.js';
 
 const stamp = Date.now();
@@ -270,31 +270,36 @@ describe('② 跨库引用', () => {
 });
 
 describe('③ 范围解析', () => {
+  /*
+   * 2026-11-25（批 3）：`find.ranges`（额外库白名单）已删除，「AI 查找」的起点恒为事件库；
+   * 跨库改由模型在工具调用里自选 scope，判定真源仍是 `resolveScopeSet`
+   * （`ki_recall` 的 `resolveRecallTargets` 也复用它）。
+   */
   it('无权限 / 不存在 / 视图无成员 都进 skipped，不失败', () => {
-    const r = resolveFindTargets(scopeA, { ranges: { extraScopes: [scopeB, 'not-exist-scope', 'empty-view'] } }, {
+    const r = resolveScopeSet([], [scopeB, 'not-exist-scope', 'empty-view'], {
       tokenScopes: [scopeA],   // 只授权事件库
       listScopes: () => [scopeA, scopeB],
       listViews: () => ({ 'empty-view': { members: [] } }),
     });
-    assert.deepEqual(r.targets, [scopeA], '全部被剔除，只剩事件库');
+    assert.deepEqual(r.targets, [], '点名项全部被剔除');
     assert.equal(r.skipped.find((s) => s.name === scopeB)?.reason, 'forbidden');
     assert.equal(r.skipped.find((s) => s.name === 'not-exist-scope')?.reason, 'missing');
     assert.equal(r.skipped.find((s) => s.name === 'empty-view')?.reason, 'view-members-changed');
   });
 
-  it('授权内的额外库会被纳入，且事件库恒在首位', () => {
-    const r = resolveFindTargets(scopeA, { ranges: { extraScopes: [scopeB, scopeA] } }, {
+  it('查找范围恒为事件所在库（不再有额外库白名单）', () => {
+    const r = resolveFindTargets(scopeA, {
       tokenScopes: [scopeA, scopeB],
       listScopes: () => [scopeA, scopeB],
       listViews: () => ({}),
     });
-    assert.deepEqual(r.targets, [scopeA, scopeB], '去重且事件库在前');
+    assert.deepEqual(r.targets, [scopeA], '事件库恒在首位且是唯一起点');
     assert.equal(r.skipped.length, 0);
   });
 
-  it('未配置 range 时只查事件库（与历史行为一致）', () => {
-    const r = resolveFindTargets(scopeA, undefined, { tokenScopes: [scopeA, scopeB] });
-    assert.deepEqual(r.targets, [scopeA]);
+  it('事件库的鉴权由上层做（本函数不重复判）', () => {
+    const r = resolveFindTargets(scopeA, { tokenScopes: [scopeB], listScopes: () => [scopeA, scopeB] });
+    assert.deepEqual(r.targets, [scopeA], '事件库恒在目标里；越权由调用方在此之前判（403）');
     assert.equal(r.skipped.length, 0);
   });
 });

@@ -14,10 +14,15 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import type { ChatTurn, LlmStreamPart } from '../src/lib/chat/llm-client.js';
+import { FIND_DEFAULT_TOOL_CALLS } from '../src/lib/chat/prompt-config.js';
 import { RECALL_TOOL_CODES } from '../src/lib/recall/codes.js';
-import { executeRecall, type RecallArgs, type RecallToolDeps } from '../src/lib/mcp-tools/recall.js';
+import { makeRecallToolRunner } from '../src/lib/recall/tool-runner.js';
+import { executeRecall, resolveRecallSection, type RecallArgs, type RecallToolDeps } from '../src/lib/mcp-tools/recall.js';
 import type { KiConfig } from '../src/lib/config.js';
 import type { RecallRuntimeCfg, RecallToolOutcome } from '../src/lib/recall/run-recall.js';
 
@@ -206,5 +211,187 @@ describe('⑤ 频控', () => {
     assert.equal(second.code, RECALL_TOOL_CODES.THROTTLED);
     assert.equal(second.retryable, true);
     assert.ok(typeof second.retryAfterSec === 'number');
+  });
+});
+
+/**
+ * ⑥ 工具调用预算（2026-11-25 · A 方案）
+ *
+ * 背景：页面「AI 查找 · 工具调用次数」与 MCP `ki_recall` 是同一套配置。
+ * 改动前该值只存在于页面侧，预取落进内核唯一的「不限制」档 —— 这两例就是锁这个口径。
+ */
+describe('⑥ 工具调用预算（与「AI 查找」共用 find 域）', () => {
+  it('find.maxToolCalls 生效；缺失时按默认 15', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ki-recall-cfg-'));
+    try {
+      const file = path.join(dir, 'prompt-config.json');
+      fs.writeFileSync(file, JSON.stringify({ version: 1, find: { maxToolCalls: 7 } }));
+      assert.equal(resolveRecallSection({ dataDir: dir, chatDir: dir } as KiConfig).maxToolCalls, 7,
+        '预取必须读页面同一个 find 域');
+
+      fs.writeFileSync(file, JSON.stringify({ version: 1, find: {} }));
+      assert.equal(resolveRecallSection({ dataDir: dir, chatDir: dir } as KiConfig).maxToolCalls, FIND_DEFAULT_TOOL_CALLS,
+        '缺字段按 15：预取不再是不限制档');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('预算既写进系统提示词，内核也真按它截断', async () => {
+    let systemPrompt = '';
+    let executed = 0;
+    let round = 0;
+    const stream: StreamFn = (async function* (messages: ChatTurn[]) {
+      round += 1;
+      if (round === 1) {
+        systemPrompt = String(messages[0]?.content ?? '');
+        yield {
+          type: 'tool_calls',
+          calls: [
+            { id: 'c1', name: 'ki_search', arguments: JSON.stringify({ query: 'a' }) },
+            { id: 'c2', name: 'ki_search', arguments: JSON.stringify({ query: 'b' }) },
+          ],
+        };
+        return;
+      }
+      yield { type: 'content', text: JSON.stringify({ summary: 's', candidates: [], uncertainties: [], needMore: [] }) };
+    }) as unknown as StreamFn;
+
+    const res = await executeRecall(ARGS, baseDeps({
+      recallCfg: { ...RECALL_CFG, maxToolCalls: 2 },
+      stream,
+      runTool: async () => {
+        executed += 1;
+        return { text: JSON.stringify({ results: [] }) };
+      },
+    }));
+
+    assert.equal(parse(res).ok, true);
+    assert.match(systemPrompt, /最多可以调用 2 次工具/, '预算必须写进系统提示词，模型才能提前规划');
+    assert.equal(executed, 2, '配额 2 只能真执行 2 次');
+  });
+
+  it('超时取「find.timeoutMs」与部署级 cap 的较小值，文案给实际秒数', async () => {
+    // 慢 stream：1.5s 才产出，超时 1s 必先触发（收尾后它自己结束，不留未决 promise）
+    const slow: StreamFn = (async function* () {
+      await new Promise((r) => setTimeout(r, 1_500));
+      yield { type: 'content', text: '{}' };
+    }) as unknown as StreamFn;
+    const r = parse(await executeRecall(ARGS, baseDeps({
+      recallCfg: { ...RECALL_CFG, timeoutMs: 1_000 },
+      runtime: { throttlePerMinute: 100, hardTimeoutMs: 60_000 },
+      stream: slow,
+    })));
+    assert.equal(r.code, RECALL_TOOL_CODES.TIMEOUT);
+    assert.match(String(r.message), /超过 1 秒/);
+  });
+});
+
+/**
+ * ⑦ scope 自选（2026-11-25 批 3 · Q3/Q4）
+ *
+ * 口径：调用方传入的 scope 只是默认值；模型可自选，**每次调用**都校验，失败报错不回落。
+ * 这里直接测执行器（不经模型），锁住「scope 真的传到执行层 + 视图展开 + 审计记实际值」。
+ */
+describe('⑦ scope 自选：默认范围 + 逐次校验 + 视图展开', () => {
+  const VIEWS: Record<string, string[]> = { 'team-view': ['kb-b', 'kb-c'] };
+
+  /** 造一个执行器：search / getModuleInfo 用假实现，记录实际收到的 scope */
+  function makeRunner(calls: string[]) {
+    return makeRecallToolRunner({
+      targets: ['kb-a'],
+      toolChars: 8000,
+      resolveScope: (requested) => {
+        if (requested.includes('bad')) {
+          return { error: '这些 scope 不可用：bad（missing）。可用库：kb-a、kb-b、kb-c' };
+        }
+        const physical: string[] = [];
+        for (const name of requested) {
+          const members = VIEWS[name];
+          if (members) physical.push(...members);
+          else physical.push(name);
+        }
+        return { physical, display: requested };
+      },
+      scopeCatalog: () => ({ scopes: ['kb-a', 'kb-b', 'kb-c'], views: VIEWS }),
+      impl: {
+        search: (async (args: { scope: string }) => {
+          calls.push(args.scope);
+          return { results: [], mode: 'fulltext' as const };
+        }) as never,
+        getModuleInfo: (async (args: { scope: string }) => {
+          calls.push(args.scope);
+          return args.scope === 'kb-b'
+            ? { ok: true, scope: 'kb-b', group: 'g', relation: 'r', content: 'x' }
+            : { ok: false, error: 'not found' };
+        }) as never,
+      },
+    });
+  }
+
+  it('不传 scope → 用默认范围；传了 → 按它查并记生效 scope', async () => {
+    const calls: string[] = [];
+    const runner = makeRunner(calls);
+
+    const r1 = await runner('ki_search', { query: 'q' });
+    assert.deepEqual(r1.scopeUsed, ['kb-a'], '未传 scope 用默认范围');
+    assert.deepEqual(calls, ['kb-a']);
+
+    calls.length = 0;
+    const r2 = await runner('ki_search', { query: 'q', scope: 'kb-b' });
+    assert.deepEqual(r2.scopeUsed, ['kb-b'], '传了就用它');
+    assert.deepEqual(calls, ['kb-b'], 'scope 必须真的传到执行层');
+  });
+
+  it('传视图 → 展开成员后检索，审计记视图名', async () => {
+    const calls: string[] = [];
+    const runner = makeRunner(calls);
+    const r = await runner('ki_search', { query: 'q', scope: 'team-view' });
+    assert.equal(calls[0], 'kb-b,kb-c', '视图展开成成员库');
+    assert.deepEqual(r.scopeUsed, ['team-view'], '审计记模型给的名字（视图）');
+  });
+
+  it('传不可用 scope → 报错且不执行（不回落默认）', async () => {
+    const calls: string[] = [];
+    const runner = makeRunner(calls);
+    const r = await runner('ki_search', { query: 'q', scope: 'bad' });
+    assert.match(r.text, /不可用/);
+    assert.match(r.text, /可用库/, '错误里要有可用清单，让模型自愈');
+    assert.deepEqual(calls, [], '校验失败不得带着默认范围偷偷执行');
+  });
+
+  it('读正文在视图展开后逐个试，命中即止并回填真实库', async () => {
+    const calls: string[] = [];
+    const runner = makeRunner(calls);
+    const r = await runner('ki_get_module_info', { group: 'g', relation: 'r', scope: 'team-view' });
+    assert.deepEqual(calls, ['kb-b'], 'kb-b 命中即停，不再试 kb-c');
+    assert.equal(r.read?.scope, 'kb-b');
+  });
+
+  it('未传 scope 时 scopesUsed 用入参原名（视图不被记成成员库）', async () => {
+    const calls: string[] = [];
+    const runner = makeRecallToolRunner({
+      targets: ['kb-b', 'kb-c'],
+      defaultDisplay: ['team-view'],
+      toolChars: 4000,
+      impl: {
+        search: (async (args: { scope: string }) => {
+          calls.push(args.scope);
+          return { results: [], mode: 'fulltext' as const };
+        }) as never,
+      },
+    });
+    const r = await runner('ki_search', { query: 'q' });
+    assert.deepEqual(r.scopeUsed, ['team-view'], '审计与展示都该用入参原名');
+    assert.deepEqual(calls, ['kb-b,kb-c'], '检索仍用展开后的物理库');
+  });
+
+  it('ki_scope_list 回可用库与视图（模型自选的唯一目录）', async () => {
+    const calls: string[] = [];
+    const runner = makeRunner(calls);
+    const r = await runner('ki_scope_list', {});
+    const payload = JSON.parse(r.text) as { scopes: string[]; views: Array<{ name: string; members: string[] }> };
+    assert.deepEqual(payload.scopes, ['kb-a', 'kb-b', 'kb-c']);
+    assert.equal(payload.views[0]?.name, 'team-view');
   });
 });

@@ -168,8 +168,12 @@ export function resolveScopeSet(
  */
 export function resolveFindTargets(
   eventScope: string,
-  cfg: Pick<FindConfig, 'ranges'> | undefined,
   deps: FindTargetDeps,
 ): FindTargetResolution {
-  return resolveScopeSet([eventScope], cfg?.ranges.extraScopes ?? [], deps);
+  /*
+   * 2026-11-25（批 3）：`ranges`（额外库白名单）已删除 —— 起点恒为事件所在库；
+   * 需要跨库时由模型在工具调用里自行指定 `scope`（每次调用逐次鉴权）。
+   * 保留本函数是为了让「事件库恒在首位 + 鉴权判定」这条口径只有一处实现。
+   */
+  return resolveScopeSet([eventScope], [], deps);
 }

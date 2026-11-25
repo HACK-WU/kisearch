@@ -9,15 +9,17 @@
  * 与 `ki_recall` 的关系：**同一份内核**（`runGroundedRecall`）+ **同一份工具执行器**
  * （`makeRecallToolRunner`）。差异只在三处，且都不在循环里：
  *   ① 输入装配：事件 → 用户消息（`buildFindContext`）
- *   ② 强制 skill：`refs-locate`（挑参考文档）而非 `task-recall`
+ *   ② 强制 skill：仅页面侧加载 `refs-locate`（挑参考文档）；预取侧不加载任何 skill（2026-11-25 Q6）
  *   ③ 产物落点：候选进面板、由人勾选写入 refs（`ki_recall` 是 agent 直接消费）
  */
 
 import type { ChatTurn, LlmStreamPart } from '../chat/llm-client.js';
 import { streamChat } from '../chat/llm-client.js';
 import { GROUNDED_OUTPUT_SPEC, runGroundedRecall } from '../recall/run-recall.js';
-import { makeRecallToolRunner } from '../recall/tool-runner.js';
+import { buildScopeNote, toolCallBudgetNote } from '../recall/recall-prompt.js';
+import { makeRecallToolRunner, makeScopeResolver } from '../recall/tool-runner.js';
 import { readAllGroupCaches } from '../group-cache.js';
+import { loadConfig, type KiConfig } from '../config.js';
 import { FIND_DEFAULT_TOOL_CALLS } from '../chat/prompt-config.js';
 import { resolveVisibilityOfRelation } from '../visibility-index.js';
 import { buildFindContext, type DeepFindDeps, type DeepFindResult, type UnconfirmedCandidate } from './find-runner.js';
@@ -25,7 +27,13 @@ import type { RefCandidate, RefSearchStep } from './refs-service.js';
 import type { Visibility } from './types.js';
 
 const TOOL_RESPONSE_CHARS = 10_000;
-const DEFAULT_MAX_ROUNDS = 6;
+/**
+ * 轮次安全阀（**不是预算**，2026-11-25 Q1 与预取侧统一口径）。
+ *
+ * 唯一预算是工具调用次数（`find.maxToolCalls`，默认 15）：调满即收口，模型不再调工具也会自然结束。
+ * 这个值只用于防「模型反复空转」的死循环兜底，因此比任何真实使用量都宽。
+ */
+const ROUNDS_SAFETY_CAP = 30;
 
 export interface DeepFindCoreArgs {
   event: Parameters<typeof buildFindContext>[0]['event'];
@@ -53,6 +61,15 @@ export interface DeepFindCoreArgs {
    * 配置缺失或调用方漏传都不能退化成无限调用。
    */
   maxToolCalls?: number;
+  /**
+   * 调用方授权集（2026-11-25 批 3-C，与 `ki_recall` 同口径）。
+   *
+   * **有该键**（含显式 `null` = 本机不限权）才允许模型在工具调用里自选 scope；
+   * 不传 = 保持「只能查本次 targets」的旧行为（旧调用 / 单测不因此获得自由换库）。
+   */
+  tokenScopes?: string[] | null;
+  /** 配置（构造 scope 解析器要读 views.json / 库清单）；缺省 `loadConfig()` */
+  kiConfig?: KiConfig;
   llm: Record<string, unknown>;
   now?: () => number;
   signal?: AbortSignal;
@@ -76,22 +93,12 @@ function toolLabel(name: string): string {
   }
 }
 
-/**
+/*
  * 工具调用预算说明（每轮都会追加 —— 查找路径恒有上限，没有"不限制"档）。
  *
- * 为什么由**代码**追加、不放进用户可编辑的「检索定位提示词」：预算与执行侧的上限是同一份数，
- * 让用户改提示词就能改预算的话，两边迟早对不上（改了提示词 ≠ 运行期真的限那么多）。
- *
- * 为什么非要说给模型：只硬截断的话，模型会把次数花在试探性检索上，撞墙后才被迫收口，
- * 候选质量明显下降；提前告知它能按"先定位、再读正文"的顺序分配次数。
+ * 2026-11-25（A 方案）：实现搬到 `recall/recall-prompt.ts` 与「AI 预取」共用，
+ * 避免两条链路各写一份后漂移；本文件只保留调用点。
  */
-function toolCallBudgetNote(maxToolCalls: number): string {
-  return [
-    '## 工具调用预算',
-    `本次最多可以调用 ${maxToolCalls} 次工具（检索与读正文合计），次数用尽后你会被要求立刻收口。`,
-    '先规划再动手：先用最少的检索定位，再读最可能相关的正文；不要用近似重复的检索反复试探。',
-  ].join('\n');
-}
 
 /**
  * 模型通道主流程：**共享内核** → 三重校验 → 面板装配。
@@ -124,9 +131,31 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     ? rawCalls
     : FIND_DEFAULT_TOOL_CALLS;
 
+  /*
+   * 2026-11-25：与 `ki_recall` 同口径 —— 传了 `tokenScopes`（含 null）才允许模型自选 scope。
+   * 解析器与预取侧共用同一份实现（`makeScopeResolver`），避免两条链路的鉴权/视图展开漂移。
+   */
+  // 用 !== undefined 而不是 hasOwnProperty：（对象展开常见）
+  // 不等于调用方要求开启，否则会把测试/旧调用的越界候选一并放行。
+  const switchable = args.tokenScopes !== undefined;
+  const resolver = switchable
+    ? makeScopeResolver({
+      config: args.kiConfig ?? loadConfig(),
+      tokenScopes: args.tokenScopes ?? null,
+      defaultTargets: args.targets,
+    })
+    : null;
+
   const systemPrompt = [
     args.prompt.trim(),
     ...args.skills.filter((s) => s.enabled).map((s) => `### ${s.name}\n${s.content.trim()}`),
+    ...(resolver
+      ? [buildScopeNote({
+        defaultTargets: args.targets,
+        canSwitch: true,
+        ...resolver.scopeCatalog(),
+      })]
+      : []),
     toolCallBudgetNote(maxToolCalls),
     GROUNDED_OUTPUT_SPEC,
   ].filter(Boolean).join('\n\n');
@@ -144,16 +173,37 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     }),
     exclude: [...args.usedKeys],
     limit: 20,
-    tools: args.tools ?? { ki_search: true, ki_get_module_info: true, ki_group_list: true, ki_tag_list: true },
-    maxRounds: DEFAULT_MAX_ROUNDS,
+    tools: args.tools ?? {
+      ki_search: true, ki_get_module_info: true, ki_group_list: true, ki_scope_list: true, ki_tag_list: true,
+    },
+    maxRounds: ROUNDS_SAFETY_CAP,
     maxToolCalls,
     llm: args.llm,
     stream: args.stream ?? ((messages, opts) => streamChat(messages, opts as never)),
-    runTool: args.runTool ?? makeRecallToolRunner({ targets: args.targets, toolChars: TOOL_RESPONSE_CHARS }),
+    runTool: args.runTool ?? makeRecallToolRunner({
+      targets: args.targets,
+      // 展示名用事件查找的入参原名（可能含视图），保证 scopesUsed 与 targets 同源可比
+      defaultDisplay: args.targets,
+      toolChars: TOOL_RESPONSE_CHARS,
+      // 只有调用方传了 tokenScopes（= 允许换库）才注入；否则保持范围锁定
+      ...(resolver ? { resolveScope: resolver.resolveScope, scopeCatalog: resolver.scopeCatalog } : {}),
+    }),
     now,
     ...(args.signal ? { signal: args.signal } : {}),
     ...(args.onProgress ? { onToolCall: args.onProgress } : {}),
   });
+
+  /*
+   * 2026-11-25：模型可自选 scope（与 `ki_recall` 同口径）—— **实际用过的库必须一并放行**，
+   * 否则下面 ① 的范围校验会把跨库读到的候选全判成「越界」剔除（表现为"换了库却什么都拿不到"）。
+   */
+  if (resolver) {
+    for (const used of grounded.scopesUsed ?? []) {
+      allowed.add(used);
+      const members = args.viewOf(used);
+      if (members) for (const m of members) allowed.add(m);
+    }
+  }
 
   const unconfirmed: UnconfirmedCandidate[] = [];
   const candidates: RefCandidate[] = [];
@@ -244,6 +294,8 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
     unconfirmed,
     steps,
     query: '',
+    // 2026-11-25：模型可能换库，如实回显「实际用过的范围」（与 `ki_recall` 的 scopesUsed 同口径）
+    scopesUsed: grounded.scopesUsed ?? [],
     durationMs: now() - started,
     // 收口原因由内核给（budget = 工具调用次数用尽 / timeout = 超时）；只有片段降级时无原因，
     // 按历史口径仍报 timeout（`usedCalls` 让面板能如实说"用满 N 次"）
