@@ -1537,8 +1537,11 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
    *
    * 超上限**不静默丢**：提示"已忽略 N 张"，与需求 §3.2 的负向口径一致。
    * 上传前先确保会话存在（惰性建会话与 handleSend 一致）—— 图片挂在会话目录下。
+   *
+   * ⚠️ 必须是普通函数：本组件在 `if (!open) return null` 早退之后不得出现 hook（同 handleAddRef
+   *    处注释）。包成 useCallback 会让「点开面板」的瞬间 React #310 整页白屏（2026-11-24 复发过）。
    */
-  const addImages = useCallback(async (files: readonly File[]): Promise<void> => {
+  const addImages = async (files: readonly File[]): Promise<void> => {
     if (files.length === 0) return;
     const room = maxPendingImages - pendingImages.length;
     if (room <= 0) {
@@ -1563,7 +1566,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     } finally {
       setImageUploading(false);
     }
-  }, [pendingImages.length, maxPendingImages, createNewConversation, store]);
+  };
 
   /**
    * 移除待发图：**只从待发区摘掉，不删服务端文件**。
@@ -1574,10 +1577,12 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
    *   元数据还在 → 缩略图 404、重新生成时那张图也读不到了。
    *   代价对比：留一个孤儿文件（≤4MB，删会话 / 清空时由既有级联清理，N15）
    *   远小于「让用户取消一次编辑就毁掉已发送内容」。
+   *
+   * ⚠️ 同 addImages：早退之后不得出现 hook，只能写普通函数。
    */
-  const removePendingImage = useCallback((imageId: string): void => {
+  const removePendingImage = (imageId: string): void => {
     setPendingImages((cur) => cur.filter((i) => i.id !== imageId));
-  }, []);
+  };
 
   const handleSend = (): void => {
     const text = draft.trim();
