@@ -14,7 +14,8 @@
  * ═══ 生命周期约定（DESIGN §3.2）═══
  * · worker 崩溃 / 退出：标记失效，下一次请求重建；**在途任务不重排**（重排会在坏 SVG 上反复崩）
  * · 队列上限 8：超限直接报错 —— 排队等待只会让调用方的 10s 超时先触发，反而更难诊断
- * · 进程退出：terminate 并等待 ≤2s，不阻塞退出
+ * · 进程退出：worker 全程 unref，不持有事件循环（顺序要求见 ensureWorker 的 ★ 注释），
+ *   进程排空即退出、不等待 worker —— 所以测试 / CLI 跑完不会被它吊住
  * · 超时：单张 10s。超时后必须 **terminate 重建** —— 同步渲染中的 worker 收不到取消信号
  *
  * ═══ 缓存 ═══
@@ -110,11 +111,26 @@ function ensureWorker(): Worker {
     // 正常退出（terminate 后）时 worker 已被置空，这里只处理意外退出
     if (worker === w) disposeWorker(`栅格化 worker 意外退出（code=${code}）`);
   });
+  // ★ 必须在**所有** w.on(...) 之后 unref，不能挪到 new Worker 旁边：
+  //   w.on('message') 会让 worker 内部 MessagePort start() 并 ref()，把先前的 unref 覆盖掉 ——
+  //   那样任何「栅格化过 SVG 之后要退出」的进程（测试 / 将来的 CLI）都会被 worker 吊住永不退出，
+  //   而且 process.once('exit') 那条清理永远走不到（exit 只在事件循环排空后触发，它排不空）。
+  //   写成 once('message') 反而能退出（触发后监听移除、port 又 stop），会掩盖这个问题，别据此判断；
+  //   而且 once 收完第一条就没了，承载不了并发请求，不能当替代方案。
+  //   渲染期间没有「提前退出」风险：renderOnce 的 10s 超时定时器是 ref 的，撑着事件循环等回包。
+  w.unref();
   worker = w;
   return w;
 }
 
-/** 进程退出时清理，避免 daemon 关闭被 worker 拖住 */
+/**
+ * 进程退出时的兜底清理。
+ *
+ * 只在事件循环**排空之后**才触发 —— worker 已 unref，正常路径就是「循环排空 → exit → 进程结束」，
+ * 此时 terminate 的异步结果不会被等待，作用仅是尽早发出终止信号（不保证完成）。
+ * 不要把它当成「进程退不掉」的解法：一旦存在 ref 着的 handle（worker 未 unref 时正是如此），
+ * 本钩子永远不会被调用。
+ */
 process.once('exit', () => {
   try {
     void worker?.terminate();
