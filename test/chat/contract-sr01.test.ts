@@ -83,6 +83,23 @@ describe('SR-01 契约 · 投影（两种，不可混用）', () => {
     const refs = toSourceRefs(mockSearchResult('ok'));
     for (const r of refs) assert.ok(r.snippet.length <= CHAT_BUDGET.sourceSnippetChars);
   });
+
+  it('视图检索：命中自带 scope 时带上来源库，缺失时不写该字段（点开原文按真实库取图）', () => {
+    const viewResult = {
+      ok: true,
+      scope: 'kisearch-docs',
+      total: 2,
+      results: [
+        { group: 'aiops', relation: 'overview', scope: 'kisearch-memory', lineStart: 3, lineEnd: 4, originalExcerpt: 'x' },
+        { group: 'blog', relation: 'post', lineStart: 0, lineEnd: 0, originalExcerpt: 'y' },
+      ],
+    } as unknown as Parameters<typeof toSourceRefs>[0];
+    const refs = toSourceRefs(viewResult);
+    assert.equal(refs[0]?.scope, 'kisearch-memory');
+    // 老响应 / 单库没有来源库：不得凭空多出字段（落盘形状保持向后兼容）
+    assert.equal('scope' in refs[1]!, false);
+    assert.equal('scope' in toSourceRefs(mockSearchResult('ok'))[0]!, false);
+  });
 });
 
 describe('SR-01 契约 · 检索 skill（与工具 schema 同源）', () => {

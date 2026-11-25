@@ -28,6 +28,11 @@
 export interface SourceRef {
   group: string;
   doc: string;
+  /**
+   * 引用真实所属的知识库（视图模式下与聊天 scope 不同；单库/老会话可能缺失）。
+   * 与后端 `src/lib/chat/chat-contract.ts` 手工同源，改一处必须同步另一处。
+   */
+  scope?: string;
   /** 1-based；为 0 表示"只能定位到文档级"（UI 不得显示 "0-0"） */
   lineStart: number;
   lineEnd: number;

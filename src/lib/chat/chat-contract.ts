@@ -42,6 +42,13 @@ export interface SourceRef {
   group: string;
   /** = SearchHit.relation（文档名） */
   doc: string;
+  /**
+   * 该引用**真实所属的知识库**（视图模式下与聊天 scope 不同；单库/老会话可能缺失）。
+   *
+   * 用途：点开原文时 `/api/asset` 只认 `dataDir/<库名>`，按聊天 scope（视图名）取图会全 404。
+   * 老会话落盘没有这个字段 → 前端回落聊天 scope，行为与改造前一致。
+   */
+  scope?: string;
   /** 1-based；chunk fallback 无法映射时为 0（UI 不得显示 "0-0"） */
   lineStart: number;
   /** 含端；无法映射时为 0 */

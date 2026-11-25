@@ -34,6 +34,14 @@ export interface ReaderLinkSelection {
  */
 interface Props {
   scope: string;
+  /**
+   * 「当前这篇文档」真实所属的知识库（视图模式下与 `scope` 不同）。
+   *
+   * 为什么必须与 `scope` 分开：`scope` 还要喂给 `useDocSearch`（视图下要**全视图**搜
+   * 目标文档，收窄成成员库会漏），而加载/保存这篇是写路径，只认真实库名。
+   * 缺省回落 `scope`（单库模式与改造前逐字节一致）。
+   */
+  docScope?: string;
   onClose: () => void;
   /** 默认 'link' */
   mode?: 'link' | 'ref';
@@ -77,13 +85,18 @@ const SEARCH_DISPLAY_LIMIT = 200;
 
 export function ReaderLinkComposer(props: Props): JSX.Element {
   const {
-    scope, onClose,
+    scope, docScope, onClose,
     mode = 'link',
     group = '', relation = '', currentContent = '',
     selection, onSaved, onPartialSaved,
     initialDoc, currentRefs = EMPTY_REFS, onAddRef,
   } = props;
   const isRef = mode === 'ref';
+  /**
+   * 加载 / 保存「当前这篇」用的 scope：视图模式下必须是**成员库**（`docScope`），
+   * 而 `scope` 继续用于目标文档搜索与链接落点元数据（见 Props.docScope 注释）。
+   */
+  const editScope = docScope || scope;
   // link 专属 props 的运行时兜底（ref 模式不传；link 模式由调用方必传，类型层面为全可选妥协）：
   // 提供空实现/空值保证 ref 路径安全，link 路径行为与合并前完全一致
   const linkSelection: ReaderLinkSelection = selection ?? { text: '', rect: { left: 0, top: 0, bottom: 0 } };
@@ -106,6 +119,16 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
   const [selectedDoc, setSelectedDoc] = useState<DocItem>(
     initialDoc ? { group: initialDoc.group, name: initialDoc.doc } : { group, name: relation },
   );
+  /**
+   * 目标文档的真实落点：视图模式（多库）下 `selectedDoc.group` 带「库名/」前缀、`scope`
+   * 是视图名，两者都只供展示与树路径；读正文 / 预览图必须回到**成员库 + 真实 group**，
+   * 否则后端报「未匹配到有效路径」、图片按 `dataDir/<视图名>/` 取不到
+   * （真机复现：视图 scope 下所有文档都读不出）。
+   *
+   * 同一组值同时喂给正文读取与 `assetBase`，避免两处口径漂移。
+   */
+  const selectedReadScope = selectedDoc.scope || scope;
+  const selectedReadGroup = selectedDoc.rawGroup || selectedDoc.group;
   const [targetContent, setTargetContent] = useState<string | null>(currentContent);
   const [targetLoading, setTargetLoading] = useState(false);
   const [position, setPosition] = useState<TargetPosition | null>(null);
@@ -170,21 +193,14 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
     let active = true;
     setTargetContent(null);
     setTargetLoading(true);
-    /**
-     * 视图模式（多库）下 `selectedDoc.group` 带「库名/」前缀，只供展示与树路径；
-     * 读正文必须回到**成员库 + 真实 group**，否则后端报「未匹配到有效路径」，
-     * 右侧就永远停在「无法显示目标文档正文」（真机复现：视图 scope 下所有文档都读不出）。
-     */
-    const readScope = selectedDoc.scope ?? scope;
-    const readGroup = selectedDoc.rawGroup ?? selectedDoc.group;
-    void kiGetModuleInfo(readScope, readGroup, selectedDoc.name).then((result) => {
+    void kiGetModuleInfo(selectedReadScope, selectedReadGroup, selectedDoc.name).then((result) => {
       if (!active) return;
       if (!result.content) throw new Error(result.error || result.hint || '无法读取目标文档正文');
       setTargetContent(result.content);
     }).catch((error: Error) => { if (active) setMessage(`读取目标文档失败：${error.message}`); })
       .finally(() => { if (active) setTargetLoading(false); });
     return () => { active = false; };
-  }, [pickerOpen, scope, group, relation, selectedDoc.group, selectedDoc.name, selectedDoc.scope, selectedDoc.rawGroup, currentContent]);
+  }, [pickerOpen, group, relation, selectedDoc.name, selectedReadScope, selectedReadGroup, currentContent]);
 
   useEffect(() => {
     if (!pickerOpen || !targetContent) return;
@@ -327,7 +343,7 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
         if (pendingSaveRef.current.token !== token) throw new Error('请先重试当前保存，或关闭面板后重新选择');
         request = pendingSaveRef.current;
       } else {
-        const loaded = await getEditableDocument(scope, group, relation);
+        const loaded = await getEditableDocument(editScope, group, relation);
         if (loaded.sourceError && !force) {
           // 内容分叉 → 交给用户确认（不吞掉已选目标）；配置类错误强制也没用，照旧直接报错
           if (loaded.sourceErrorCode === 'CONTENT_DIVERGED') {
@@ -342,7 +358,7 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
           token,
           content,
           args: {
-            scope, group, relation, content,
+            scope: editScope, group, relation, content,
             expectedRevision: loaded.revision,
             expectedSourceRevision: loaded.sourceRevision,
             vectorize: loaded.indexMode === 'dense',
@@ -505,7 +521,7 @@ export function ReaderLinkComposer(props: Props): JSX.Element {
               {!isRef && <div className="ki-reader-link-dialog__guide"><span>划选标题或段落里的文字；段落内任意选区都会定位到整段</span><button type="button" onClick={() => void commitTarget({ v: 1, type: 'document', scope, group: selectedDoc.group, relation: selectedDoc.name })} disabled={busy || targetLoading || !targetContent || retryReady || saveLocked}>跳到文档开头 ↗</button></div>}
               {targetLoading ? <p className="ki-reader-link-dialog__hint">正在加载文档正文…</p> : targetContent ? (
                 <div ref={previewRef} className="ki-markdown ki-reader-link-dialog__preview" onMouseUp={captureTargetSelection} onKeyUp={captureTargetSelection} onClickCapture={(event) => { if (event.target instanceof Element && event.target.closest('a[href]')) event.preventDefault(); }}>
-                  <MarkdownPreview text={targetContent} assetBase={{ scope, group: selectedDoc.group }} />
+                  <MarkdownPreview text={targetContent} assetBase={{ scope: selectedReadScope, group: selectedReadGroup }} />
                 </div>
               ) : <p className="ki-reader-link-dialog__hint">{isRef && !selectedDoc.name ? '从左侧选择一篇文档，然后在正文里划选要引用的内容。' : '无法显示目标文档正文，请选择其他文档。'}</p>}
             </div>

@@ -209,6 +209,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     group: string;
     /** 命中片段 → 复用 ModuleDrawer 既有的 `highlightQuery`（不新建高亮机制） */
     query: string;
+    /** 该文档真实所属库（来源引用带 `scope` 时才有；视图下取图/编辑要用它） */
+    member?: string;
   } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -1797,7 +1799,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const handleOpenSource = (ref: SourceRef): void => {
     // 复用既有 ModuleDrawer 的高亮定位能力（R20 要求"不新建高亮机制"）：
     // 把引用摘要作为 `highlightQuery` 传入 → 打开原文即定位/高亮命中片段。
-    setViewing({ module: ref.doc, group: ref.group, query: ref.snippet });
+    setViewing({ module: ref.doc, group: ref.group, query: ref.snippet, member: ref.scope });
   };
 
   const draftChars = Array.from(draft).length;
@@ -2857,9 +2859,13 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
       {/* 来源引用点击 → 打开原文并高亮（复用既有 ModuleDrawer） */}
       {viewing ? (
         <ModuleDrawer
-          // key 含 query：同一文档的不同引用片段能重新挂载 → 重新定位/高亮
-          key={`${scope}:${viewing.group}:${viewing.module}:${viewing.query}`}
+          // key 含 query/member：不同引用片段或不同成员库的同名文档都要重新挂载
+          key={`${scope}:${viewing.member ?? ''}:${viewing.group}:${viewing.module}:${viewing.query}`}
           scope={scope}
+          /* 聊天 scope 在视图模式下是视图名：正文图片 `/api/asset` 只认 `dataDir/<库名>`，
+             落到视图名会让整篇图 404。来源引用带 `scope` 时按真实库取；
+             老会话没有该字段 → undefined，ModuleDrawer 内部回落到 `scope`。 */
+          member={viewing.member}
           module={viewing.module}
           group={viewing.group}
           highlightQuery={viewing.query}

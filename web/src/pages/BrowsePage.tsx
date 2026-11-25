@@ -1469,9 +1469,10 @@ export function BrowsePage(): JSX.Element {
     if (!currentViewing) return null;
     return (
       <ModuleDrawer
-        /* ★ 视图模式下必须用**文档实际所属的库**：顶栏是视图名，直接传下去
-           doc/get 会去读 dataDir/<视图名>/ → 正文一片空白（不报错）。
-           单库模式 currentViewing.scope 为空 → 回落顶栏值，行为不变。 */
+        /* `scope` 是**导航值**（视图模式下 = 视图名），正文读取、列表缓存、重挂载键都沿用它；
+           文档真实所属库走下面的 `member` —— ModuleDrawer 内部的 `docScope` 用它做写路径
+           与取图，只给视图名会让 `doc/edit` 报「文档不存在」、删除预检回 `exists:false`。
+           单库模式两者相同，行为与改造前一致。 */
         key={`${asDrawer ? 'drawer' : 'inline'}:${currentViewing.scope ?? scope}:${currentViewing.group}:${currentViewing.module}`}
         inline={!asDrawer}
         scope={currentViewing.scope ?? scope}

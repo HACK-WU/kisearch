@@ -174,7 +174,8 @@ ki mcp --http --web
 |------|------|------|
 | `/api/tags` | GET | scope 下 tag 及文档数；会打开 Collection，走 write 通道 |
 | `/api/doc/get` | GET | 读取单篇文档原文；只读 `read` 通道，导入期间不被排队 |
-| `/api/doc/edit` | GET / POST | 读取 / 保存文档编辑 |
+| `/api/doc/edit` | GET / POST | 读取 / 保存文档编辑。`scope` 必须是**文档所在的知识库**：传知识视图（聚合）会返回 `400 VIEW_NOT_WRITABLE` 并列出成员库 —— 不会再误报「文档不存在」 |
+| `/api/doc/delete` | POST | 删除文档（`dryRun: true` 只做预检）。`scope` 同上必须是文档所在库；传视图名返回 `400 VIEW_NOT_WRITABLE`，不会给出 `exists: false` 的错误预检结论 |
 | `/api/import/config` | GET | 当前 scope 的导入配置（扩展名 / 大小上限）+ 向量维度快照 |
 | `/api/import/incomplete` | GET | 未完成重试清单；只读 `read` 通道 |
 | `/api/import/retry-incomplete` | POST | 按清单重试未完成文件 |

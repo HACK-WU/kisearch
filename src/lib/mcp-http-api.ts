@@ -103,7 +103,9 @@ import { preflightImportDuplicates, DEFAULT_PREFLIGHT_MAX_DETAIL } from './impor
 import { buildEmbeddingSummary } from './embedding-summary.js';
 import {
   assertHttpChannelWritable,
+  assertNotScopeView,
   isScopeReadonlyError,
+  isScopeViewWriteError,
   scopeReadonlyBody,
 } from './scope-policy.js';
 // S-02/S-03：两级完成口径 —— 整理等待/状态 + A11 就绪判据
@@ -500,6 +502,45 @@ function rejectIfScopeReadonly(res: http.ServerResponse, scope: string, action: 
   } catch (err) {
     if (isScopeReadonlyError(err)) {
       sendJson(res, 409, scopeReadonlyBody(err));
+      return true;
+    }
+    throw err;
+  }
+}
+
+/**
+ * 视图门禁（**读通道**专用）：`scope` 是视图名则 400 `VIEW_NOT_WRITABLE`。
+ *
+ * 为什么这两条读通道要单独挡：`GET /api/doc/edit` 与 `POST /api/doc/delete` 的 dryRun
+ * 走 `read` 通道、**不经过 `withScopeWriteLock`**，视图名会一路带到
+ * `loadGroupCache(dataDir/<视图名>)`，于是：
+ *   - `doc/edit` 把「寻址方式错了」报成 **404「文档不存在」**（用户以为数据丢了）；
+ *   - `doc/delete` 预检返回 **200 `exists:false`**（前端据此给「文档已不存在」的**假回执**，
+ *     比直接报错严重：它既没删也没告诉用户该怎么删）。
+ * 与写路径同一口径拒绝 —— 视图是只读聚合、不是知识库（`governance-scope.ts` 的既有决策：
+ * 写操作绝不猜成员库，猜错库比报错严重）。前端应带文档真实所属库（`member`）再来。
+ *
+ * 返回 true = 已响应（调用方直接 return）。
+ */
+function rejectIfScopeView(
+  res: http.ServerResponse,
+  scope: string,
+  operation: string,
+  config?: KiConfig,
+): boolean {
+  try {
+    assertNotScopeView(scope, operation, config);
+    return false;
+  } catch (err) {
+    if (isScopeViewWriteError(err)) {
+      sendJson(res, 400, {
+        ok: false,
+        code: err.code,
+        error: err.message,
+        view: err.view,
+        members: err.members,
+        hint: '请改用文档真实所属的知识库（前端 Member / member 参数）后重试',
+      });
       return true;
     }
     throw err;
@@ -1652,6 +1693,8 @@ export async function handleApiRequest(
     if (p === '/doc/edit' && req.method === 'GET') {
       // REQ-20261009-003 S-01：读取待编辑原文同样不打开 zvec，走 read 通道。
       const scope = resolveScope(requestConfig, url.searchParams.get('scope') ?? '');
+      // 视图名不是库：放进去只会 404「文档不存在」（见 rejectIfScopeView 注释）
+      if (rejectIfScopeView(res, scope, 'doc-edit-read', requestConfig)) return;
       const group = url.searchParams.get('group') ?? '';
       const relation = url.searchParams.get('relation') ?? '';
       await getSharedOperationCoordinator().submit(
@@ -1763,6 +1806,8 @@ export async function handleApiRequest(
       }
       const target = { scope, group: body.group, relation: body.relation };
       if (body?.dryRun === true) {
+        // 预检是读通道（不排队写锁），视图名必须在这里挡：否则返回 200「不存在」假回执
+        if (rejectIfScopeView(res, scope, 'doc-delete-precheck', requestConfig)) return;
         await getSharedOperationCoordinator().submit(
           { operation: 'doc-delete-precheck', params: { scope } },
           () => runWithConfigSnapshot(requestConfig, () => {

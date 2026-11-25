@@ -160,10 +160,12 @@ export function toSourceRefs(result: SearchResult, budget = CHAT_BUDGET): Source
     seen.add(key);
     if (refs.length >= maxHits) break;
 
-    const h = hit as { group?: string; relation?: string };
+    const h = hit as { group?: string; relation?: string; scope?: string };
     refs.push({
       group: h.group ?? '',
       doc: h.relation ?? '',
+      // 视图检索时命中自带来源库：点开原文要按它取图（/api/asset 只认真实库目录）
+      ...(h.scope ? { scope: h.scope } : {}),
       // ★ 行号缺失 → 0（UI 不得显示 "0-0"，只显示文档名）
       lineStart: lines ? lines.lineStart : 0,
       lineEnd: lines ? lines.lineEnd : 0,

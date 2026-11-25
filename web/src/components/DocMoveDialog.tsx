@@ -53,6 +53,9 @@ function describeMoveError(error: unknown): { message: string; nameConflict: boo
       return { message: '正文已发生变化，请重新打开文档后再移动', nameConflict: false };
     case 'SCOPE_READONLY':
       return { message: '当前知识库为只读，无法移动文档', nameConflict: false };
+    /* 兜底（正常不会命中）：视图是聚合、不是库，移动只能落在成员库内 */
+    case 'VIEW_NOT_WRITABLE':
+      return { message: '这篇文档在聚合视图里，无法直接移动：请切换到它所属的知识库后再移动', nameConflict: false };
     case 'SOURCE_MOVE_FAILED':
     case 'MOVE_INDEX_FAILED':
     case 'MOVE_PARTIAL':

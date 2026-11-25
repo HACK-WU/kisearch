@@ -43,6 +43,12 @@ function describeDeleteError(error: unknown): string {
       return '该文档有未结束的编辑草稿，请先在编辑器里保存或取消后再删除';
     case 'SCOPE_READONLY':
       return '当前知识库为只读，无法删除文档';
+    /*
+     * 兜底（正常不会命中）：视图是聚合、不是库，删除只能落到成员库。
+     * 阅读器已改为用文档真实所属库打开本弹窗，走到这里说明来源库没拿到（如深链缺 member）。
+     */
+    case 'VIEW_NOT_WRITABLE':
+      return '这篇文档在聚合视图里，无法直接删除：请切换到它所属的知识库后再删除';
     case 'DOC_DELETE_FAILED':
       return fallback;
     default:

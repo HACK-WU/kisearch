@@ -367,7 +367,11 @@ interface ModuleDrawerProps {
   targetAnchor?: string;
   editable?: boolean;
   onClose: () => void;
-  fetcher?: (scope: string, group: string, relation: string, member?: string) => Promise<{ content?: string; error?: string; hint?: string }>;
+  /**
+   * 正文读取函数。`scope` 回填**来源库**（`doc/get` 视图分支唯一命中时下发）——
+   * 深链没带 `member` 时，写路径（编辑/移动/删除）靠它找回真实库。
+   */
+  fetcher?: (scope: string, group: string, relation: string, member?: string) => Promise<{ content?: string; scope?: string; error?: string; hint?: string }>;
   /**
    * 来源库（视图模式必传）：`scope` 是视图名时，正文要从**哪个成员库**读。
    *
@@ -553,6 +557,22 @@ export function ModuleDrawer({
    * 后端只在 404 下发，其余错误恒为 null。
    */
   const [errorTrash, setErrorTrash] = useState<DocTrashHit | null>(null);
+  /**
+   * 读正文时后端回填的来源库（`doc/get` 视图分支唯一命中时下发）。
+   *
+   * `member` 优先（调用方解析出来的，跨库同名也准），其次是它，最后才是 `scope`。
+   * 单库模式 `res.scope === scope`，不记录 → 三处写入口回落 `scope`，行为不变。
+   */
+  const [resolvedScope, setResolvedScope] = useState<string | null>(null);
+  /**
+   * 写路径（编辑/移动/删除/添加链接）唯一认的真实库。
+   *
+   * ★ 用 `||` 而非 `??`：`member` 可能来自 URL（`&member=` 空值解析成 `''`），
+   *   `??` 只挡 `null/undefined`，空串会一路短路下去 → 请求变成 `scope=`，
+   *   后端 `resolveScope('')` 回落 `default` 库 → 又变回「文档不存在」/ 预检 `exists:false`。
+   *   scope 名不可能为空（服务端校验），故空值一律视为「没给」继续回落。
+   */
+  const docScope = member || resolvedScope || scope;
   /**
    * 回收站页跟随全局 scope（`TrashPage` 用 `useScopeValue()`），
    * 所以跳转前先把 scope 落到文档原本所在的库，用户落地就在对的那个库上。
@@ -869,6 +889,13 @@ export function ModuleDrawer({
     setErrorTrash(null);
     fetcher(scope, group, module, member)
       .then((res) => {
+        /*
+         * 视图分支唯一命中时后端回填**来源库**：记下来给写路径用。
+         * 深链/刷新恢复可能没带 `member`（URL 里就没有），此时若只把视图名传给
+         * 编辑/移动/删除，后端一律按「视图不是库」拒绝 —— 而读这条链路其实已经
+         * 告诉过我们这篇在哪个库，丢掉它等于让用户先切库再重开文档。
+         */
+        if (res.scope && res.scope !== scope) setResolvedScope(res.scope);
         if (res.content) setContent(res.content);
         else {
           const details = [res.error, res.hint]
@@ -1234,8 +1261,16 @@ export function ModuleDrawer({
    * 两个 hook 都必须**无条件调用**（不能写成 `a() || b()`，短路会让后一个 hook 时有时无）。
    */
   const topScope = useScopeValue();
-  const directReadonly = useScopeReadonly(scope);
-  const viewMemberReadonly = useViewMemberReadonly(topScope, scope);
+  /*
+   * ★ 两个 hook 的 scope 入参都必须是**真实库**（`docScope`）：
+   *   - `useScopeReadonly` 拿 `data.scopes[].readonly`，视图名查不到 ⇒ 恒 false；
+   *   - `useViewMemberReadonly(view, member)` 的第二个参数是**成员库**，
+   *     早先这里传了导航 scope（视图模式下 = 视图名）⇒ 永远匹配不到 memberMeta。
+   *   两处都错的效果是：视图里的只读成员被显示成可写，用户点进去提交才被 409 打回。
+   *   单库模式 `docScope === scope`，与改造前完全等价。
+   */
+  const directReadonly = useScopeReadonly(docScope);
+  const viewMemberReadonly = useViewMemberReadonly(topScope, docScope);
   const scopeReadonly = directReadonly || viewMemberReadonly;
 
   const openReaderLinkComposer = useCallback((): void => {
@@ -1285,7 +1320,13 @@ export function ModuleDrawer({
       ? selection.toString().trim() : '';
     if (!group) return;
     editor.open({
-      scope, group, relation: module, readerSelection: selected || undefined,
+      /**
+       * ★ `scope` 是导航值（视图模式下是视图名），编辑是写路径 —— `member` 必须是
+       *   文档真实所属库（`docScope` = member → 读正文回填 → scope 逐级回落），
+       *   否则后端读不到 `dataDir/<视图名>/` 只会回「加载失败：文档不存在」，
+       *   保存更是直接 `VIEW_NOT_WRITABLE`。单库模式下三处回落都等于 `scope`，行为不变。
+       */
+      scope, member: docScope, group, relation: module, readerSelection: selected || undefined,
       onSaved: (next, result) => {
         setContent(next);
         const indexed = result.vectorStored ? '向量索引已更新'
@@ -1293,7 +1334,7 @@ export function ModuleDrawer({
         showSavedNotice(`文档已保存；${indexed}${result.warning ? `；${result.warning}` : ''}`);
       },
     });
-  }, [editor, group, module, scope, scopeReadonly, showSavedNotice]);
+  }, [docScope, editor, group, module, scope, scopeReadonly, showSavedNotice]);
 
   /** ESC 先退出全屏，再次按下才关闭文档；同时锁定底层页面滚动。 */
   useEffect(() => {
@@ -1527,8 +1568,10 @@ export function ModuleDrawer({
           <article className="ki-markdown ki-markdown--drawer" onMouseUp={() => { captureReaderSelection(); }} onKeyUp={() => { captureReaderSelection(); }}>
             <MarkdownPreview
               text={displayedContent}
-              /* 回收站：附件从条目目录的 assets 副本读（原位置可能已随组删除而不存在） */
-              assetBase={group ? { scope, group, ...(assetTrashDir ? { trashDir: assetTrashDir } : {}) } : undefined}
+              /* 回收站：附件从条目目录的 assets 副本读（原位置可能已随组删除而不存在）。
+                 scope 必须是**真实库**（`docScope`）：`/api/asset` 只认 `dataDir/<库名>`，
+                 视图名会让正文里的图片全部 404（同族缺陷，与编辑/删除同一处来源）。 */
+              assetBase={group ? { scope: docScope, group, ...(assetTrashDir ? { trashDir: assetTrashDir } : {}) } : undefined}
               onLocalLink={onLocalLink}
             />
           </article>
@@ -2019,9 +2062,12 @@ export function ModuleDrawer({
           </div>
         )}
       </aside>
+      {/* 两个 scope 分工：`scope` 走「搜目标文档」（视图下要**全视图**搜，收窄成成员库会漏），
+          `docScope` 只给「加载/保存当前这篇」—— 视图模式下必须是成员库，否则读不到、存不了。 */}
       {readerLinkComposerOpen && readerLinkSelection && content !== null && group && (
         <ReaderLinkComposer
           scope={scope}
+          docScope={docScope}
           group={group}
           relation={module}
           currentContent={content}
@@ -2041,9 +2087,10 @@ export function ModuleDrawer({
       {/* 移动文档（REQ-20261112-002）：成功后由页面负责 URL / 目录 / 列表跟随。
           回执也由页面给（见 initialNotice）：本组件会因 group/relation 变化而重挂载，
           自己 setState 的那句会随旧实例一起丢掉。 */}
+      {/* 移动是写路径：视图名会被后端拒（VIEW_NOT_WRITABLE），必须用文档真实所属库 */}
       {moveOpen && group && content !== null && onMoved && (
         <DocMoveDialog
-          scope={scope}
+          scope={docScope}
           group={group}
           relation={module}
           onClose={() => setMoveOpen(false)}
@@ -2052,9 +2099,10 @@ export function ModuleDrawer({
       )}
       {/* 删除文档（2026-11-13）：成功与否都由页面接手 —— 删除成功会连这篇一起从列表消失，
           查看器不该自己猜"接下来显示什么"。 */}
+      {/* 删除是写路径：视图名会被后端拒；用真实所属库，预检才拿得到 exists / 草稿状态 */}
       {deleteOpen && group && content !== null && onDeleted && (
         <DocDeleteDialog
-          scope={scope}
+          scope={docScope}
           group={group}
           relation={module}
           onClose={() => setDeleteOpen(false)}

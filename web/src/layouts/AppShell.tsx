@@ -1124,15 +1124,21 @@ export function AppShell(): JSX.Element {
         onSaved={() => setPasswordOpen(false)}
       />
     ) : null}
+    {/* 编辑器整体吃**真实库**（`member`）：加载 / 保存 / 图片 assetBase / wiki 回写目标
+        全部按真实库取，视图名在这四处都会失败（视图是聚合，不是库）。
+        单库模式回落 `scope`，与改造前逐字节一致；key 含 member —— 同 scope 里两个
+        成员库的同名文档必须重挂载。 */}
     {editorRequest && (
       <DocumentEditor
-        key={`${editorRequest.scope}/${editorRequest.group}/${editorRequest.relation}`}
-        scope={editorRequest.scope}
+        key={`${editorRequest.member || editorRequest.scope}/${editorRequest.group}/${editorRequest.relation}`}
+        /* `||` 不用 `??`：`member` 可能是空串（URL `&member=`），空串当没给继续回落 */
+        scope={editorRequest.member || editorRequest.scope}
         group={editorRequest.group}
         relation={editorRequest.relation}
         readerSelection={editorRequest.readerSelection}
         onSaved={(content, result) => {
           editorRequest.onSaved?.(content, result);
+          // 失效键仍用导航值（视图名）：列表 queryKey 挂的是顶栏 scope
           void queryClient.invalidateQueries({ queryKey: ['docList', editorRequest.scope] });
         }}
         onClose={() => setEditorRequest(null)}
