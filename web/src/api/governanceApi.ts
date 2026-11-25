@@ -596,6 +596,13 @@ export interface GovernanceCounts extends GovernanceViewMeta {
   eventsClosed: number;
   trash: number;
   pendingIndex: number;
+  /**
+   * 最近一次事件改动的时间戳（2026-11-25）：侧栏「事件」红点的判据之一。
+   *
+   * 可选 —— 旧 daemon 不返回该字段，此时前端按「没有新动态」处理（宁可少提示，
+   * 也不要在升级不同步的窗口期误亮）。视图下是各成员的最大值。
+   */
+  eventsMaxUpdatedAt?: number;
 }
 
 /**

@@ -34,6 +34,7 @@ import { EventDocsCard } from '@/components/governance/event-detail/EventDocsCar
 import type { VisTone } from '@/components/governance/event-detail/types';
 import { getDocContent } from '@/api/httpApi';
 import { pickInitialEventId, readLastEventId, rememberLastEventId } from '@/lib/eventsSelection';
+import { persistSeenAnalysis, readSeenAnalysis, writeEventsSeenAt } from '@/lib/eventsNotice';
 import {
   addMembers, addRefs, createEvent, deleteEvent, getEventDetail, getGovernanceCounts,
   getEventAnalysis, listEventTypes, listEvents, listRefs, listRunningAnalyses, removeConfirmedCodeLocation, removeMember, removeRef,
@@ -60,13 +61,11 @@ const SORT_LABEL: Record<SortKey, string> = {
 };
 
 /** 已置顶 = `pinnedAt` 有正数（后端缺省为 undefined，详情 DTO 为 null） */
-/**
- * 「这条事件的分析结果我看过了」的本地记录（eventId → runId）。
- *
- * 为什么放 localStorage 而不是后端字段：它只是**未读提示**，跨设备不同步可以接受；
- * 放后端要改契约与 DTO，代价远大于收益。重新分析会产生新 runId → 提示自动回来。
+/*
+ * 「分析结果已看过」的本地键已上移到 `lib/eventsNotice.ts`（2026-11-25）：
+ * 侧栏「事件」红点也要判「有没有未看的分析」，两处必须共用同一个键，否则会出现
+ * 「列表徽标已消、侧栏还亮」这类自相矛盾的提示。
  */
-const SEEN_ANALYSIS_KEY = 'ki-web:analysis-seen';
 /**
  * 「这条事件的追问结果我看过了」（eventId → turnId）；失败态用 `failed:<at>` 当键。
  *
@@ -290,14 +289,7 @@ export function EventsPage(): JSX.Element {
    * 用户已经「看过」的分析结果：`eventId → runId`，存 localStorage。
    * 只有 `runId` 相同才算看过 —— 重新分析会产生新 runId，提示自动回来。
    */
-  const [seenAnalysis, setSeenAnalysis] = useState<Record<string, string>>(() => {
-    try {
-      const raw = localStorage.getItem(SEEN_ANALYSIS_KEY);
-      return raw ? (JSON.parse(raw) as Record<string, string>) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [seenAnalysis, setSeenAnalysis] = useState<Record<string, string>>(() => readSeenAnalysis());
   /** 用户已经「看过」的追问结果：`eventId → turnId`（见 SEEN_ASK_KEY 注释） */
   const [seenAsk, setSeenAsk] = useState<Record<string, string>>(() => {
     try {
@@ -556,7 +548,17 @@ export function EventsPage(): JSX.Element {
       if (seq !== listSeq.current) return;
       setEvents(list.events);
       setTypes(typeList.types);
-      if (govCounts) setCounts({ open: govCounts.eventsOpen, closed: govCounts.eventsClosed });
+      if (govCounts) {
+        setCounts({ open: govCounts.eventsOpen, closed: govCounts.eventsClosed });
+        /*
+         * 事件页「看过了」即推进侧栏红点的已读水位（2026-11-25）。
+         *
+         * 放在 loadList 而不是侧栏，一次覆盖三件事：首次进入清掉进入前的积压、
+         * 自己的写操作（统一走 `run(fn)` → 成功后必 loadList）、手动刷新。
+         * **停留期间**别人 / AI 的改动不触发 loadList，水位不动 —— 红点不会被静默吞掉。
+         */
+        writeEventsSeenAt(scope, govCounts.eventsMaxUpdatedAt ?? 0);
+      }
       // 视图判定优先看列表响应（本页自己的请求），counts 仅作兜底
       const viewNow = Boolean(list.view ?? govCounts?.view);
       setIsViewScope(viewNow);
@@ -861,11 +863,7 @@ export function EventsPage(): JSX.Element {
     setSeenAnalysis((prev) => {
       if (prev[eventId] === activeAnalysisRunId) return prev;
       const next = { ...prev, [eventId]: activeAnalysisRunId };
-      try {
-        localStorage.setItem(SEEN_ANALYSIS_KEY, JSON.stringify(next));
-      } catch {
-        /* 存储不可用（隐私模式等）只是记不住已读，不影响其他行为 */
-      }
+      persistSeenAnalysis(next);
       return next;
     });
   }, [active?.id, activeAnalysisRunId]);

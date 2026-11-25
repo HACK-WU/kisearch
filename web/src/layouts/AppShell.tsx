@@ -19,6 +19,10 @@ import { ImportPage } from '@/pages/ImportPage';
 import { WritePage } from '@/pages/WritePage';
 import { useScopeValue } from '@/lib/scopeContext';
 import { govFailedMembers } from '@/lib/governanceView';
+import { listRunningAnalyses } from '@/api/governanceApi';
+import {
+  EVENT_NOTICE_POLL_MS, hasEventNotice, isStorageAvailable, readEventsSeenAt, readSeenAnalysis,
+} from '@/lib/eventsNotice';
 import { MERGED_WRITE_LABEL, navItemActive, writeTabFromPath } from '@/lib/writeTabs';
 import { getTasks, refreshVectorDimensionStatus } from '@/api/tasksApi';
 import { dimensionStatusDetail, DEGRADED_TITLE, UNKNOWN_TITLE } from '@/lib/vectorDimensionCopy';
@@ -256,15 +260,34 @@ export function AppShell(): JSX.Element {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
+  /*
+   * `location` 必须早于下面两个计数 / 红点 effect：它们要按「当前是否在事件页」决定
+   * 要不要请求与渲染（在事件页时列表行内徽标才是提示，侧栏不重复）。
+   */
+  const location = useLocation();
   // 顶栏 scope 必须在计数 effect 之前声明（deps 里要引用它）
   const scope = useScopeValue();
   // 知识治理三项的计数（REQ-20261113-004 · S-07）：与页面同源，避免侧栏与表格口径漂移
-  const [govCounts, setGovCounts] = useState<{ docs: number; eventsOpen: number; trash: number } | null>(null);
+  const [govCounts, setGovCounts] = useState<{
+    docs: number; eventsOpen: number; trash: number; eventsMaxUpdatedAt: number;
+  } | null>(null);
   /**
    * 计数请求里**读取失败**的成员库（视图下才有）：三个数字都只统计成功库，
    * 失败库会让数字静默偏小 —— 加 `*` + tooltip，别让用户拿它当准确值（#57 复审补漏）。
    */
   const [govCountsFailed, setGovCountsFailed] = useState<string[]>([]);
+  /**
+   * 侧栏「事件」红点（2026-11-25 用户需求）：事件有任何动态时亮一个无文字的点。
+   * 判据见 `lib/eventsNotice.ts`（未看的终态分析 + 已读水位），这里只管轮询与呈现。
+   */
+  const [eventNotice, setEventNotice] = useState(false);
+  /**
+   * 「本机从没记录过已读水位」时的兜底水位 = 应用挂载时刻。
+   *
+   * 若拿 0 当兜底，首次打开（或换浏览器）会把**全部历史事件**当成新动态，红点一进来就亮
+   * 且点不掉；用挂载时刻则「历史不亮、启动后新发生的照常亮」，隐私模式下也不至于失效。
+   */
+  const bootAtRef = useRef(Date.now());
   useEffect(() => {
     let alive = true;
     /*
@@ -273,17 +296,108 @@ export function AppShell(): JSX.Element {
      */
     setGovCounts(null);
     setGovCountsFailed([]);
-    // scope 必须跟着顶栏选择器走：写死 'default' 会让侧栏显示别的库的数字
-    fetch(`/api/governance/counts?scope=${encodeURIComponent(scope)}`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((payload) => {
-        if (!alive || !payload || payload.ok !== true) return;
-        setGovCounts({ docs: payload.docs, eventsOpen: payload.eventsOpen, trash: payload.trash });
-        setGovCountsFailed(govFailedMembers(payload).map((f) => f.scope));
-      })
-      .catch(() => { /* 计数失败不影响导航 */ });
-    return () => { alive = false; };
+    /**
+     * 30s 轮询（2026-11-25）：红点要「及时亮」，只在切 scope 时拉一次就不够了。
+     * 后台标签页跳过 —— counts 在视图模式下要逐成员扫事件目录（`readAllEvents`
+     * 每次全量读 JSON，无缓存），没必要给看不见的页面付这份磁盘开销。
+     */
+    const load = (): void => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      // scope 必须跟着顶栏选择器走：写死 'default' 会让侧栏显示别的库的数字
+      fetch(`/api/governance/counts?scope=${encodeURIComponent(scope)}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((payload) => {
+          if (!alive || !payload || payload.ok !== true) return;
+          const next = {
+            docs: payload.docs as number,
+            eventsOpen: payload.eventsOpen as number,
+            trash: payload.trash as number,
+            eventsMaxUpdatedAt: typeof payload.eventsMaxUpdatedAt === 'number' ? payload.eventsMaxUpdatedAt : 0,
+          };
+          /*
+           * 值没变就不 setState：AppShell 常驻渲染合并页（导入 / 写入）与聊天面板，
+           * 30s 一次的无谓重渲染会白白拖累正在编辑的页面。
+           */
+          setGovCounts((prev) => (
+            prev
+              && prev.docs === next.docs
+              && prev.eventsOpen === next.eventsOpen
+              && prev.trash === next.trash
+              && prev.eventsMaxUpdatedAt === next.eventsMaxUpdatedAt
+              ? prev
+              : next
+          ));
+          /*
+           * 失败成员清单同样要逐项相等守卫：`map()` 每次都产出**新数组**，无脑 set 会让
+           * 上面那段「值没变不重渲染」形同虚设 —— 每 30s 照样重渲染常驻的合并页与聊天面板。
+           */
+          const failed = govFailedMembers(payload).map((f) => f.scope);
+          setGovCountsFailed((prev) => (
+            prev.length === failed.length && prev.every((s, i) => s === failed[i]) ? prev : failed
+          ));
+        })
+        .catch(() => { /* 计数失败不影响导航 */ });
+    };
+    load();
+    const timer = window.setInterval(load, EVENT_NOTICE_POLL_MS);
+    const onVisible = (): void => { if (!document.hidden) load(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [scope]);
+  /**
+   * 「事件」红点的判定循环（2026-11-25）。
+   *
+   * **在事件页时不显示**：那里列表行内本身就是更精确的按条提示（分析完成 / 失败），
+   * 侧栏再亮一个点，用户点了没反应（已在当前页），是个死角。
+   */
+  const onEventsPage = location.pathname.startsWith('/governance/events');
+  useEffect(() => {
+    if (onEventsPage) {
+      setEventNotice(false);
+      return undefined;
+    }
+    let alive = true;
+    const tick = async (): Promise<void> => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      /*
+       * 存储不可用（隐私模式等）时直接不亮：已读记不住，「未看分析」会永久成立，
+       * 红点成了一个点不开也清不掉的东西。连请求都不用发。
+       */
+      if (!isStorageAvailable()) {
+        setEventNotice(false);
+        return;
+      }
+      /*
+       * 分析完成**不写事件的 `updatedAt`**，所以光看 counts 永远发现不了
+       * 「后台跑完了但没看」—— 必须另取 `/events/running` 的 finished（进程内缓存，零磁盘 IO）。
+       * 该请求失败只丢这一路，水位比较照常进行（宁可少提示，不误报）。
+       */
+      const finished = await listRunningAnalyses(scope)
+        .then((res) => res.finished ?? [])
+        .catch(() => null);
+      if (!alive) return;
+      setEventNotice(hasEventNotice({
+        maxUpdatedAt: govCounts?.eventsMaxUpdatedAt ?? 0,
+        seenAt: readEventsSeenAt(scope) || bootAtRef.current,
+        finished,
+        // 现读而不是用 state：事件页写已读后本组件收不到通知，存储才是最新事实
+        seenAnalysis: readSeenAnalysis(),
+      }));
+    };
+    void tick();
+    const timer = window.setInterval(() => { void tick(); }, EVENT_NOTICE_POLL_MS);
+    const onVisible = (): void => { if (!document.hidden) void tick(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [scope, onEventsPage, govCounts?.eventsMaxUpdatedAt]);
   const displayName = user?.username ?? (source === 'token' ? 'Token' : '未登录');
   const roleLabel = formatRole(user?.role);
   const initial = displayName.trim().slice(0, 1).toUpperCase() || 'U';
@@ -407,7 +521,6 @@ export function AppShell(): JSX.Element {
    */
   const serverInfo = useServerInfo();
 
-  const location = useLocation();
   /**
    * 合并页（REQ-20261116-002）：`/import` 与 `/write` 是同一个页面的两个 tab，页面本体都在
    * AppShell 里常驻渲染、用 `display` 切换 —— **不能**改由 `<Outlet />` 渲染，否则路由一离开
@@ -755,6 +868,15 @@ export function AppShell(): JSX.Element {
             >
               <span className="ki-nav-item__icon"><Icon name={item.icon} /></span>
               <span className="ki-nav-item__name">{item.label}</span>
+              {/* 红点只挂「事件」：无文字、无数字（用户明确「不需要具体内容」） */}
+              {item.to === '/governance/events' && eventNotice ? (
+                <span
+                  className="ki-nav-item__notice"
+                  role="img"
+                  aria-label="事件有新的动态"
+                  title="事件有新的动态"
+                />
+              ) : null}
               {typeof item.count === 'number' ? (
                 <span className="ki-nav-item__count">
                   {item.count}

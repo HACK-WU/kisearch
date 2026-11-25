@@ -329,6 +329,17 @@ a:hover { text-decoration: underline; }
 .ki-nav-item__ext { font-size: 10px; font-weight: 600; color: var(--ki-color-text-subtle); background: var(--ki-color-surface-muted); padding: 1px 5px; border-radius: var(--ki-radius-tag); flex-shrink: 0; }
 /* 导航项右侧计数（知识治理三项）：与页面数字同源，弱化展示 */
 .ki-nav-item__count { margin-left: auto; font-size: 11px; color: var(--ki-color-text-subtle); font-variant-numeric: tabular-nums; }
+/* 「事件」有新动态的红点（2026-11-25 用户需求）：只给颜色不给文字 / 数字。
+   用 danger 而不是 primary —— primary 点已被「AI 对话生成中」占用（.ki-nav-item__busy），
+   两者同色会让「正在生成」与「有新东西」混为一谈。
+   `margin-left: auto` 让它贴住右侧计数；`margin-right: -5px` 抵消 nav 的 12px gap，
+   使点与数字视觉上成一组（14px → 7px），而不是飘在中间。 */
+.ki-nav-item__notice {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--ki-color-danger);
+  flex-shrink: 0;
+  margin-left: auto; margin-right: -5px;
+}
 
 /* 图标：对齐 demo .icon（24 视框、1.8px 描边、currentColor） */
 .ki-icon {
@@ -371,6 +382,8 @@ a:hover { text-decoration: underline; }
   .ki-sidebar__brand, .ki-sidebar__subtitle, .ki-sidebar__section-head,
   .ki-sidebar__footer-title, .ki-sidebar__footer-meta, .ki-nav-item__name { display: none; }
   .ki-nav-item { justify-content: center; gap: 0; padding: 0; }
+  /* 窄轨 gap 为 0：上面那条 `margin-right: -5px` 会把红点压到计数上，这里还原成正常间距 */
+  .ki-nav-item__notice { margin-left: 0; margin-right: 0; }
   /* 窄轨里组标题被 `display:none`，分组感只能靠留白 + 细分隔线撑住 ——
      否则三组塌成一条 12 项图标长列（原实现即如此，组间关系完全丢失） */
   .ki-sidebar__section + .ki-sidebar__section {
