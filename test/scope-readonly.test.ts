@@ -95,6 +95,14 @@ describe('只读判定与会话门禁', () => {
       (err: unknown) => (err as { code?: string }).code === 'SCOPE_READONLY'
         && (err as Error).message.includes('ki scope readonly demo --off'),
     );
+    // 2026-11-25 补登记的两个写通道（事件钉住 / 事件追问记录）：显式判 block。
+    // 不能只断言"会抛"——unknown 走的是同一条默认拦截分支，那样回归时会静默变绿。
+    assert.equal(policy.describeOperationPolicy('event-pin'), 'block');
+    assert.equal(policy.describeOperationPolicy('analysis-ask'), 'block');
+    assert.throws(
+      () => policy.assertOperationWritable('demo', 'analysis-ask'),
+      (err: unknown) => (err as { code?: string }).code === 'SCOPE_READONLY',
+    );
     // 批量更新通道与运维：必须放行（否则无法更新数据）
     policy.assertOperationWritable('demo', 'import');
     policy.assertOperationWritable('demo', 'datasource-sync');

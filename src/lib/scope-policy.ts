@@ -108,6 +108,20 @@ export const BLOCKED_OPS: ReadonlySet<string> = new Set([
   'atlas-upload',
   'atlas-remove',
   'atlas-upload-api',
+  /**
+   * 事件追问记录（2026-11-25 补登记）。
+   *
+   * `analysis-ask` 写事件的追问 sidecar 文档（追加 / 删除 / 清空轮次），
+   * 锁 key 虽是 `askLockKey(scope, eventId)`，写的仍是该库内的数据；只读库必须拦。
+   */
+  'analysis-ask',
+  /**
+   * 事件钉住（2026-11-25 补登记）。
+   *
+   * `event-pin` 修改事件记录的 `pinnedAt` 字段。它刻意不走 `updateEvent`（那条路径带
+   * revision 乐观锁），但"改事件"的性质不变，只读库同样不许改。
+   */
+  'event-pin',
 ]);
 
 /** 判定某 op 的归属；`unknown` = 未登记（按拦截处理，并由单测报警） */
