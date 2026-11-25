@@ -1,4 +1,21 @@
-/* 知识地图页（REQ-20261120-003 S-04）——沿用 ki.css 的语义色，不新造配色 */
+/* 知识地图页（REQ-20261120-003 S-04）——沿用 ki.css 的语义色，不新造配色
+   ⚠️ 变量名必须是 ki.css 里真实存在的 `--ki-color-*`：本文件早先写的是 `--ki-line` /
+   `--ki-surface` / `--ki-text` 这类不存在的名字，靠 fallback 值硬撑，于是暗色下弹窗/空态
+   卡片是白底 + 亮字（不可读）。2026-11-25 连同状态行一起去掉卡片时一并改正。 */
+
+/**
+ * 图集与主区齐平：主区默认有 `8px 16px 16px` 内距（ki.css `.ki-content`），图集包自身
+ * 已经是「248px 目录栏 + 正文」的整幅画布，外面再套一层留白会在左/右各留一条背景色通道
+ * （2026-11-25 用户反馈「左边这么有空隙，没有完全挨着」）。
+ * 手法与对话页 `.ki-content--chatpage` 一致：主区清零，页头由下方规则单独还原全站内距 ——
+ * 否则页头标题会比其它页面左移 16px、顶移 8px，全站口径就乱了。
+ */
+.ki-content.ki-content--atlas { padding: 0; }
+.ki-content.ki-content--atlas .ki-content-inner > .ki-topbar { margin: 8px 16px 0; }
+/* 窄屏基类把内距放回 16px（ki.css 的 640px 断点），页头同步 */
+@media (max-width: 640px) {
+  .ki-content.ki-content--atlas .ki-content-inner > .ki-topbar { margin: 16px 16px 0; }
+}
 
 /* 作为 .ki-content-inner（flex column）的子项吃掉剩余高度；min-height:0 让 iframe 能内部滚动 */
 .atlas-page {
@@ -9,53 +26,11 @@
   gap: 0;
 }
 
-/* 状态栏：基线 commit / 生成时间 / sha / 快照声明，恒显不折叠 */
-.atlas-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--ki-line, #e3e6e2);
-  background: var(--ki-surface, #fff);
-  font-size: 12px;
-  color: var(--ki-text-muted, #6b7770);
-}
-
-.atlas-bar__title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ki-text, #17211c);
-}
-
-.atlas-bar__meta,
-.atlas-bar__sha {
-  font-variant-numeric: tabular-nums;
-}
-
-.atlas-bar__sha {
-  padding: 1px 6px;
-  border: 1px solid var(--ki-line, #e3e6e2);
-  border-radius: 4px;
-}
-
-/* 「生成时快照」是防误导的关键提示，弱化但必须可见，且靠右推 */
-.atlas-bar__note {
-  margin-left: auto;
-  opacity: 0.85;
-}
-
-.atlas-bar__retry {
-  flex: 0 0 auto;
-}
-
-/* 状态栏右侧动作组（重新上传 / 卸载）：不参与 flex 换行挤压，始终贴右 */
-.atlas-bar__actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-left: 8px;
-}
+/**
+ * 页面里**不再有**状态行（无标题、无 commit 行、无按钮）：图集包自带信息条已经写明
+ * 「基于 master @ 071afab 生成 · …」，页面再画一行就是同一句话说两遍；上传/卸载也已上移
+ * 到顶栏（components/AtlasHeaderActions，仅本页可见）。2026-11-25 用户拍板。
+ */
 
 .atlas-hint__actions {
   display: flex;
@@ -64,65 +39,48 @@
   margin-top: 4px;
 }
 
-/* 上传弹窗：固定遮罩 + 居中盒子（一期刻意不用全站通用 modal，避免与治理弹窗耦合） */
-.atlas-dialog {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
+/**
+ * 弹窗（外壳用全站 `ki-dialog` 骨架，见 components/AtlasHeaderActions 的 AtlasDialog）：
+ * 这里只剩三类正文行 —— 标识行（哪个库 / 哪个文件）、说明、进度。
+ *
+ * `outline: none` 与 `ki-dialog--form:focus` 同口径：容器拿到焦点只是为了把 Esc / Tab
+ * 关在弹窗内（无障碍），不是让用户「看见一个被选中的盒子」。
+ */
+.atlas-dialog:focus { outline: none; }
+.atlas-dialog__line {
+  margin: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
-  background: rgba(23, 33, 28, 0.36);
-}
-
-.atlas-dialog__box {
-  width: min(520px, 92vw);
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px 18px;
-  border-radius: 10px;
-  background: var(--ki-surface, #fff);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+  gap: 6px;
+  flex-wrap: wrap;
   font-size: 13px;
+  color: var(--ki-color-text);
 }
 
-.atlas-dialog__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.atlas-dialog__row code,
-.atlas-dialog__err code {
+.atlas-dialog__line code {
   padding: 1px 5px;
   border-radius: 4px;
-  border: 1px solid var(--ki-line, #e3e6e2);
-  background: var(--ki-surface-sunken, #f4f6f4);
-  font-family: var(--ki-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  border: 1px solid var(--ki-color-border);
+  background: var(--ki-color-bg-muted);
+  font-family: var(--ki-font-mono);
   font-size: 12px;
+  word-break: break-all;
 }
 
 .atlas-dialog__tip {
-  color: var(--ki-text-muted, #6b7770);
-}
-
-.atlas-dialog__err {
-  color: var(--ki-danger, #b4241c);
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ki-color-text-muted);
 }
 
 .atlas-dialog__progress {
+  margin: 8px 0 0;
   padding: 6px 8px;
   border-radius: 6px;
-  background: var(--ki-surface-sunken, #f4f6f4);
+  background: var(--ki-color-bg-muted);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
-}
-
-.atlas-dialog__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 2px;
 }
 
 /* iframe 占满剩余高度；内部滚动交给图集自己，页面不再套滚动条 */

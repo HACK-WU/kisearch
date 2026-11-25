@@ -4,9 +4,9 @@
 
 import { useQuery } from '@tanstack/react-query';
 import {
-  getDocList, fetchGroupDocsAll, getHealth, getDataSourceList, getDataSourceDetail, getHealthz,
+  getDocList, fetchGroupDocsAll, getHealth, getDataSourceList, getDataSourceDetail, getHealthz, getAtlasStatus,
   type DocListResponse, type HealthResponse, type DataSourceListResponse, type DataSourceDetailResponse,
-  type HealthzInfo,
+  type HealthzInfo, type AtlasStatusResponse,
 } from '@/api/httpApi';
 import { kiScopeList, type ScopeListResponse } from '@/api/mcpClient';
 import {
@@ -192,6 +192,27 @@ export function useVectorDimensionStatus(scope: string) {
     refetchOnMount: false,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+    retry: false,
+  });
+}
+
+/**
+ * 当前 scope 的图集（知识地图）状态（REQ-20261120-003）。
+ *
+ * ★ **两个消费方共用同一 queryKey**：`AtlasPage` 用它决定「空态 / 图集 / 报错」三态，
+ *   顶栏动作 `AtlasHeaderActions` 用它决定按钮文案（上传 / 重新上传）以及是否显示「卸载」。
+ *   于是同一时刻只发一个请求；上传或卸载成功后 invalidate 这一条，两处同时换到新状态
+ *   —— 不需要额外的「页面收到了吗」消息通道。
+ * ★ `retry: false`：`/api/atlas/status` 的失败态各有文案（401 会话过期 / 403 无权看这个库 /
+ *   服务不可达），自动重试会把错误页拖成一直转圈。
+ * ★ 不跟窗口聚焦重取：图集是**部署物**，不是转瞬即变的数据。
+ */
+export function useAtlasStatus(scope: string) {
+  return useQuery<AtlasStatusResponse>({
+    queryKey: ['atlasStatus', scope],
+    queryFn: () => getAtlasStatus(scope),
+    staleTime: 0,
+    refetchOnWindowFocus: false,
     retry: false,
   });
 }

@@ -31,6 +31,7 @@ import {
   writeDimensionDismissedFingerprint,
 } from '@/lib/vectorDimensionNotice';
 import { CodeLangSelect } from '@/components/CodeLangSelect';
+import { AtlasHeaderActions } from '@/components/AtlasHeaderActions';
 import { Icon } from '@/components/icons';
 import { ChatPanel } from '@/chat/ChatPanel';
 import { createChatStore } from '@/chat/chatStore';
@@ -85,15 +86,15 @@ interface NavItem {
 const NAV_WORKSPACE: NavItem[] = [
   { to: '/', label: '总览', icon: 'grid', end: true },
   { to: '/browse', label: '知识库浏览', icon: 'book' },
+  /**
+   * 知识地图（REQ-20261120-003）：整库视角的架构图集入口。
+   * 位置 2026-11-25 由用户改到「知识库浏览」正下方：两者都回答「这个库长什么样」——
+   * 浏览是逐篇翻，地图是先看整体，放在一起才成对。原需求拍板曾放在「AI 对话」之后。
+   */
+  { to: '/atlas', label: '知识地图', icon: 'map' },
   { to: '/search', label: '语义搜索', icon: 'search' },
   // REQ-20261008-001：独立对话页入口（用户拍板 Q1：位于「语义搜索」之下）
   { to: '/chat', label: 'AI 对话', icon: 'chat' },
-  /**
-   * 知识地图（REQ-20261120-003）：整库视角的架构图集入口。
-   * 位置按需求拍板放在「AI 对话」之后——它是「先建立整体认知」的入口，
-   * 与浏览/搜索这类「已知要找什么」的入口相邻但不混在一起。
-   */
-  { to: '/atlas', label: '知识地图', icon: 'map' },
   /**
    * REQ-20261116-002：原「上传导入」+「知识写入」两项合并为一个入口。
    * 图标取 `edit`（与页面名「知识写入」一致；`upload` 保留给导入 tab 里的拖拽区，
@@ -404,6 +405,11 @@ export function AppShell(): JSX.Element {
     if (writeTabVisible) setWriteMounted(true);
   }, [writeTabVisible]);
   const isChatRoute = location.pathname.startsWith('/chat');
+  /**
+   * 知识地图顶栏动作（上传 / 卸载图集）只在这一个页面出现：它们是**写库动作**，
+   * 挂在全站顶栏会与「AI 对话」这类导航动作混淆（2026-11-25 用户拍板）。
+   */
+  const isAtlasRoute = location.pathname.startsWith('/atlas');
   /**
    * Q4/Q5（REQ-20261008-001 用户拍板）：处于独立对话页时右侧面板**自动收起**，
    * 离开时**恢复进入前的开/关先态**。先态只在进入 /chat 那一刻记录一次；
@@ -784,6 +790,8 @@ export function AppShell(): JSX.Element {
                 <h1 className="ki-workspace-title">{currentLabel}</h1>
               </div>
               <div className="ki-workspace-header__actions">
+                {/* 知识地图：上传 / 卸载图集包（仅本页；挪到「AI 对话」左侧，见 2026-11-25 拍板） */}
+                {isAtlasRoute ? <AtlasHeaderActions /> : null}
                 {/* D15：顶部开关控制对话面板显隐（关闭 = 隐藏不卸载，不中止生成） */}
                 <button
                   type="button"
