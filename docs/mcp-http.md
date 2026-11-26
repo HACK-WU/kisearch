@@ -140,7 +140,7 @@ ki mcp --http --web
 - 批量写入时**每条成功结果各带一个** `url`；被跳过或失败的条目没有。
 - 链接打开的是网页，**需要登录**；账号没有该知识库的权限时，页面会提示无权访问。
 - 没开前端页面（没加 `--web`，或前端产物没构建出来）时，这个字段**整条不出现**（不是空字符串），工具照常写入。
-- 删除类工具（`ki_delete_relation`）**不会**返回链接 —— 文档已经不存在，给了也打不开。
+- 删除类工具（`ki_delete_relation`）**不会**返回链接 —— 文档已经不存在，给了也打不开。它的响应里另有 `assetsOrphan`（删完后没人引用的图片，只报告不删除），口径见下方 `/api/doc/delete`。
 - 地址默认按请求里的主机名推导。经反向代理、容器端口映射或部署在子路径下时，如果地址不对，配 `mcp.http.publicUrl`（见[配置项说明](./configuration.md)）。
 - `publicUrl` 里的路径前缀必须与实际部署一致：页面由反向代理挂在 `/ki` 下就写 `/ki`。**前缀配错不会报错**，只会落到「页面不存在」页 —— 它会把你实际访问的地址原样打出来（例如 `/ki/browse`），看到这个页面先核对前缀，再怀疑地址拼写。
 - 文档改名、移动或删除后旧链接会失效：页面会显示「加载失败」并说明该文档不在这个分组里，旁边有「重试」按钮，左侧目录仍可正常浏览。重新写入一次即可拿到新地址。
@@ -175,7 +175,7 @@ ki mcp --http --web
 | `/api/tags` | GET | scope 下 tag 及文档数；会打开 Collection，走 write 通道 |
 | `/api/doc/get` | GET | 读取单篇文档原文；只读 `read` 通道，导入期间不被排队 |
 | `/api/doc/edit` | GET / POST | 读取 / 保存文档编辑。`scope` 必须是**文档所在的知识库**：传知识视图（聚合）会返回 `400 VIEW_NOT_WRITABLE` 并列出成员库 —— 不会再误报「文档不存在」 |
-| `/api/doc/delete` | POST | 删除文档（`dryRun: true` 只做预检）。`scope` 同上必须是文档所在库；传视图名返回 `400 VIEW_NOT_WRITABLE`，不会给出 `exists: false` 的错误预检结论 |
+| `/api/doc/delete` | POST | 删除文档（`dryRun: true` 只做预检）。`scope` 同上必须是文档所在库；传视图名返回 `400 VIEW_NOT_WRITABLE`，不会给出 `exists: false` 的错误预检结论。响应带 `trash`（回收站条目回执）与 **`assetsOrphan`**：`{count, bytes, sample[]}` 是「删完之后本组再没有任何文档引用的图片」，**只报告不删除**（清理用 `ki assets gc`，默认 dry-run）；同组别处还在引用的共享图不计入。图片按组共享存放、没有回收站，所以不能在删文档时顺手删 —— 误删即破图且不可逆 |
 | `/api/import/config` | GET | 当前 scope 的导入配置（扩展名 / 大小上限）+ 向量维度快照 |
 | `/api/import/incomplete` | GET | 未完成重试清单；只读 `read` 通道 |
 | `/api/import/retry-incomplete` | POST | 按清单重试未完成文件 |
