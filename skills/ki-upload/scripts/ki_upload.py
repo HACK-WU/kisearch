@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import os
+import posixpath
+import re
 import sys
 import tarfile
 import tempfile
@@ -37,7 +40,18 @@ except ImportError:  # pragma: no cover - 环境问题，直接给出路
     )
     raise SystemExit(2)
 
-DEFAULT_EXTENSIONS = (".md", ".mdx")
+DOC_EXTENSIONS = (".md", ".mdx")
+"""可导入的文档后缀（服务端按 scope 配置的 extensions 判，默认就是这两个）。"""
+
+ASSET_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp", ".avif")
+"""图片附件白名单，与服务端 `src/lib/import.ts::ASSET_EXTENSIONS` 一一对应。
+
+★ 默认白名单必须含这些后缀：服务端按「md 所在目录 + 正文里的相对引用」去找附件，
+   图片没进包时**不报错**（md 导入成功、errors 0），只是图全变死链。曾经默认只打
+   .md/.mdx，走本脚本上传的目录一律丢图（事件 #103）。
+"""
+
+DEFAULT_EXTENSIONS = (*DOC_EXTENSIONS, *ASSET_EXTENSIONS)
 # multipart 一次最多塞这么多文件：再多就该用 tar（服务端两分支落点一致，但 multipart 的
 # 请求体是拼接生成的，几千个 part 对客户端和服务端都更脆）
 MAX_MULTIPART_FILES = 300
@@ -423,13 +437,19 @@ def cmd_upload(args) -> dict:
 
     # 相对路径 = 传入时的目录结构（保持层级靠 filename 里的相对路径）
     rel_names = [_rel_name(p, paths) for p in paths]
+    entries = list(zip(paths, rel_names))
+    missing_assets = find_missing_assets(entries)
+    if missing_assets:
+        report_missing_assets(missing_assets)
     handles = []
     files = []
     try:
-        for path, rel in zip(paths, rel_names):
+        for path, rel in entries:
             fh = open(path, "rb")
             handles.append(fh)
-            files.append(("files", (rel, fh, "text/markdown")))
+            # content-type 按实际后缀给（服务端不据此判定，但日志/代理里看着对）
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            files.append(("files", (rel, fh, mime)))
         client = build_client(
             base,
             token,
@@ -447,7 +467,8 @@ def cmd_upload(args) -> dict:
                 fh.close()
             except Exception:  # noqa: BLE001
                 pass
-    return finish(args, base, token, uploaded, mode="multipart", event_state=event_state)
+    out = finish(args, base, token, uploaded, mode="multipart", event_state=event_state)
+    return _apply_missing_policy(out, missing_assets, args)
 
 
 def cmd_upload_dir(args) -> dict:
@@ -460,8 +481,18 @@ def cmd_upload_dir(args) -> dict:
     files = _collect_files(root, args)
     if not files:
         raise UploadError("input", f"目录里没有可上传的文件（扩展名白名单：{', '.join(args.include_ext)}；用 --all-files 放开）")
+    if not any(p.suffix.lower() in DOC_EXTENSIONS for p in files):
+        raise UploadError(
+            "input",
+            "目录里没有 markdown：服务端不接受「只有附件」的包（附件必须与引用它的 md 同批上传）",
+        )
     if len(files) > args.max_files:
         raise UploadError("input", f"文件数 {len(files)} 超过本次上限 {args.max_files}（服务端单批默认上限 20000）")
+
+    entries = [(p, str(p.relative_to(root)).replace(os.sep, "/")) for p in files]
+    missing_assets = find_missing_assets(entries)
+    if missing_assets:
+        report_missing_assets(missing_assets)
 
     total = sum(p.stat().st_size for p in files)
     largest = max(((str(p.relative_to(root)), p.stat().st_size) for p in files), key=lambda x: x[1])
@@ -494,7 +525,31 @@ def cmd_upload_dir(args) -> dict:
             tmp.unlink()
         except OSError:
             log(f"警告：临时包未删除，可手动清理 {tmp}")
-    return finish(args, base, token, uploaded, mode="tar.gz", event_state=event_state)
+    out = finish(args, base, token, uploaded, mode="tar.gz", event_state=event_state)
+    return _apply_missing_policy(out, missing_assets, args)
+
+
+def _apply_missing_policy(out: dict, missing: list[str], args) -> dict:
+    """缺图不阻断上传（md 已经落库），但默认按失败返回（退出码 2）。
+
+    与 ki-client 同口径：`--allow-missing-assets` 时只警告、退出码 0。
+    不在这里抛异常，是为了让 stdout 仍带完整结果（taskId / import），agent 还能接着查导入。
+    """
+    if not missing:
+        return out
+    out["missing"] = missing
+    if getattr(args, "allow_missing_assets", False):
+        return out
+    out["ok"] = False
+    out["stage"] = "input"
+    # 失败 payload 与异常路径同形（都有 stage / error）——agent 常只读 error，别让它空着
+    out["error"] = f"{len(missing)} 处图片引用在本次包里找不到对应文件，服务端会静默丢图"
+    out["hint"] = (
+        "确认这些图本来就不需要 → 加 --allow-missing-assets 降级为警告；"
+        "否则把图片放进打包目录（默认白名单已含常见图片后缀），或改正文里的引用路径"
+    )
+    out["_exit"] = 2
+    return out
 
 
 def finish(args, base: str, token: str, uploaded: dict, *, mode: str, event_state: dict | None = None) -> dict:
@@ -502,7 +557,11 @@ def finish(args, base: str, token: str, uploaded: dict, *, mode: str, event_stat
     if not task_id:
         raise UploadError("upload", "服务端未返回 taskId（响应异常）", code="NO_TASK_ID", detail={"response": uploaded})
     files = uploaded.get("files") or {}
-    log(f"上传完成（{mode}）：saved={files.get('saved')} skipped={files.get('skipped')} taskId={task_id}")
+    # saved=文档数、assets=图片数、skipped=真被丢弃的文件数（服务端 2026-11-26 起分开计）
+    log(
+        f"上传完成（{mode}）：saved={files.get('saved')} assets={files.get('assets')} "
+        f"skipped={files.get('skipped')} taskId={task_id}"
+    )
     for item in (files.get("skippedSample") or [])[:5]:
         log(f"  跳过：{item.get('rel')} —— {item.get('reason')}")
     out = {
@@ -558,6 +617,110 @@ def cmd_events(args) -> dict:
             code=body.get("code") or status,
         )
     return body
+
+
+# ─── 缺图检测（#103）──────────────────────────────────────────────────────
+
+MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+)")
+HTML_IMG_RE = re.compile(r"<img[^>]+src=[\"']([^\"']+)[\"']", re.IGNORECASE)
+CODE_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
+PROTOCOL_RE = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|//)")
+
+
+def _normalize_ref(raw: str) -> str:
+    """去查询串/锚点、URL 解码、剥 `./`、反斜杠转正斜杠。"""
+    text = (raw or "").strip()
+    text = re.split(r"[?#]", text, maxsplit=1)[0] or ""
+    try:
+        text = urllib.parse.unquote(text)
+    except Exception:  # noqa: BLE001 - 文件名含裸 % 时保持原样
+        pass
+    while text.startswith("./"):
+        text = text[2:]
+    return text.replace("\\", "/")
+
+
+def _is_relative_ref(ref: str) -> bool:
+    """只有本地相对引用才需要在包内配对：外链 / data: / 绝对路径本来就不在包里。"""
+    if not ref:
+        return False
+    if PROTOCOL_RE.match(ref):
+        return False
+    if ref.startswith("/") or re.match(r"^[a-zA-Z]:[\\/]", ref):
+        return False
+    return True
+
+
+def _md_image_refs(markdown: str) -> list[str]:
+    """抽取一篇 md 引用的本地图片（markdown 语法 + HTML `<img>`；代码围栏内的示例不算）。"""
+    found: list[str] = []
+    in_fence = False
+    for line in markdown.splitlines():
+        if CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for match in MD_IMAGE_RE.finditer(line):
+            ref = _normalize_ref(match.group(1))
+            if _is_relative_ref(ref):
+                found.append(ref)
+        for match in HTML_IMG_RE.finditer(line):
+            ref = _normalize_ref(match.group(1))
+            if _is_relative_ref(ref):
+                found.append(ref)
+    unique: list[str] = []
+    seen: set[str] = set()
+    for ref in found:
+        if ref not in seen:
+            seen.add(ref)
+            unique.append(ref)
+    return unique
+
+
+def _ref_candidates(md_rel: str, ref: str) -> list[str]:
+    """把 md 内的引用解析成「相对打包根」的候选路径（顺序即优先级）。
+
+    md 里的 `./images/x.svg` 相对**它自己**，包内路径相对**打包根**：
+    `01-总览/a.md` + `images/x.svg` 只有拼成 `01-总览/images/x.svg` 才对得上。
+    第二个候选保留 ref 原样，兼容「目录已整理成引用即相对根」的形态。
+    """
+    doc_dir = posixpath.dirname(md_rel)
+    # ★ 必须 normpath：Python 的 posixpath.join 只拼接、**不归一化** `..`
+    #   （`join("sub", "../shared/s.png")` → `sub/../shared/s.png`），
+    #   拿它去和包内路径集合比会永远对不上，把正常引用全报成缺图。
+    joined = ref if doc_dir in ("", ".") else posixpath.normpath(posixpath.join(doc_dir, ref))
+    return [joined] if joined == ref else [joined, ref]
+
+
+def find_missing_assets(entries: list[tuple[Path, str]]) -> list[str]:
+    """返回「正文引用了但包里没有」的清单，形如 `<md 相对路径> → <ref>`。
+
+    为什么必须自己兜：服务端找不到附件**不报错**（md 导入成功、`errors: 0`），
+    图静默变死链。没有这道闸，用户只能事后看裂图（事件 #103）。
+    """
+    on_disk = {rel for _, rel in entries}
+    missing: list[str] = []
+    for path, rel in entries:
+        if path.suffix.lower() not in DOC_EXTENSIONS:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for ref in _md_image_refs(text):
+            if any(candidate in on_disk for candidate in _ref_candidates(rel, ref)):
+                continue
+            missing.append(f"{rel} → {ref}")
+    return missing
+
+
+def report_missing_assets(missing: list[str]) -> None:
+    log(f"警告：{len(missing)} 处图片引用在本次包里找不到对应文件，服务端会静默丢这些图（md 导入成功、errors 0）：")
+    for line in missing[:10]:
+        log(f"  - {line}")
+    if len(missing) > 10:
+        log(f"  ... 另有 {len(missing) - 10} 处")
 
 
 def _collect_files(root: Path, args) -> list[Path]:
@@ -639,6 +802,11 @@ def main(argv: list[str]) -> int:
         p.add_argument("--wait-timeout", type=float, default=900, help="等待导入的上限秒数（默认 900）")
         p.add_argument("--no-precheck", action="store_true", help="跳过上传前的 ping 与体积预检")
         p.add_argument("--allow-oversize", action="store_true", help="明知超过单文件上限仍上传（服务端会跳过该文件）")
+        p.add_argument(
+            "--allow-missing-assets",
+            action="store_true",
+            help="正文引用的图片不在本次包里时，默认按失败返回（退出码 2）；加它降级为警告",
+        )
 
     p_up = sub.add_parser("upload", help="上传一组文件（multipart）")
     p_up.add_argument("paths", nargs="+", help="文件路径（目录请用 upload-dir）")
@@ -648,8 +816,13 @@ def main(argv: list[str]) -> int:
 
     p_dir = sub.add_parser("upload-dir", help="上传整个目录（打成 tar.gz）")
     p_dir.add_argument("dir", help="目录路径（打包根 = 知识库根）")
-    p_dir.add_argument("--include-ext", nargs="+", default=list(DEFAULT_EXTENSIONS), help="打包的扩展名白名单（默认 .md .mdx）")
-    p_dir.add_argument("--all-files", action="store_true", help="不按扩展名过滤，全部打包（服务端仍会跳过非文档）")
+    p_dir.add_argument(
+        "--include-ext",
+        nargs="+",
+        default=list(DEFAULT_EXTENSIONS),
+        help="打包的扩展名白名单（默认 .md .mdx + 常见图片后缀；如只想要文档可传 --include-ext .md）",
+    )
+    p_dir.add_argument("--all-files", action="store_true", help="不按扩展名过滤，全部打包（服务端会跳过既非文档也非图片的文件）")
     p_dir.add_argument("--max-files", type=int, default=20000, help="本地文件数上限（默认 20000，与服务端单批上限一致）")
     add_upload_opts(p_dir)
     add_common(p_dir, allow_after_subcommand=True)
@@ -676,8 +849,11 @@ def main(argv: list[str]) -> int:
         print(json.dumps(payload, ensure_ascii=False))
         log(f"失败（{err.stage}）：{err}")
         return 3 if err.stage in {"upload", "http", "precheck", "import"} else 2
+    # `_exit` 由命令自己给（如「上传成功但缺图」= 结果完整 + 非零退出码），打印前摘掉。
+    # 约定：各 cmd_* 必须返回 dict（stdout 就是这个 dict），非 dict 会让下面的 pop 崩。
+    exit_code = out.pop("_exit", 0)
     print(json.dumps(out, ensure_ascii=False))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

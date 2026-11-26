@@ -97,7 +97,11 @@ python scripts/ki_upload.py upload ./incident.md --scope prod --group 故障复�
 python scripts/ki_upload.py upload-dir ./docs --scope prod
 ```
 
-**打包根目录 = 知识库根目录**：`./docs/a.md` → 根，`./docs/sub/b.md` → `sub/`。与 `ki import --source ./docs` 的结果一致。默认只打包 `.md` / `.mdx`（`--all-files` 放开，服务端仍会跳过非文档）。
+**打包根目录 = 知识库根目录**：`./docs/a.md` → 根，`./docs/sub/b.md` → `sub/`。与 `ki import --source ./docs` 的结果一致。默认打包 `.md` / `.mdx` **以及常见图片**（png/jpg/jpeg/gif/svg/webp/ico/bmp/avif）——图片放哪个目录都行，服务端按正文里的相对引用去找。
+
+只想传文档就加 `--include-ext .md`；若正文里有图片引用，会被缺图闸门拦下（退出码 2），确认这些图不需要时再加 `--allow-missing-assets`。
+
+> 图片多的大目录注意整包体积：默认会把目录里所有白名单图片都打进去，整体受服务端 `mcp.http.uploadMaxBytes`（默认 512MB）约束，超了要分批或调大上限。
 
 分类参数对整批生效（一次上传一个分类）：`upload-dir ./日报 --lifecycle temp --ttl-days 30`。
 
@@ -154,7 +158,8 @@ python scripts/ki_upload.py events --scope prod --q 登录
 | `--wait-timeout` | 900 | 等待上限秒数 |
 | `--no-precheck` | 关 | 跳过上传前的三件事：事件状态查询、`ping` 与体积预检 |
 | `--allow-oversize` | 关 | 明知超单文件上限仍上传（该文件会被跳过） |
-| `--include-ext` | `.md .mdx` | `upload-dir` 的打包白名单 |
+| `--include-ext` | `.md` `.mdx` + 9 种图片 | `upload-dir` 的打包白名单（只传文档用 `--include-ext .md`） |
+| `--allow-missing-assets` | 关 | 正文引用的图片不在包里时，默认按失败返回（退出码 2）；加它降级为警告 |
 | `--max-files` | 20000 | `upload-dir` 的本地文件数上限 |
 
 ## 怎么读输出
@@ -174,7 +179,8 @@ stdout 一行 JSON：
 - `lifecycle`（请求里带了分类才有）：回显 `requested` / `ttlDays` / `expiresAt` / `event`，是**请求侧**口径。
 - `event`（`--event` 且做了预检才有）：上传前查到的事件状态——`stage.name` / `stage.visibility` / `terminalAction` / `closed`。它说明的是「这一批挂上去之后处于什么状态」，不是「导入了就一定成功」。
 - `import.result.lifecycle`：分类的**落地**情况——`applied`（写入几篇）、`lockedSkipped`（目标同名文档由数据源同步维护、分类固定，这些文件被跳过且**没有导入**）、`hidden`（绑定事件的文档当前阶段为「隐藏」，上传成功但立刻搜不到）。后两个非空时必须转告用户，别只说"上传成功"。
-- 退出码：`0` 成功；`2` 配置/参数/依赖问题；`3` 上传或导入被判失败（JSON 里有 `code`），**事件预检不通过也归这一档**（`stage=precheck`）。
+- `missing`（非空才有）：正文引用了、但本次包里没有的图片，形如 `<md 路径> → <引用>`。**服务端对此不报错**（md 导入成功、`errors: 0`，图静默变死链），所以脚本自己兜住。
+- 退出码：`0` 成功；`2` 配置/参数/依赖问题，**「上传成功但缺图」也归这一档**（`ok: false` + `missing`，加 `--allow-missing-assets` 即恢复 `0`）；`3` 上传或导入被判失败（JSON 里有 `code`），**事件预检不通过也归这一档**（`stage=precheck`）。
 
 ## 失败处理
 
@@ -193,7 +199,8 @@ stdout 一行 JSON：
 | `OPEN_API_PAYLOAD_TOO_LARGE` | 超过单次请求体上限：分批，或调大 `mcp.http.uploadMaxBytes` |
 | `OPEN_API_ARCHIVE_UNSAFE` | 归档里有 `..` / 绝对路径 / 链接文件，整包被拒且不落盘 |
 | `OPEN_API_ARCHIVE_TOO_LARGE` | 条目数、解包体积或压缩比超限：分批传 |
-| `OPEN_API_NO_VALID_FILE` | 一个可用文件都没有：看 `skippedSample` 的原因 |
+| `OPEN_API_NO_VALID_FILE` | 一个可导入的文档都没有：看 `skippedSample` 的原因；只传了图片也会走这条（附件不能单独导入） |
+| 上传成功但退出码 `2`（JSON 里 `missing` 非空） | 正文引用的图片没随包上传。服务端不会报错、图会变死链，所以脚本自己拦截：把图放进打包目录（默认白名单已含常见图片后缀），或确认不需要时加 `--allow-missing-assets` |
 | `OPEN_API_NOT_FOUND` | 路径拼错，或**上传接口被关闭**（`--no-upload-api`） |
 | `OPEN_API_DAEMON_DRIFT` | 服务端配置身份变了，重试无用，需重启 ki daemon |
 | 连不上 / 超时 | 检查 `KI_URL`、端口、防火墙；`ping` 单独验证 |
