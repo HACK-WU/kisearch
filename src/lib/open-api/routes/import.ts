@@ -192,8 +192,11 @@ export async function handleOpenApiImportUpload(input: RouteInput): Promise<void
   // ── 6) 一个合法文件都没有 → 不创建半成品任务 ──
   if (received.saved === 0) {
     cleanupUpload(received.dir);
-    sendOpenApiError(res, 400, 'OPEN_API_NO_VALID_FILE', '没有可导入的文件（全部被跳过），请检查 skippedSample 里的原因', {
-      files: { saved: 0, skipped: received.skipped, skippedSample: received.skippedSample },
+    // 附件不算可导入单元：只传了图没有 md，导入内核无内容可导 → 同样 400
+    const assetNote = received.assets > 0 ? `（其中 ${received.assets} 个是附件/图片，附件不能单独导入，需与引用它的 md 同批上传）` : '';
+    sendOpenApiError(res, 400, 'OPEN_API_NO_VALID_FILE', `没有可导入的文档${assetNote}，请检查 skippedSample 里的原因`, {
+      // assets 回真实识别数（文件已随整包回收，这个数字表示「认出来了但没 md 可挂」）
+      files: { saved: 0, assets: received.assets, skipped: received.skipped, skippedSample: received.skippedSample },
       totalBytes: received.totalBytes,
     });
     return;
@@ -266,7 +269,11 @@ export async function handleOpenApiImportUpload(input: RouteInput): Promise<void
     scope,
     ...(group ? { group } : {}),
     files: {
+      /** 收下的文档数（可导入单元） */
       saved: received.saved,
+      /** 收下的附件（图片）数：已落地，导入时按 md 引用复制进 group assets */
+      assets: received.assets,
+      /** 真正被丢弃的文件数（既非文档也非附件，或超限） */
       skipped: received.skipped,
       skippedSample: received.skippedSample,
     },

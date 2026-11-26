@@ -83,7 +83,7 @@ ki-client upload --scope kb --group wiki/部署 ./a.md ./b.md
 ki-client upload-dir --scope kb ./docs --batch-bytes 33554432
 ```
 
-- **通道自动选**：根目录纯 markdown 走 multipart（最快）；**批次里出现子目录或图片时自动走 tar.gz**——multipart 通道不落盘附件（服务端已知缺陷：md 导入成功、`errors:0`，但 `assets/` 是空的，图变死链、不报错）。可用 `--archive` 强制
+- **通道自动选**：根目录纯 markdown 走 multipart（最快）；**批次里出现子目录或图片时自动走 tar.gz**——multipart 曾不落附件（服务端已修，现在两通道都收图），保留这条是因为 tar 一次请求带完整层级、往返更少。可用 `--archive` 强制
 - **超大目录靠分批不靠压缩**：默认读 `ping` 回的 `limits.maxRequestBody`，你给的 `--batch-bytes` 超了会自动收窄并提示一次
 - **增量是文件级**：每个文件传成功后立刻记进 `~/.ki-client/state/<key>.json`（按「源 + 库 + 组 + 目录」派生），重跑同一条命令只补没记过或内容变了的；`--force` 全重传、`--no-state` 不读不写状态
 - **失败的批次不写状态**，重跑同一条命令即可补齐

@@ -7,9 +7,10 @@
  * - **tar.gz**：纯 Node 打 ustar + gzip（`lib/tar.ts`）。触发条件：`--archive`、单批 >32MB、
  *   **或批次里出现子目录/非 md 文件**。
  *
- * ⚠️ 最后那条是硬要求，不是优化：真机验证发现 **multipart 通道下附件一律不落盘**
- * （`{group}/assets/` 为空，md 导入成功、`errors: 0`，图静默变死链）；同一份内容改用
- * tar.gz 就正常。根因在服务端 `receiveMultipart` 一侧，客户端只能规避。
+ * ⚠️ 最后那条是历史避坑：早期服务端 **multipart 通道不落附件**（`{group}/assets/` 为空，
+ * md 导入成功、`errors: 0`，图静默变死链）。该缺陷已于 2026-11-26 修复（multipart 也收
+ * 附件），但客户端仍按「有子目录或非 md 就走 tar.gz」——tar 一次请求带完整层级、往返更少，
+ * 不必回头赌对端版本。
  *
  * 两条通道都受服务端 `mcp.http.uploadMaxBytes`（默认 512MB）约束，所以**超大目录靠分批**，
  * 不是靠压缩：`--batch-bytes`（默认 64MB）把文件切成多批，每批一个请求。
@@ -72,7 +73,8 @@ interface UploadResponse {
   ok?: boolean;
   taskId?: string;
   accepted?: number;
-  files?: { saved?: number; skipped?: number; skippedSample?: unknown[] };
+  /** `saved` = 文档数、`assets` = 附件数、`skipped` = 真丢弃数（服务端 2026-11-26 起分开计） */
+  files?: { saved?: number; assets?: number; skipped?: number; skippedSample?: unknown[] };
 }
 
 /**
@@ -328,12 +330,10 @@ function formatBytes(bytes: number): string {
 /**
  * 选上传通道。
  *
- * ═══ 为什么「有附件就必须 tar.gz」（真机验证的坑）═══
- * 对真服务端实测：**multipart 通道下附件一律不落盘**（`{group}/assets/` 里没有文件），
- * 而 md 本身导入成功 → 文档里的图变成死链，且服务端不报错（`errors: 0`）。
- * 同一份内容改用 tar.gz 就正常（`{group}/assets/assets/a.svg`）。
- * 原因在服务端 `receiveMultipart` 一侧（属独立缺陷），客户端只能先规避：
- * **只要批次里出现子目录路径或非 md 文件，就走 tar.gz**。
+ * ═══ 为什么「有附件就优先 tar.gz」═══
+ * 历史原因：对真服务端实测过 **multipart 通道下附件一律不落盘**（`{group}/assets/` 里没有
+ * 文件），md 却导入成功 → 图变死链且服务端不报错（`errors: 0`）。该缺陷 2026-11-26 已修，
+ * 但这里仍保留「出现子目录路径或非 md 文件就走 tar.gz」：一次请求带完整层级、少一轮往返。
  * 纯根目录 md 仍走 multipart（更快、无解包开销）。
  */
 export function chooseChannel(

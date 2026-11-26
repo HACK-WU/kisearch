@@ -20,7 +20,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 import { getScopeImportConfig, resolveImportExtensions, type KiConfig } from '../config.js';
-import { DEFAULT_MAX_FILE_SIZE_BYTES } from '../import.js';
+import { ASSET_EXTENSIONS, DEFAULT_MAX_ASSET_SIZE, DEFAULT_MAX_FILE_SIZE_BYTES } from '../import.js';
 import { isGnuTar, tarPath, tarPathArgs } from '../tar-compat.js';
 import { assertSafeTarListing, readTarListing, validateTree, type TarListing } from '../safe-tar.js';
 import { bindUploadScope, getUploadsRoot, sanitizeFileName, writeUploadSession } from '../mcp-http-api.js';
@@ -43,7 +43,16 @@ export interface SkippedSample {
 
 export interface ReceivedUpload extends UploadSessionDir {
   totalBytes: number;
+  /**
+   * 收下的**文档**数。
+   *
+   * 与 `assets` 分开计：附件本身不是可导入单元，混进 `saved` 会让
+   * 「只传了一堆图、没有 md」被误判成有内容可导（路由据 `saved === 0` 直接 400）。
+   */
   saved: number;
+  /** 收下的**附件**（图片）数。tar 分支解包即落地；multipart 分支按附件上限放行 */
+  assets: number;
+  /** 真正被丢弃的文件数：既有文档也不是附件（扩展名不支持 / 超限） */
   skipped: number;
   /** 跳过原因样本，最多 {@link MAX_SKIPPED_SAMPLE} 条（全量在服务端日志） */
   skippedSample: SkippedSample[];
@@ -141,13 +150,29 @@ export async function receiveMultipart(
 ): Promise<ReceivedUpload> {
   const session = createUploadSession(opts.scope);
   const extensions = resolveImportExtensions(opts.config, opts.scope).map((e) => e.toLowerCase());
-  const maxFileSize = getScopeImportConfig(opts.config, opts.scope)?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES;
+  const importCfg = getScopeImportConfig(opts.config, opts.scope);
+  const maxFileSize = importCfg?.maxFileSize ?? DEFAULT_MAX_FILE_SIZE_BYTES;
+  /**
+   * 附件也要在这条通道落地。
+   *
+   * 修复前这里只认文档扩展名，图片一律 reject → `{group}/assets/` 永远是空的：
+   * md 导入成功、`errors: 0`、图全变死链（客户端因此改成「带图就走 tar.gz」规避）。
+   * 服务端本不必如此——导入内核是按 md 的相对引用去 content/ 里找附件，落哪个通道都一样。
+   */
+  const assetsEnabled = importCfg?.assets !== false;
+  const assetExtensions = ASSET_EXTENSIONS.map((e) => e.toLowerCase());
+  const maxAssetSize = importCfg?.maxAssetSize ?? DEFAULT_MAX_ASSET_SIZE;
+  const isDocRel = (rel: string): boolean => {
+    const lower = rel.toLowerCase();
+    return extensions.some((ext) => lower.endsWith(ext));
+  };
 
   const handles = new Map<string, number>();
   const sample: SkippedSample[] = [];
   // 用集合而不是计数器：同一请求里出现同名文件时（客户端重复 -F），落盘只有一份，
-  // 报给调用方的 saved 也必须是「文件数」而不是「part 数」。
-  const savedRels = new Set<string>();
+  // 报给调用方的计数也必须是「文件数」而不是「part 数」。
+  const savedDocs = new Set<string>();
+  const savedAssets = new Set<string>();
   let skipped = 0;
 
   const recordSkip = (rel: string, reason: string): void => {
@@ -162,9 +187,12 @@ export async function receiveMultipart(
       if (!check.ok) return { reject: check.reason };
       const rel = check.rel;
       const lower = rel.toLowerCase();
-      if (!extensions.some((ext) => lower.endsWith(ext))) {
+      const isDoc = isDocRel(rel);
+      const isAsset = assetsEnabled && assetExtensions.some((ext) => lower.endsWith(ext));
+      if (!isDoc && !isAsset) {
+        const assetHint = assetsEnabled ? `；附件允许 ${assetExtensions.join(' / ')}` : '';
         return {
-          reject: `扩展名不支持，文档仅允许 ${extensions.join(' / ')}（可在 scopes.<scope>.import.extensions 中调整）`,
+          reject: `不支持的文件类型，文档仅允许 ${extensions.join(' / ')}${assetHint}（可在 scopes.<scope>.import.extensions 中调整）`,
         };
       }
       const abs = path.join(session.contentDir, rel);
@@ -187,7 +215,8 @@ export async function receiveMultipart(
         // 不该让整包 500（错误来自用户输入，不是服务端故障）。
         return { reject: `无法写入该文件：${(err as Error).message}` };
       }
-      return { accept: { absPath: abs, maxBytes: maxFileSize } };
+      // 上限按类型分流：图片常远超文档那 1MB 默认值，用文档上限会把正常截图拦掉
+      return { accept: { absPath: abs, maxBytes: isDoc ? maxFileSize : maxAssetSize } };
     },
     onFileChunk(rel: string, chunk: Buffer): void {
       const fd = handles.get(rel);
@@ -200,7 +229,8 @@ export async function receiveMultipart(
         try { fs.closeSync(fd); } catch { /* 已关闭 */ }
         handles.delete(rel);
       }
-      savedRels.add(rel);
+      if (isDocRel(rel)) savedDocs.add(rel);
+      else savedAssets.add(rel);
     },
     onFileRejected(rel: string, reason: string): void {
       const fd = handles.get(rel);
@@ -227,7 +257,8 @@ export async function receiveMultipart(
     return {
       ...session,
       totalBytes: result.totalBytes,
-      saved: savedRels.size,
+      saved: savedDocs.size,
+      assets: savedAssets.size,
       skipped,
       skippedSample: sample,
     };
@@ -252,6 +283,10 @@ export async function receiveTar(
   const session = createUploadSession(opts.scope);
   const tarFile = path.join(session.dir, '.upload.tar.gz');
   const extensions = resolveImportExtensions(opts.config, opts.scope).map((e) => e.toLowerCase());
+  const importCfg = getScopeImportConfig(opts.config, opts.scope);
+  // 附件（图片）已经随包解包落地，只是「不是可导入单元」——必须与真跳过分开计，
+  // 否则 `skipped` 会把正常附件说成「扩展名不支持」（调用方据此误判图没传上去）。
+  const assetExtensions = importCfg?.assets === false ? [] : ASSET_EXTENSIONS.map((e) => e.toLowerCase());
 
   try {
     const totalBytes = await streamToFile(req, tarFile, opts.uploadMaxBytes);
@@ -325,7 +360,8 @@ export async function receiveTar(
     }
 
     // ④ 扫描统计（saved/skipped 与 multipart 分支保持同一口径，便于 agent 统一处理）
-    const { saved, skipped, skippedSample, unpackedBytes } = scanContent(session.contentDir, extensions);
+    const scanned = scanContent(session.contentDir, extensions, assetExtensions);
+    const { saved, assets, skipped, skippedSample, unpackedBytes } = scanned;
     if (unpackedBytes > unpackLimit) {
       throw new ArchiveError(
         'OPEN_API_ARCHIVE_TOO_LARGE',
@@ -335,10 +371,17 @@ export async function receiveTar(
     }
 
     if (saved === 0) {
+      /**
+       * 没有文档 = 没有可导入单元，整包回收（附件单独存在也无法入库）。
+       *
+       * `assets` 保留真实识别数而不是写 0：调用方需要知道自己那几张图**是被认出来的**，
+       * 只是没有 md 可挂——写 0 会让它误判成「图也被当成不支持的类型」。落盘已回收这一点
+       * 由 400 的 `OPEN_API_NO_VALID_FILE` 与文案表达。
+       */
       cleanupUpload(session.dir);
-      return { ...session, totalBytes, saved: 0, skipped, skippedSample };
+      return { ...session, totalBytes, saved: 0, assets, skipped, skippedSample };
     }
-    return { ...session, totalBytes, saved, skipped, skippedSample };
+    return { ...session, totalBytes, saved, assets, skipped, skippedSample };
   } catch (err) {
     cleanupUpload(session.dir);
     throw err;
@@ -400,12 +443,23 @@ function inspectArchive(listing: TarListing): ArchiveInspection {
   return { entries, unpackedBytes: parsed === 0 ? null : sum };
 }
 
-/** 扫描解包后的内容：统计可导入文件、跳过明细与实际占用字节 */
-function scanContent(
+/**
+ * 扫描解包后的内容：文档 / 附件 / 真跳过 三类分开计，外加实际占用字节。
+ *
+ * 为什么必须区分附件：tar 分支把所有条目都解包落地了，图片只是「不是可导入单元」。
+ * 修复前它被算进 `skipped` 并附上「扩展名不支持」的原因 —— 调用方（尤其 AI agent）
+ * 看到 `skipped: 12` 会以为图没传上去，而实际上图就在 content/ 里、随后由导入内核
+ * 复制进 `{group}/assets/`。真正的跳过只有「既不是文档也不是附件」或超限的文件。
+ *
+ * 导出仅为单测使用（生产只有 `receiveTar` 调它）。
+ */
+export function scanContent(
   root: string,
   extensions: string[],
-): { saved: number; skipped: number; skippedSample: SkippedSample[]; unpackedBytes: number } {
+  assetExtensions: string[],
+): { saved: number; assets: number; skipped: number; skippedSample: SkippedSample[]; unpackedBytes: number } {
   let saved = 0;
+  let assets = 0;
   let skipped = 0;
   let unpackedBytes = 0;
   const sample: SkippedSample[] = [];
@@ -421,18 +475,22 @@ function scanContent(
       if (!entry.isFile()) continue;
       const size = fs.statSync(abs).size;
       unpackedBytes += size;
-      if (extensions.some((ext) => rel.toLowerCase().endsWith(ext))) {
+      const lower = rel.toLowerCase();
+      if (extensions.some((ext) => lower.endsWith(ext))) {
         saved++;
+      } else if (assetExtensions.some((ext) => lower.endsWith(ext))) {
+        assets++;
       } else {
         skipped++;
         if (sample.length < MAX_SKIPPED_SAMPLE) {
-          sample.push({ rel, reason: `扩展名不支持，文档仅允许 ${extensions.join(' / ')}` });
+          const assetHint = assetExtensions.length > 0 ? `；附件允许 ${assetExtensions.join(' / ')}` : '';
+          sample.push({ rel, reason: `不支持的文件类型，文档仅允许 ${extensions.join(' / ')}${assetHint}` });
         }
       }
     }
   };
   walk(root, '');
-  return { saved, skipped, skippedSample: sample, unpackedBytes };
+  return { saved, assets, skipped, skippedSample: sample, unpackedBytes };
 }
 
 /** 相对路径校验：拒绝绝对路径 / `..` / 空段；返回归一后的 posix 路径 */

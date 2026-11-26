@@ -77,7 +77,7 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
   "taskId": "9a2b7c41-...",
   "scope": "default",
   "group": "wiki",
-  "files": { "saved": 1, "skipped": 0, "skippedSample": [] },
+  "files": { "saved": 1, "assets": 0, "skipped": 0, "skippedSample": [] },
   "totalBytes": 1843200,
   "statusUrl": "/open/v1/import/status?taskId=9a2b7c41-..."
 }
@@ -86,6 +86,29 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
 上传完成即已**自动开始导入**，不需要再调一次「开始导入」。随后用 `taskId` 轮询进度。
 
 同一个文件重复上传不会产生副本（按相对路径覆盖同名文档）。
+
+### 带图上传
+
+图片（PNG / JPEG / GIF / SVG / WebP / ICO / BMP / AVIF）与文档同批上传即可，**multipart 与 tar.gz 两种形态都收**：
+
+```bash
+# 图与 md 同目录：正文写 ![](./arch.png)
+curl -s -H "Authorization: Bearer $KI_TOKEN" \
+  -F "files=@note.md" -F "files=@arch.png" \
+  "http://127.0.0.1:7423/open/v1/import/upload?scope=default&group=wiki"
+
+# 图在子目录：必须用 ;filename= 把相对路径带上（见下面第一条注意事项）
+curl -s -H "Authorization: Bearer $KI_TOKEN" \
+  -F "files=@note.md" \
+  -F "files=@images/arch.png;filename=images/arch.png" \
+  "http://127.0.0.1:7423/open/v1/import/upload?scope=default&group=wiki"
+```
+
+- **文件名就是落点相对路径**。`curl -F "files=@images/arch.png"` 默认只发 `arch.png`，正文里的 `./images/arch.png` 就对不上、图会丢——要带目录必须显式写 `;filename=images/arch.png`（tar.gz 方式天然保留路径，不用管这条）。
+- 图片按**正文里的相对引用**落库：`note.md` 里写 `![](./images/arch.png)`，入库后位于 `{group}/assets/images/arch.png`，页面与 `/open/v1/asset` 都能取到。
+- 图片放哪个目录都行，只要相对路径与正文对得上；目录是否叫 `assets/` 无关。
+- 附件上限看 `ping` 的 `limits.maxAssetSize`（默认 5MB），与文档的单文件上限是两个值。
+- **附件不能单独导入**：整批只有图片、没有 md 时返回 400 `OPEN_API_NO_VALID_FILE`（响应里的 `files.assets` 会告诉你收下了几张图）。
 
 ### 上传一个目录（保留层级）
 
@@ -246,7 +269,15 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
   "actual": 262144, "limit": 200000 }
 ```
 
-目录里个别文件不合格（扩展名不支持、超单文件上限）**不会让整包失败**：它们会进 `files.skippedSample`（最多 10 条原因），其余文件照常导入。一个可用文件都没有时才会整体返回 400。
+目录里个别文件不合格（既不是文档也不是图片，或超出对应大小上限）**不会让整包失败**：它们会进 `files.skippedSample`（最多 10 条原因），其余文件照常导入。一个可用文件都没有（`files.saved = 0`）时才会整体返回 400。
+
+`files` 的三个计数各管一件事，别看错：
+
+- `saved`：收下的**文档**数（可导入单元）
+- `assets`：收下的**附件（图片）**数，已落地，导入时按正文引用复制进 `{group}/assets/`
+- `skipped`：真正被丢弃的文件数（类型不支持 / 超限），明细看 `skippedSample`
+
+> 早期版本把图片也算进 `skipped`（原因写「扩展名不支持」），看着像图没传上去。现在图片单独计 `assets`，`skipped` 只表示真丢了文件。
 
 ### 关掉这个通道
 

@@ -57,7 +57,7 @@
 
 ```json
 {"ok": true, "uploadId": "...", "taskId": "...", "scope": "default", "group": "wiki",
- "files": {"saved": 1, "skipped": 0, "skippedSample": [{"rel": "x.txt", "reason": "扩展名不支持..."}]},
+ "files": {"saved": 1, "assets": 2, "skipped": 0, "skippedSample": [{"rel": "x.txt", "reason": "不支持的文件类型..."}]},
  "totalBytes": 1843200,
  "lifecycle": {"requested": "temp", "ttlDays": 7, "expiresAt": 1764000000000},
  "statusUrl": "/open/v1/import/status?taskId=..."}
@@ -65,7 +65,7 @@
 
 `lifecycle` 只在请求里带了分类时出现（**请求侧**口径）；落地情况看 status 的 `result.lifecycle`。
 
-`files.saved` 是**服务端收下的文件数**；非文档扩展名、超单文件上限的文件会进 `skippedSample`（最多 10 条），其余照常导入。
+`files.saved` 是**服务端收下的文档数**，`files.assets` 是**收下的图片数**（已落地，导入时按正文引用复制进 `{group}/assets/`）；既不是文档也不是图片、或超出对应大小上限的文件才算 `skipped`，明细进 `skippedSample`（最多 10 条），其余照常导入。
 
 ### status 响应
 

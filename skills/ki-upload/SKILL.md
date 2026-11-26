@@ -163,11 +163,11 @@ stdout 一行 JSON：
 
 ```json
 {"ok": true, "mode": "tar.gz", "taskId": "6dbff65c-...", "uploadId": "c02130c6-...",
- "scope": "default", "files": {"saved": 2, "skipped": 0, "skippedSample": []},
+ "scope": "default", "files": {"saved": 2, "assets": 1, "skipped": 0, "skippedSample": []},
  "import": {"state": "done", "progress": 1, "result": {"total": 2, "groups": ["根", "sub"]}}}
 ```
 
-- `files.saved / skipped` 是**上传层**（服务端收下了几个文件），`import.result` 是**导入层**（真正写进库的结果）。两者都可能少于你给的文件数，看 `skippedSample` 的原因。
+- `files` 是**上传层**，三个计数别混：`saved` = 收下的文档数、`assets` = 收下的图片数（已落地，导入时按正文引用进 `{group}/assets/`）、`skipped` = 真被丢弃的文件数（类型不支持 / 超限，原因看 `skippedSample`）。`import.result` 是**导入层**（真正写进库的结果），两者都可能少于你给的文件数。
 - `import.state` 为 `queued` + `waitingForScopeLock: true` 表示**在排队**（同库同一时刻只允许一个导入），不是卡住，别取消、别重投。
 - `import.source`：`memory` = 实时进度；`ledger` = 服务重启后从任务记录读到的终态；`log` = 只剩日志，需 `ki log <taskId>` 查。
 - `import.result.wikiWriteback`：**目标库配了 wiki 回写目录时才有**，`{written, skipped, failed}` 三个计数。它是「库里这份文档有没有同步成 wiki 文件」的唯一凭据；`written: 0` + `skipped > 0` 属正常（回写只补缺、不覆盖，重复上传的文档早就在目录里）。
