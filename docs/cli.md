@@ -32,6 +32,7 @@
 | [`view`](#view) | 知识视图：把多个 scope 聚合成一个可寻址名字 |
 | [`user`](#user) | Web 登录账号（与 MCP Token 独立） |
 | [`tag`](#tag) | tag 发现 |
+| [`assets`](#assets) | 附件（图片）孤儿扫描与清理 |
 | [数值参数语义](#数值参数语义) | limit / count 等数值参数 |
 | [`doc`](#doc) | 向量文档查看 / 删除 |
 | [`search`](#search) | 语义检索 / 全文检索 |
@@ -519,6 +520,72 @@ ki tag list --scope my-project
 
 ---
 
+## assets
+
+附件（图片）治理。**删文档只删正文，图片会留在原处** —— 本命令找出「没有被任何文档引用」的那些图片。
+
+默认 **dry-run**：只列清单与可回收字节，不删任何文件；加 `--apply` 才真删。
+
+> 图片没有回收站，`--apply` 之后就回不去了（只能靠备份）。建议先看清清单再执行。
+>
+> 删除文档时不会自动触发清理：删除结果里只带一条 `assetsOrphan`（几张图、多大），什么时候清由你决定。
+
+### `gc` 子命令
+
+```bash
+ki assets gc [--scope <scope>] [--group <组>] [--min-age-days <n>] [--apply] [--sample-limit <n>]
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--scope <scope>` | 项目隔离标识 | `default` |
+| `--group <组>` | 只处理这个 group（缺省 = 整个库） | 不限制 |
+| `--min-age-days <n>` | 只清理「最后修改时间早于 N 天」的孤儿，给保留期留出口 | `0`（不限） |
+| `--apply` | 真正删除 | 关（dry-run） |
+| `--sample-limit <n>` | 每组列多少条样本（1~200） | `20` |
+
+**示例：**
+
+```bash
+ki assets gc --scope my-project              # 先看
+ki assets gc --scope my-project --apply      # 确认后再删
+```
+
+输出（dry-run）：
+
+```json
+{
+  "ok": true,
+  "scope": "my-project",
+  "apply": false,
+  "minAgeDays": 0,
+  "scannedGroups": 3,
+  "files": 137,
+  "totalBytes": 16166400,
+  "orphanCount": 2,
+  "orphanBytes": 4096,
+  "groups": [
+    {
+      "group": "资料",
+      "files": 137,
+      "totalBytes": 16166400,
+      "orphanCount": 2,
+      "orphanBytes": 4096,
+      "sample": [{ "rel": "images/old.png", "bytes": 2048 }],
+      "danglingRefs": []
+    }
+  ],
+  "hint": "以上仅为扫描结果（dry-run）…"
+}
+```
+
+字段怎么读：
+
+- `orphanCount` / `orphanBytes`：没被任何文档引用的文件数与可回收字节
+- `danglingRefs`：反过来 —— 正文引用了但磁盘上没有的图（说明图丢了，**不会**被删）
+- `deleted` / `deletedBytes`：仅 `--apply` 时出现，实际删掉的数量
+- `errors`：删除失败的条目（路径越界、权限问题等）
+
 ## 数值参数语义
 
 | 参数 | 出现命令 | 语义 |
@@ -948,7 +1015,9 @@ ki get-module-info --scope my-project --group "项目/API" --relation "用户登
 
 只删除**单个 Relation** 及其关联数据（relations-cache + 本地 KB 原文 + wiki 源文件 + 向量 + 全文索引）。
 
-> ⚠️ **删除不可恢复**：wiki 源文件走物理删除（`unlink`），**不存在回收站**——`.ki/trash` 已移除（见 [group.md](group.md)）。删完只能靠备份或重新导入恢复。
+> ⚠️ **文档级删除会先存一份进回收站**（正文 + 元数据 + 本篇引用的图片），默认保留 7 天后才彻底清除，期间可在「知识治理 → 回收站」恢复。
+>
+> 但两项是**物理删除、不进回收站**：wiki 源文件（`unlink`）、以及组级删除以外的分组结构。删组请用 `ki group delete`（会存组快照）。
 
 ### 文档级删除（`--group` + `--relation`，两者必填）
 
@@ -958,6 +1027,18 @@ ki delete-relation --scope <scope> --group <group> --relation <relation>
 
 删除单条 Relation。向量删除优先按 `memoryId` 精确删除，无 `memoryId` 时用向量搜索严格匹配兜底。
 wiki 文件按 `<wikiSync.sourceDir>/<group>/<relation>.md` 定位；文档记有 `sourcePath` 时，还要求它与该路径指向同一个文件，否则拒绝删除（硬删无回收站，宁可删不掉也不误删同名文件）。
+
+### 附件（图片）会怎样
+
+删除文档**不会**连带删掉它引用的图片 —— 同一张图可能被同组其它文档共用，删了就破图。
+
+结果里的 `assetsOrphan` 只说明「删完之后这几张图没人用了」：
+
+```json
+{ "assetsOrphan": { "count": 1, "bytes": 2048, "sample": ["images/old.png"] } }
+```
+
+真正清理请用 [`ki assets gc`](#assets)（默认 dry-run，看清清单再执行）。
 
 ### 批量删除（`--input`）
 

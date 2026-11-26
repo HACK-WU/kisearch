@@ -61,6 +61,13 @@ export interface MoveToTrashArgs {
   now?: number;
   /** 删除瞬间的关系快照（缺省 = 只留原文，元数据不可恢复） */
   relationSnapshot?: Relation;
+  /**
+   * 只备份这些附件（相对 group 的 assets 目录）。
+   *
+   * 单篇删除应当传它（#102）：不传会退回「整个 group 的 assets 全量复制」，
+   * 删一篇就把同组图片整体复制一份，条目录占用与组内图片总量成正比。
+   */
+  assetRels?: string[];
 }
 
 export type MoveToTrashOutcome =
@@ -99,6 +106,7 @@ export function moveToTrash(args: MoveToTrashArgs): MoveToTrashOutcome {
       now,
       content,
       assetsDir: getAssetsDir(args.scope, args.group),
+      ...(args.assetRels !== undefined ? { assetRels: args.assetRels } : {}),
       relationSnapshot: args.relationSnapshot,
       keepDays: settings.keepDays,
       restoreCount: args.relationSnapshot?.restoreCount ?? 0,

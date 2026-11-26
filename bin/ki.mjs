@@ -43,6 +43,7 @@ const COMMANDS = {
   'view': 'src/view.ts',
   'doc': 'src/doc.ts',
   'tag': 'src/tag.ts',
+  'assets': 'src/assets.ts',
   'user': 'src/user.ts',
   'config': 'src/config.ts',
   'doctor': 'src/doctor.ts',
@@ -104,6 +105,7 @@ ki - AI 知识索引整理工具 (knowledge-indexer)
   view              知识视图管理：list / show / create / rename / add / remove / delete（多个 scope 的只读聚合）
   doc               向量文档管理：list / delete
   tag               向量 tag 发现：list（只读，含文档数）
+  assets            附件治理：gc（找没被任何文档引用的图片，默认 dry-run）
   user              Web 登录账号：create / list / reset-password / set-role / disable / enable / delete
   config            配置管理：init（生成 YAML）
   doctor            配置诊断（apiKey/连通性/维度/目录）

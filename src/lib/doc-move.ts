@@ -18,6 +18,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { getLocalKbDir } from './scope.js';
+import { extractKbBody } from './content-vector-match.js';
+// 附件搬运（#102）：跨 group 移动时，图片必须跟着正文一起走
+import { collectGroupAssetRefs, copyAssetFiles, deleteOrphans, listDocAssetFiles } from './asset-orphan.js';
 import { loadGroupCache } from './group-cache.js';
 import { readJson } from './store.js';
 import { activeDrafts, contentRevision } from './relation-edit-draft.js';
@@ -57,6 +60,20 @@ export interface MoveDocumentResult {
   to: { scope: string; group: string; relation: string };
   source: SourceMovePlan;
   indexMode: 'dense' | 'fts';
+  /**
+   * 附件搬运结果（#102）：只有**跨 Group** 移动时出现。
+   *
+   * 同组改名不动附件（相对引用不变），所以那种情况不返回本字段。
+   */
+  assets?: {
+    /** 复制到目标 Group 的文件数 */
+    copied: number;
+    copiedBytes: number;
+    /** 目标已有内容相同的同名文件（本来就共用同一张图） */
+    shared: number;
+    /** 从原 Group 清掉的图（原组已无其它文档引用它们） */
+    removedFromSource: number;
+  };
   warnings: string[];
 }
 
@@ -141,7 +158,10 @@ export async function moveDocument(input: MoveDocumentInput): Promise<MoveDocume
   // ─── 预检①：源文档存在（分片 + 正文两层，缺一即 404，两者口径与编辑器一致）───
   const record = loadGroupCache(scope, group)?.hot_relations.find((item) => item.text === relation);
   if (!record) reject(404, 'DOC_NOT_FOUND', `文档不存在：${group} / ${relation}`);
-  const content = readJson<Record<string, string>>(getLocalKbDir(scope, group))?.[relation];
+  // 整组读一次：正文用 extractKbBody（条目值可能是 string，也可能是 {moduleInfo|content}），
+  // 附件引用统计复用同一份
+  const kbRaw = readJson<Record<string, unknown>>(getLocalKbDir(scope, group));
+  const content = extractKbBody(kbRaw?.[relation]);
   if (typeof content !== 'string') reject(404, 'DOC_NOT_FOUND', '文档原文不存在');
   if (group === targetGroup && relation === targetRelation) {
     reject(400, 'SAME_TARGET', '目标 Group 与文档名称都未变化');
@@ -197,6 +217,45 @@ export async function moveDocument(input: MoveDocumentInput): Promise<MoveDocume
     }
   };
 
+  /**
+   * ─── 第 1.5 步：把这篇引用的图复制到目标 Group（仅跨 Group）───
+   *
+   * 为什么复制而不是改正文引用：正文里是 `./images/x.svg` 这种**相对引用**，只要图片
+   * 在目标 group 的 assets 下保持同样相对路径就不用动正文（改正文会牵动向量与 revision）。
+   *
+   * 源 group 的图**先不删**：第 3 步清旧位置失败时要能整体回滚。删除放在最后一步。
+   */
+  const crossGroup = group !== targetGroup;
+  const docAssets = crossGroup ? listDocAssetFiles(scope, group, relation, kbRaw) : [];
+  const assetMove = crossGroup
+    ? copyAssetFiles(scope, group, targetGroup, docAssets.map((file) => file.rel))
+    : { created: [] as string[], skipped: [] as string[], conflicts: [] as string[], failed: [] as string[], bytes: 0 };
+  if (assetMove.created.length > 0) {
+    warnings.push(`已复制 ${assetMove.created.length} 个附件到「${targetGroup}」（${assetMove.bytes} 字节）`);
+  }
+  if (assetMove.conflicts.length > 0) {
+    // 保留目标组那份：静默覆盖会换掉目标组其它文档正在用的图，比"新文档显示错图"更糟
+    warnings.push(
+      `目标 Group 已有同名但内容不同的附件，已保留目标那份（本文档会引用它）：${assetMove.conflicts.slice(0, 5).join(', ')}`
+      + (assetMove.conflicts.length > 5 ? ` 等 ${assetMove.conflicts.length} 个` : ''),
+    );
+  }
+  if (assetMove.failed.length > 0) {
+    // 复制失败与「同名冲突」是两件事：这里是真没能搬过去，目标组里这些图会 404
+    warnings.push(
+      `有 ${assetMove.failed.length} 个附件未能复制到「${targetGroup}」（${assetMove.failed.slice(0, 5).join(', ')}`
+      + `${assetMove.failed.length > 5 ? ' …' : ''}）：目标组里这些图会取不到，请手工补上`,
+    );
+  }
+  const rollbackAssets = (): void => {
+    if (assetMove.created.length === 0) return;
+    const undone = deleteOrphans(scope, assetMove.created.map((rel) => ({ group: targetGroup, rel })));
+    if (undone.errors.length > 0) {
+      warnings.push(`附件回滚不完整：${undone.errors.slice(0, 3).join('; ')}`);
+    }
+    assetMove.created = [];
+  };
+
   // ─── 第 2 步：落到目标位置（组树 / KB / 分片 / 向量 / FTS 一次做完）───
   const indexMode = relationIndexMode(record as Relation);
   const tags = Array.isArray((record as { tags?: string[] }).tags) ? ((record as { tags?: string[] }).tags as string[]) : [];
@@ -221,6 +280,7 @@ export async function moveDocument(input: MoveDocumentInput): Promise<MoveDocume
     // 先尽力清掉目标位置那一份，再回滚源文件，最后**按事实**告知还剩什么（不猜）。
     await executeDeleteRelation({ scope, group: targetGroup, relation: targetRelation, wikiDelete: false, skipDenseDelete: true });
     const leftover = loadGroupCache(scope, targetGroup)?.hot_relations.some((item) => item.text === targetRelation) ?? false;
+    rollbackAssets();
     rollbackSource();
     reject(500, 'MOVE_INDEX_FAILED',
       `写入目标 Group 失败：${writeResult.error}；`
@@ -237,6 +297,7 @@ export async function moveDocument(input: MoveDocumentInput): Promise<MoveDocume
     const undo = await executeDeleteRelation({
       scope, group: targetGroup, relation: targetRelation, wikiDelete: false, skipDenseDelete: true,
     });
+    rollbackAssets();
     rollbackSource();
     reject(500, 'MOVE_PARTIAL',
       `目标 Group 已写入，但旧位置清理失败：${removed.error}；`
@@ -246,12 +307,47 @@ export async function moveDocument(input: MoveDocumentInput): Promise<MoveDocume
       { retryable: true, source: source.moved ? 'moved' : 'unchanged' });
   }
 
+  /**
+   * ─── 第 4 步：清理原 Group 里已无引用的图 ───
+   *
+   * 判据必须放在「清掉旧位置之后」：此时原 group 的 KB 里已经没有这篇文档，
+   * 差集天然等于「原组不再有人引用」。共享图会留在原组（其它文档还在用）。
+   *
+   * 失败只记 warning：文档已经移动成功，附件清理是收尾工作，不能倒过来判定移动失败
+   * （那会让用户重复执行一次已经完成的移动）。
+   */
+  let removedFromSource = 0;
+  if (crossGroup && docAssets.length > 0) {
+    const kbAfter = readJson<Record<string, unknown>>(getLocalKbDir(scope, group));
+    const stillReferenced = collectGroupAssetRefs(kbAfter);
+    const removable = docAssets
+      .filter((file) => !stillReferenced.has(file.rel))
+      .map((file) => ({ group, rel: file.rel }));
+    if (removable.length > 0) {
+      const cleaned = deleteOrphans(scope, removable);
+      removedFromSource = cleaned.deleted;
+      if (cleaned.errors.length > 0) {
+        warnings.push(`原 Group 附件清理未完成：${cleaned.errors.slice(0, 3).join('; ')}`);
+      }
+    }
+  }
+
   return {
     ok: true,
     from: { scope, group, relation },
     to: { scope, group: targetGroup, relation: targetRelation },
     source,
     indexMode,
+    ...(crossGroup
+      ? {
+        assets: {
+          copied: assetMove.created.length,
+          copiedBytes: assetMove.bytes,
+          shared: assetMove.skipped.length,
+          removedFromSource,
+        },
+      }
+      : {}),
     warnings,
   };
 }

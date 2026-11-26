@@ -527,70 +527,13 @@ export function collectMarkdownFiles(sourceDir: string, extensions: string[] = D
 }
 
 // ─── 附件（本地图片）收集（REQ-20260904-001）───────────────
+// 引用抽取与「本地相对路径」判定的**唯一实现**在 `markdown-image-refs.ts`：
+// 纯字符串处理，被导入内核 / asset-image / 删除治理侧（asset-orphan）三方共用。
+// 这里 import 后 re-export，既有 `from './import.js'` 的调用方无需改动。
 
-/** markdown 图片语法：![alt](url) / ![alt](url "title")；URL 允许含空格（形态 2，导入侧宽松收集，前端渲染时再编码） */
-const MD_IMAGE_RE = /!\[[^\]]*\]\(([^)]+)\)/g;
-/** HTML 写法：<img src="url"> / <img src='url'> / <img src=url> */
-const HTML_IMG_RE = /<img\b[^>]*?\ssrc\s*=\s*["']?([^"'\s>]+)["']?/gi;
+import { extractImageRefs, isCollectibleRelativeAsset } from './markdown-image-refs.js';
 
-/** 剥离 markdown 图片 URL 尾部的 title 部分（` "..."` / ` '...'`） */
-function stripImageTitle(raw: string): string {
-  return raw.replace(/\s+["'][^"']*["']\s*$/, '').trim();
-}
-
-/** 归一化图片引用 URL：剥 CommonMark 尖括号 destination（`![a](<p q.png>)`）、去尾部 title 与 #fragment */
-function normalizeRefUrl(raw: string): string {
-  let u = stripImageTitle(raw).trim();
-  const angled = /^<([\s\S]*)>$/.exec(u);
-  if (angled) u = angled[1].trim();
-  return u.replace(/#.*$/, '');
-}
-
-/**
- * 按代码围栏（``` / ~~~）切分，仅对围栏外文本执行 extract（P2：防代码块内的示例图片
- * 被当真实引用收集 → 无谓告警；前端同源保护见 MarkdownPreview.encodeImageSpaces）
- */
-function outsideCodeFences(md: string, extract: (seg: string) => void): void {
-  const lines = md.split('\n');
-  let inFence = false;
-  let buf: string[] = [];
-  const flush = (): void => {
-    if (buf.length > 0) {
-      extract(buf.join('\n'));
-      buf = [];
-    }
-  };
-  for (const line of lines) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      flush();
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    buf.push(line);
-  }
-  flush();
-}
-
-/** 提取 md 原文中的全部图片引用 URL（markdown 语法 + HTML <img src>；围栏外；不去重、不过滤） */
-export function extractImageRefs(mdText: string): string[] {
-  const out: string[] = [];
-  outsideCodeFences(mdText, (seg) => {
-    // 顺序语义：先遍历完 markdown 语法、再遍历 HTML <img>（非文档出现顺序）
-    for (const m of seg.matchAll(MD_IMAGE_RE)) out.push(normalizeRefUrl(m[1]));
-    for (const m of seg.matchAll(HTML_IMG_RE)) out.push(normalizeRefUrl(m[1]));
-  });
-  return out.filter((u) => u.length > 0);
-}
-
-/** 是否为“可收集的本地相对路径”：排除任何 scheme（http/https/file/data）、协议相对、posix/windows 绝对路径与锚点 */
-export function isCollectibleRelativeAsset(url: string): boolean {
-  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(url)) return false;
-  if (url.startsWith('/')) return false;
-  if (/^[a-zA-Z]:[\\/]/.test(url)) return false;
-  if (url.startsWith('#')) return false;
-  return true;
-}
+export { extractImageRefs, isCollectibleRelativeAsset };
 
 export interface AssetCollectResult {
   /** 已复制的附件相对路径（相对 assets 目录，posix 风格） */

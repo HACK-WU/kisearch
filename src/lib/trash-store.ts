@@ -199,8 +199,15 @@ export interface WriteTrashArgs {
   now: number;
   /** 原文（local KB 内容）；空串表示无原文可留 */
   content: string;
-  /** 附件目录；存在则整体复制 */
+  /** 附件目录；存在则整体复制（未给 `assetRels` 时的旧行为） */
   assetsDir?: string;
+  /**
+   * 只复制这些相对路径的附件（`assetRels` 来自文档正文的引用，见 #102）。
+   *
+   * 给了就**不再整组复制**：删一篇只备份它用到的图。显式空数组 = 这篇没有图，
+   * 结果与「没有 assetsDir」一致。传 `undefined` 才退回全量复制（组快照等旧调用方）。
+   */
+  assetRels?: string[];
   relationSnapshot?: Relation;
   keepDays: number;
   restoreCount?: number;
@@ -236,7 +243,7 @@ function dirSizeBytes(dir: string): number {
  * 快照失败即中止删除（见 S-04 §3.1 失败语义）。
  */
 export function writeTrashItem(args: WriteTrashArgs): TrashItem {
-  const { scope, group, relation, reason, now, content, assetsDir, relationSnapshot, keepDays } = args;
+  const { scope, group, relation, reason, now, content, assetsDir, assetRels, relationSnapshot, keepDays } = args;
   const dirName = resolveDirName(scope, group, relation, now);
   const target = trashItemDir(scope, group, dirName);
 
@@ -249,8 +256,28 @@ export function writeTrashItem(args: WriteTrashArgs): TrashItem {
   let hasAssets = false;
   if (assetsDir && fs.existsSync(assetsDir)) {
     const dest = path.join(target, 'assets');
-    fs.cpSync(assetsDir, dest, { recursive: true });
-    hasAssets = true;
+    if (assetRels === undefined) {
+      // 旧行为（组快照等）：整目录复制
+      fs.cpSync(assetsDir, dest, { recursive: true });
+      hasAssets = true;
+    } else if (assetRels.length > 0) {
+      /**
+       * 按引用复制（#102）：单篇删除只备份它用到的图。
+       *
+       * 为什么不会丢恢复能力：其它图从未被删除，仍在 `{group}/assets/` 里；
+       * 恢复时 `restoreFromTrash` 把条目内的副本合并复制回去（同名覆盖，幂等）。
+       */
+      const root = path.resolve(assetsDir);
+      for (const rel of assetRels) {
+        const src = path.resolve(root, rel);
+        if (src !== root && !src.startsWith(root + path.sep)) continue; // 越界：跳过
+        if (!fs.existsSync(src)) continue;
+        const dst = path.join(dest, rel);
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+        hasAssets = true;
+      }
+    }
   }
 
   // 快照去掉索引入口字段：恢复时必须重建，沿用旧 ID 会与残留索引撞车

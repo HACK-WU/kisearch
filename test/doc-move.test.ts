@@ -22,7 +22,7 @@ const dataDir = path.join(fixture, 'kb');
 const vectorDir = path.join(fixture, 'vector');
 const configPath = path.join(fixture, 'config.json');
 
-const CASES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'] as const;
+const CASES = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'] as const;
 const scopes = CASES.map((name) => `move-${name}`);
 const sourceDirs: Record<string, string> = {};
 for (const name of scopes) sourceDirs[name] = path.join(fixture, `source-${name}`);
@@ -37,7 +37,7 @@ process.env.KI_CONFIG_PATH = configPath;
 
 const { resetConfigCache } = await import('../src/lib/config.js');
 const { initScope, readJson, writeJson } = await import('../src/lib/store.js');
-const { getRelationsCachePath, getLocalKbDir, getGroupIndexPath } = await import('../src/lib/scope.js');
+const { getRelationsCachePath, getLocalKbDir, getGroupIndexPath, getAssetsDir } = await import('../src/lib/scope.js');
 // 首次写入会触发「旧单文件 → 分片」惰性迁移，落盘后旧文件被改名：读分片必须走 layout 感知入口
 const { loadCacheShape } = await import('../src/lib/group-cache.js');
 const { moveDocument } = await import('../src/lib/doc-move.js');
@@ -53,6 +53,8 @@ after(async () => {
 const fromGroup = '预警分析';
 const relation = 'alert-search-v2';
 const body = '# 告警检索 v2\n\n正文内容';
+/** 跨 Group 移动的目标组（附件用例复用） */
+const toGroup = 'stages/3-网络与服务暴露';
 
 /** 造一份「一个组一篇文档 + 一份 wiki 源文件」的初始状态 */
 function seed(scope: string): void {
@@ -82,6 +84,57 @@ function seed(scope: string): void {
   const srcFile = path.join(sourceDirs[scope], fromGroup, `${relation}.md`);
   fs.mkdirSync(path.dirname(srcFile), { recursive: true });
   fs.writeFileSync(srcFile, body);
+}
+
+/**
+ * 造一份「带附件」的初始状态：源组 N 篇（本篇 + others）+ 源组/目标组的 assets。
+ *
+ * `others` 用来验证「共享图不能跟着走」—— 原组还有文档在引用它。
+ */
+function seedAssets(scope: string, opts: {
+  body: string;
+  others?: Record<string, string>;
+  srcAssets?: Record<string, string>;
+  dstAssets?: Record<string, string>;
+}): void {
+  resetConfigCache();
+  initScope(scope);
+  const hot = (text: string, extra: Record<string, unknown> = {}) => ({
+    id: `rel_${text}`,
+    text,
+    score: 0,
+    useCount: 1,
+    lastUsedTime: null,
+    ftsIds: [`fts-${text}`],
+    ftsIndexComplete: true,
+    ...extra,
+  });
+  const cachePath = getRelationsCachePath(scope);
+  const cache = readJson<any>(cachePath)!;
+  cache.groups = {
+    [fromGroup]: {
+      hot_relations: [
+        hot(relation, { sourcePath: `${fromGroup}/${relation}.md` }),
+        ...Object.keys(opts.others ?? {}).map((text) => hot(text)),
+      ],
+      keywords: [],
+    },
+  };
+  writeJson(cachePath, cache);
+
+  const kbPath = getLocalKbDir(scope, fromGroup);
+  fs.mkdirSync(path.dirname(kbPath), { recursive: true });
+  writeJson(kbPath, { [relation]: opts.body, ...(opts.others ?? {}) });
+
+  const writeAssets = (target: string, files: Record<string, string> | undefined): void => {
+    for (const [rel, content] of Object.entries(files ?? {})) {
+      const abs = path.join(getAssetsDir(scope, target), ...rel.split('/'));
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content);
+    }
+  };
+  writeAssets(fromGroup, opts.srcAssets);
+  writeAssets(toGroup, opts.dstAssets);
 }
 
 describe('doc move', () => {
@@ -237,5 +290,51 @@ describe('doc move', () => {
     );
     assert.equal(fs.readFileSync(occupied, 'utf8'), '别人的文件');
     assert.equal(fs.existsSync(path.join(sourceDirs[scope], fromGroup, `${relation}.md`)), true);
+  });
+
+  it('跨 Group 移动搬走本文档的图：原组独占的清掉、共享的留下（#102）', async () => {
+    const scope = scopes[8];
+    seedAssets(scope, {
+      body: '# 带图\n\n![a](./only.png)\n![s](./shared.png)',
+      // 兄弟文档也引用 shared.png：删了会破图
+      others: { sibling: '# 兄弟\n\n![s](./shared.png)' },
+      srcAssets: { 'only.png': 'ONLY', 'shared.png': 'SHARED' },
+    });
+    const result = await moveDocument({
+      scope, group: fromGroup, relation, targetGroup: toGroup,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.assets?.copied, 2, '两张图都要复制到目标组');
+    assert.equal(result.assets?.shared, 0);
+    assert.equal(result.assets?.removedFromSource, 1, 'only.png 原组已无人引用');
+
+    const dstFiles = fs.readdirSync(getAssetsDir(scope, toGroup)).sort();
+    assert.deepEqual(dstFiles, ['only.png', 'shared.png'], '目标组要拿到两张图，正文引用才不会破');
+    const srcFiles = fs.readdirSync(getAssetsDir(scope, fromGroup)).sort();
+    assert.deepEqual(srcFiles, ['shared.png'], '共享图必须留在原组，否则兄弟文档破图');
+    assert.equal(fs.readFileSync(path.join(getAssetsDir(scope, fromGroup), 'shared.png'), 'utf8'), 'SHARED');
+  });
+
+  it('目标组已有同名不同内容的图：保留目标那份并给出 warning（不静默覆盖）', async () => {
+    const scope = scopes[9];
+    seedAssets(scope, {
+      body: '# 冲突\n\n![x](./logo.png)',
+      srcAssets: { 'logo.png': 'SOURCE' },
+      dstAssets: { 'logo.png': 'TARGET' },
+    });
+    const result = await moveDocument({
+      scope, group: fromGroup, relation, targetGroup: toGroup,
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.assets?.copied, 0, '目标已有同名文件时不复制');
+    assert.ok(
+      result.warnings.some((line) => line.includes('同名但内容不同')),
+      `应有冲突 warning，实际：${JSON.stringify(result.warnings)}`,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(getAssetsDir(scope, toGroup), 'logo.png'), 'utf8'),
+      'TARGET',
+      '目标组那份不能被覆盖（它可能被目标组其它文档引用）',
+    );
   });
 });

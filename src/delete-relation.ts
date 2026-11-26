@@ -47,6 +47,8 @@ import { resolveWikiRootDir } from './lib/wiki-sync.js';
 import { ftsDeleteByIds } from './lib/fts-client.js';
 import { activeDrafts } from './lib/relation-edit-draft.js';
 import { moveToTrash, purgeExpired } from './lib/trash-service.js';
+// 附件引用统计（#102）：删除时算「哪些图只有这篇引用」并只备份这些图
+import { collectGroupAssetRefs, listAssetFiles } from './lib/asset-orphan.js';
 import type { TrashReason } from './lib/trash-store.js';
 import type { Relation } from './lib/scoring.js';
 
@@ -117,6 +119,18 @@ export interface DeleteResult {
     reason: TrashReason;
     expiresAt: number;
     ttlDays: number;
+  };
+  /**
+   * 附件（#102）：删完会变成**孤儿**的图片 —— 只有本文档引用它们的那些。
+   *
+   * 只报告、不删除。清理走 `ki assets gc`（默认 dry-run，可审计）：
+   * 删文件是不可逆操作，不该与「删文档」耦合进同一次点击。
+   */
+  assetsOrphan?: {
+    count: number;
+    bytes: number;
+    /** 前几条相对路径（assets 目录下），便于一眼看出是哪张图 */
+    sample: string[];
   };
   reason?: string;
 }
@@ -217,6 +231,28 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
     }
 
     /**
+     * 0.-1 整组正文读一次（附件引用 / 内容向量重算 / 检索兜底归属三处共用）。
+     *
+     * **必须在删除任何数据之前读**：删完就再也取不回来，向量重算只能退回脆弱兜底。
+     */
+    const groupKb = (() => {
+      try {
+        return readJson<Record<string, unknown>>(getLocalKbDir(scope, resolvedGroup)) ?? {};
+      } catch {
+        return {} as Record<string, unknown>;
+      }
+    })();
+
+    /**
+     * 0.-0 附件（#102）：本文档引用了哪些图、其中哪些删完会成孤儿。
+     *
+     * 复用同一份 `groupKb`（不额外读盘）：判据是「整组正文的引用差集」，
+     * 不引入引用计数表 —— 理由见 `lib/asset-orphan.ts` 头注释（7 个维护点 vs 毫秒级扫描）。
+     */
+    const assetInfo = summarizeRelationAssets(scope, resolvedGroup, relation, groupKb);
+    if (assetInfo.orphan) result.assetsOrphan = assetInfo.orphan;
+
+    /**
      * 0. 回收站快照（REQ-20261113-004 · S-04 §3.1）
      *
      * **必须在删除任何数据之前成功**：快照失败即中止删除 —— 「删了但没备份」的窗口
@@ -241,6 +277,12 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
         relation,
         reason: params.trashReason ?? 'manual',
         relationSnapshot: rel as unknown as Relation | undefined,
+        /**
+         * 只备份本文档引用的图（#102）。缺省传 `undefined` 会退回「整个 group 的 assets
+         * cpSync」——删一篇就把同组几十 MB 图全复制一份，而恢复时其实只需要这一篇的图
+         * （其余原图从未被删，仍在 assets 目录里）。
+         */
+        assetRels: assetInfo.assetRels,
       });
       if (!trashed.ok) {
         return { ok: false, error: `${trashed.code}: ${trashed.error}（未删除任何数据）` };
@@ -254,27 +296,17 @@ async function executeDeleteRelationLocal(params: DeleteRelationParams): Promise
     }
 
     /**
-     * 0.5 删除前留一份正文 —— 内容向量的唯一可重算来源。
+     * 0.5 正文与兄弟正文（沿用 0.-1 读到的 `groupKb`，不再读盘）。
      *
-     * 内容向量 docId = `sha256(正文 + scope + tag)`（见 vector-client::generateDocId），
+     * 用途一：内容向量 docId = `sha256(正文 + scope + tag)`（见 vector-client::generateDocId），
      * **与 group / relation 无关** ⇒ 正文在手就能精确算回它的全部 docId，不必依赖
-     * `cache.memoryIds`（可能因补写失败、tag 变更或形态切换而过期）也不必依赖语义检索
-     * （检索兜底的判据天然不可能完整）。
-     *
-     * 必须在第 2 步删 local KB **之前**读：删完就再也取不回来，只能退回脆弱兜底。
+     * `cache.memoryIds`（可能因补写失败、tag 变更或形态切换而过期）也不必依赖语义检索。
      * 正文缺失（KB 已无该条，例如只剩 cache 残壳）时为 null。
      *
-     * 同时把**同组其他文档的正文**一并读出来：检索兜底按「正文包含候选内容」判断归属时，
-     * 公共段落（模板头 / 目录 / 引用整段他人原文）会同时被多篇包含 —— 那种命中无法唯一
-     * 归属，必须放弃（误删他人向量不可逆，要重建索引）。一次读盘即可，不额外开销。
+     * 用途二：检索兜底按「正文包含候选内容」判断归属时，公共段落（模板头 / 目录 / 引用整段
+     * 他人原文）会同时被多篇包含 —— 那种命中无法唯一归属，必须放弃（误删他人向量不可逆，
+     * 要重建索引）。所以这里要先备好兄弟正文。
      */
-    const groupKb = (() => {
-      try {
-        return readJson<Record<string, unknown>>(getLocalKbDir(scope, resolvedGroup)) ?? {};
-      } catch {
-        return {} as Record<string, unknown>;
-      }
-    })();
     const kbContent = extractKbBody(groupKb[relation]);
     const siblingBodies = Object.entries(groupKb)
       .filter(([key]) => key !== relation)
@@ -721,6 +753,45 @@ async function deleteRelationVector(
 // wiki 源目录统一由 wiki-sync.ts::resolveWikiRootDir 解析（source 块须是目录才算数）：
 // 单文件导入时 source.dir 是文件路径，当目录用只会定位到 `file/<sourcePath>` 这种
 // 必然不存在的路径（静默不删 wiki 文件）。
+
+/**
+ * 附件（#102）：为「删除单篇」算出两份信息。
+ *
+ * - `assetRels`：本文档引用了、且磁盘上确实存在的 assets 相对路径 → 回收站只备份这些；
+ * - `orphan`：其中**只有本文档引用**的那些 → 删完即成孤儿，写进回执告知，但**不删文件**
+ *   （清理走 `ki assets gc`：默认 dry-run，可审计）。
+ *
+ * 判据 = 整组正文的引用差集（`lib/asset-orphan.ts` 头注释解释了为什么不引入计数表）。
+ * 任何异常都不阻断删除：附件治理是附属信息，正文与索引才是主数据。
+ */
+function summarizeRelationAssets(
+  scope: string,
+  group: string,
+  relation: string,
+  kb: Record<string, unknown>,
+): { assetRels: string[]; orphan?: { count: number; bytes: number; sample: string[] } } {
+  try {
+    const refsByRel = collectGroupAssetRefs(kb);
+    const bytesByRel = new Map(listAssetFiles(scope, group).map((file) => [file.rel, file.bytes]));
+    const mine: string[] = [];
+    for (const [rel, owners] of refsByRel) {
+      if (owners.has(relation) && bytesByRel.has(rel)) mine.push(rel);
+    }
+    if (mine.length === 0) return { assetRels: [] };
+    const orphanRels = mine.filter((rel) => (refsByRel.get(rel)?.size ?? 0) === 1);
+    if (orphanRels.length === 0) return { assetRels: mine };
+    return {
+      assetRels: mine,
+      orphan: {
+        count: orphanRels.length,
+        bytes: orphanRels.reduce((sum, rel) => sum + (bytesByRel.get(rel) ?? 0), 0),
+        sample: orphanRels.slice(0, 5),
+      },
+    };
+  } catch {
+    return { assetRels: [] };
+  }
+}
 
 /**
  * 在 sourceDir 内删除文件：realpath containment 校验，拒绝符号链接逃逸。
