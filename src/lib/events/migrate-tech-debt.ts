@@ -11,15 +11,17 @@
  *      动了就是数据漂移），可见性 / 停用状态也不碰；
  *   3. **写盘前备份**：备份失败即中止，宁可不迁也不要在没有回滚点时改用户数据。
  *
+ * 为什么**不走 `updateType`**（2026-11-26 起）：那条路径会顺手把「已关闭」补到末位
+ * （末位统一规则），与本函数「只插中间、不删不改」的承诺冲突。
+ * 补末位 + 降档 + 存量事件吸附由 `migrate-closing-stage.ts` 单独负责，两者可任意顺序跑。
+ *
  * CLI 包装在 `src/event-types.ts`；逻辑留在这里，便于测试直接 import（不触发 commander）。
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
-
-import { readEventTypes } from './store.js';
-import { updateType } from './type-service.js';
-import { getKbDir } from '../scope.js';
+import { readTypesDoc, writeTypesDoc } from './store.js';
+import { backupTypesFile } from './migrate-backup.js';
+import { MAX_STAGES } from './type-service.js';
+import { GovernanceError } from '../governance-errors.js';
 import { withScopeWriteLock } from '../scope-write-lock.js';
 import type { EventStage, Visibility } from './types.js';
 
@@ -49,17 +51,11 @@ export interface MigrateResult {
   backupPath?: string;
 }
 
-function typesFilePath(scope: string): string {
-  return path.join(getKbDir(scope), '.events', '_types.json');
-}
-
-/** 写盘前留一份备份；文件不存在（新 scope）返回 null —— 那种库本来就用内置定义，无需迁移 */
-function backupTypesFile(scope: string): string | null {
-  const src = typesFilePath(scope);
-  if (!fs.existsSync(src)) return null;
-  const dest = `${src}.bak`;
-  fs.copyFileSync(src, dest);
-  return dest;
+function maxStageNo(stages: EventStage[]): number {
+  return stages.reduce((m, s) => {
+    const match = /^st_(\d+)$/.exec(s.key);
+    return match ? Math.max(m, Number(match[1])) : m;
+  }, 0);
 }
 
 export async function migrateTechDebtStages(
@@ -68,12 +64,13 @@ export async function migrateTechDebtStages(
 ): Promise<MigrateResult> {
   return withScopeWriteLock(scope, 'event-type-write', async () => {
     /*
-     * 只认**盘上**的记录（`readEventTypes`，不含内置补齐）：
+     * 只认**盘上**的记录（`readTypesDoc`，不含内置补齐）：
      * 迁移的对象是「用户库里那份两阶段自建类型」。盘上没有它时，内置定义本来就是四阶段，
      * 无需迁移 —— 若这里改用 `listTypes`，永远能查到内置的技术债，会误报「已迁移」，
      * 也让「该库没有这个类型」这个真实状态无法表达。
      */
-    const target = readEventTypes(scope).find((t) => t.name === TECH_DEBT);
+    const doc = readTypesDoc(scope);
+    const target = (doc?.types ?? []).find((t) => t.name === TECH_DEBT);
     if (!target) {
       return { ok: true, scope, skipped: `该库没有「${TECH_DEBT}」类型` };
     }
@@ -85,8 +82,8 @@ export async function migrateTechDebtStages(
     }
 
     const stagesBefore = target.stages.map((s) => s.name);
-    type StagePatchLocal = { key?: string; name: string; visibility: Visibility; disabled?: boolean };
-    const toPatch = (s: EventStage): StagePatchLocal => ({
+    type StageDraft = { key?: string; name: string; visibility: Visibility; disabled?: boolean };
+    const toDraft = (s: EventStage): StageDraft => ({
       key: s.key,
       name: s.name,
       visibility: s.visibility,
@@ -96,14 +93,14 @@ export async function migrateTechDebtStages(
     /*
      * 逐个按「前驱」插入，而不是一次性拼数组：半迁移状态下「偿还中」的前驱是「已排期」，
      * 若统一按「待处理之后」插会把顺序排错。
-     * 新阶段不带 key → updateType 分配 st_${maxStageNo+1}，因此 key 可能与位置不同序
+     * 新阶段不带 key → 下面分配 st_${max+1}，因此 key 可能与位置不同序
      * （如 st_1, st_3, st_4, st_2）；key 只作稳定标识，不要求同序。
      */
-    const stages: StagePatchLocal[] = target.stages.map(toPatch);
+    const drafts: StageDraft[] = target.stages.map(toDraft);
     for (const m of missing) {
-      const afterPos = stages.findIndex((s) => s.name === m.after);
+      const afterPos = drafts.findIndex((s) => s.name === m.after);
       const at = afterPos >= 0 ? afterPos + 1 : 0;
-      stages.splice(at, 0, { name: m.name, visibility: m.visibility });
+      drafts.splice(at, 0, { name: m.name, visibility: m.visibility });
     }
 
     if (opts.dryRun) {
@@ -113,13 +110,59 @@ export async function migrateTechDebtStages(
         typeId: target.id,
         added: missing.map((m) => m.name),
         stagesBefore,
-        stagesAfter: stages.map((s) => s.name),
+        stagesAfter: drafts.map((s) => s.name),
         dryRun: true,
       };
     }
 
     const backupPath = backupTypesFile(scope);
-    const next = await updateType(scope, target.id, { revision: target.revision, stages });
+
+    // 已存在阶段原样回填（含 originalName / disabled），新阶段才分配 key
+    const byKey = new Map(target.stages.map((s) => [s.key, s] as const));
+    let stageNo = maxStageNo(target.stages);
+    const finalStages: EventStage[] = drafts.map((d) => {
+      const old = d.key ? byKey.get(d.key) : undefined;
+      if (old) {
+        return {
+          ...old,
+          name: d.name,
+          visibility: d.visibility,
+          ...(d.disabled ? { disabled: true } : {}),
+        };
+      }
+      stageNo += 1;
+      return {
+        key: `st_${stageNo}`,
+        name: d.name,
+        visibility: d.visibility,
+        ...(d.disabled ? { disabled: true } : {}),
+      };
+    });
+
+    /*
+     * 直写绕过了 `validateStages`，这里补回**结构**护栏（数量上限 / 名字唯一）。
+     * 末位名的检查刻意不补：技术债迁移只负责「插中间两段」，末位统一由
+     * migrate-closing-stage 负责 —— 在这里补末位会破坏本函数「只插不改」的承诺。
+     */
+    if (finalStages.length > MAX_STAGES) {
+      throw new GovernanceError(
+        'TYPE_STAGES_TOO_MANY',
+        `插入后阶段数 ${finalStages.length} 超过上限 ${MAX_STAGES}（「${target.name}」），已中止且未写盘`,
+      );
+    }
+    const stageNames = finalStages.map((s) => s.name.trim());
+    if (new Set(stageNames).size !== stageNames.length) {
+      throw new GovernanceError(
+        'TYPE_STAGES_TOO_FEW',
+        `插入后阶段名重复（${stageNames.join(' / ')}），已中止且未写盘`,
+      );
+    }
+
+    const now = Date.now();
+    const next = { ...target, stages: finalStages, revision: target.revision + 1, updatedAt: now };
+    const nextTypes = doc!.types.map((t) => (t.id === target.id ? next : t));
+    writeTypesDoc(scope, { ...doc!, revision: doc!.revision + 1, types: nextTypes });
+
     return {
       ok: true,
       scope,

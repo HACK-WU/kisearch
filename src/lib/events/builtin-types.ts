@@ -4,14 +4,20 @@
  * 三档可见性按阶段递进：隐藏 → 仅全文 → 语义+全文。这样「事件进行中不希望被语义搜到、
  * 但排障时又要能按关键词查」的诉求成立。
  *
+ * 2026-11-26 起**四条内置的末位统一为「已关闭」**（`TERMINAL_STAGE_NAME`）：
+ * 原来各叫 已完成 / 已上线 / 已收敛，看板与 AI 无法统一判断「关没关」。
+ * 被顶下末位的原阶段降为 `fts-only` —— 事件尚未关闭时不该被语义检索召回，
+ * 这与其余中间阶段同档，也避免了「未收口事件的文档已能被语义搜到」。
+ *
  * `terminalAction` 是**类型级**字段（不挂阶段）：收口时按它决定成员文档去留。
  * demo 曾把它挂在阶段上，追加阶段就会静默丢失 —— 见 design/S02 §3.6。
  *
  * 这里的定义是「内存缺省」：`listTypes` 在 `_types.json` 不存在时返回它们，
  * 但**不落盘**（读路径不建目录）；首次写操作时才把当前视图整体写下去。
+ * 因此改本文件对**已落盘**的库无效，需跑 `ki event-types migrate`（见 migrate-closing-stage.ts）。
  */
 
-import type { EventTypeRecord } from './types.js';
+import { TERMINAL_STAGE_NAME, type EventTypeRecord } from './types.js';
 
 /*
  * 曾导出 `BUILTIN_EVENT_TYPE_IDS = ['et_1','et_2','et_3']` 作为「内置」的兜底判据。
@@ -35,7 +41,7 @@ export function buildBuiltinTypes(scope: string, now = 0): EventTypeRecord[] {
         { name: '排查中', visibility: 'hidden' },
         { name: '已定位', visibility: 'fts-only' },
         { name: '修复中', visibility: 'fts-only' },
-        { name: '已关闭', visibility: 'full' },
+        { name: TERMINAL_STAGE_NAME, visibility: 'full' },
       ]),
       terminalAction: 'keep',
       fallbackDays: 90,
@@ -53,7 +59,9 @@ export function buildBuiltinTypes(scope: string, now = 0): EventTypeRecord[] {
         { name: '分析中', visibility: 'hidden' },
         { name: '优化中', visibility: 'fts-only' },
         { name: '已验证', visibility: 'fts-only' },
-        { name: '已完成', visibility: 'full' },
+        // 工作结果的业务节点（保留，不再兼作收口）
+        { name: '已完成', visibility: 'fts-only' },
+        { name: TERMINAL_STAGE_NAME, visibility: 'full' },
       ]),
       terminalAction: 'trash',
       fallbackDays: 90,
@@ -70,7 +78,8 @@ export function buildBuiltinTypes(scope: string, now = 0): EventTypeRecord[] {
       stages: stages([
         { name: '实施中', visibility: 'hidden' },
         { name: '联调中', visibility: 'fts-only' },
-        { name: '已上线', visibility: 'full' },
+        { name: '已上线', visibility: 'fts-only' },
+        { name: TERMINAL_STAGE_NAME, visibility: 'full' },
       ]),
       terminalAction: 'keep',
       fallbackDays: 90,
@@ -96,7 +105,8 @@ export function buildBuiltinTypes(scope: string, now = 0): EventTypeRecord[] {
         { name: '待处理', visibility: 'hidden' },
         { name: '已排期', visibility: 'fts-only' },
         { name: '偿还中', visibility: 'fts-only' },
-        { name: '已收敛', visibility: 'full' },
+        { name: '已收敛', visibility: 'fts-only' },
+        { name: TERMINAL_STAGE_NAME, visibility: 'full' },
       ]),
       terminalAction: 'keep',
       fallbackDays: 90,

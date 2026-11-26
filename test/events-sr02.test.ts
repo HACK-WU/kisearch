@@ -111,8 +111,7 @@ describe('① 事件类型', () => {
   });
 
   it('追加阶段 + 改名：新阶段拿到新 key，改名保留 originalName', async () => {
-    // 用自定义类型做增改：改内置 et_1 的阶段会让它的终态从「已关闭」变成新追加的阶段，
-    // 后续所有「流转到已关闭 = 收口」的用例都会失效（真实踩过）
+    // 用自定义类型做增改：改内置 et_1 会让它的阶段链偏离内置定义（真实踩过）
     const created = await createType(scope, {
       name: '阶段演进测试',
       stages: [
@@ -120,6 +119,9 @@ describe('① 事件类型', () => {
         { name: '收尾', visibility: 'full' },
       ],
     });
+    // 2026-11-26：createType 自动补末位「已关闭」，所以这里是三条
+    assert.deepEqual(created.stages.map((s) => s.name), ['起步', '收尾', '已关闭']);
+
     const stages = created.stages.map((s, i) => ({
       key: s.key,
       name: i === 0 ? '起步改' : s.name,
@@ -128,10 +130,10 @@ describe('① 事件类型', () => {
     stages.push({ name: '复盘', visibility: 'full' });
 
     const updated = await updateType(scope, created.id, { revision: created.revision, stages });
-    assert.equal(updated.stages.length, 3);
-    assert.equal(updated.stages[0].name, '起步改');
+    // 追加的「复盘」被插到末位之前：末位恒为「已关闭」，收口入口不会被顶掉
+    assert.deepEqual(updated.stages.map((s) => s.name), ['起步改', '收尾', '复盘', '已关闭']);
     assert.equal(updated.stages[0].originalName, '起步');
-    assert.equal(updated.stages[2].key, 'st_3');
+    assert.equal(updated.stages[2].key, 'st_4');
     assert.equal(updated.revision, created.revision + 1);
   });
 
@@ -160,7 +162,8 @@ describe('① 事件类型', () => {
       ],
     });
     assert.match(created.id, /^et_\d+$/);
-    assert.deepEqual(created.stages.map((s) => s.key), ['st_1', 'st_2']);
+    // 末位「已关闭」由系统自动补，因此拿到的 key 是三条
+    assert.deepEqual(created.stages.map((s) => s.key), ['st_1', 'st_2', 'st_3']);
 
     const event = await createEvent(scope, { title: '用一下', typeId: created.id });
     await assert.rejects(
@@ -320,7 +323,8 @@ describe('③ 收口与终态动作', () => {
       title: '收口 trash', typeId: 'et_2', docs: [{ group: GROUP, name: doc.text }],
     });
 
-    const closed = await transitionEvent(scope, { event: event.id, stage: '已完成' });
+    // 2026-11-26 起「已完成」不再是终态，收口统一走末位「已关闭」
+    const closed = await transitionEvent(scope, { event: event.id, stage: '已关闭' });
     assert.equal(closed.terminalAction, 'trash');
     assert.equal(closed.affected.docs, 1);
 

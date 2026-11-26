@@ -1421,9 +1421,12 @@ export function EventsPage(): JSX.Element {
                       const isCurrent = active?.stageKey === stage.key && active?.typeId === selectedType.id;
                       return (
                         <tr key={stage.key} data-current={isCurrent ? '' : undefined}>
-                          <td>
+                          <td title={i === selectedType.stages.length - 1 ? '末位固定为「已关闭」：收口入口，不可停用 / 改名 / 删除；文档去向看右侧「进入时动作」' : undefined}>
                             <span className="gov-stage-row__idx">{i + 1}</span>
                             {stage.name}
+                            {i === selectedType.stages.length - 1 ? (
+                              <span className="gov-cell-muted" style={{ marginLeft: 6, fontSize: 11 }}>末位·收口</span>
+                            ) : null}
                           </td>
                           <td>
                             <div className="gov-seg gov-seg--vis" role="group" aria-label={`${stage.name} 检索可见性`}>
@@ -1483,6 +1486,8 @@ export function EventsPage(): JSX.Element {
                   <p className="gov-hint">
                     <b>阶段只能追加、不能删除</b>：已有事件停在某阶段后，删除定义会留下悬空状态；
                     要废弃某个阶段请用「停用」—— 新事件不再进入、老事件可停留，并提供「迁移到 X」的引导。
+                    <br />
+                    末位固定为「已关闭」（收口入口）：追加的新阶段会自动插到它之前，它不可停用 / 改名 / 删除。
                   </p>
                 </div>
               </>
@@ -1963,14 +1968,19 @@ export function EventsPage(): JSX.Element {
           type={selectedType}
           busy={busy}
           onClose={() => setAddStageOpen(false)}
-          onSubmit={(name, visibility, action) => {
+          onSubmit={(name, visibility) => {
             setAddStageOpen(false);
-            void patchType((stages, latest) => ({
-              stages: [...stages, { name, visibility }],
-              // 「进入时动作」是**类型级**字段：只有新阶段位居末位时才会生效
-              ...(action ? { terminalAction: action } : {}),
-              ...(latest ? {} : {}),
-            }));
+            /*
+             * 新阶段插到末位之前（2026-11-26）：末位固定为「已关闭」——
+             * 直接追加会顶掉收口入口，该类型从此再也收不了口。
+             * 后端同样会归一，这里让界面与落盘结果一致。
+             */
+            void patchType((stages) => {
+              const terminal = stages[stages.length - 1];
+              return {
+                stages: [...stages.slice(0, -1), { name, visibility }, ...(terminal ? [terminal] : [])],
+              };
+            });
           }}
         />
       ) : null}
@@ -2129,20 +2139,18 @@ export function EventsPage(): JSX.Element {
 /**
  * 追加阶段（demo 弹窗）
  *
- * 与 demo 的一处必要偏差：「进入时动作」在 demo 里挂在阶段行上，本实现是**类型级**字段
- * （DESIGN 缺口②：挂在阶段上时，追加一个阶段会让原终态动作静默失效）。
- * 因此这里只在「新阶段成为末位」时把它写进类型，并在弹窗里说明。
+ * 2026-11-26 起：新阶段**不再**落到末尾 —— 末位固定为「已关闭」（收口入口），
+ * 服务端会把它插到「已关闭」之前，这里如实说明，不再让用户以为自己在改终态。
+ * 「进入时动作」是**类型级**字段（DESIGN 缺口②），仍只在末位那行可配。
  */
 function AddStageModal(args: {
   type: EventTypeView;
   busy: boolean;
   onClose: () => void;
-  onSubmit: (name: string, visibility: Visibility, action: 'keep' | 'trash' | undefined) => void;
+  onSubmit: (name: string, visibility: Visibility) => void;
 }): JSX.Element {
   const [name, setName] = useState('');
   const [visibility, setVisibility] = useState<Visibility>('fts-only');
-  const [action, setAction] = useState<'keep' | 'trash'>(args.type.terminalAction);
-  const becomesTerminal = true; // 追加阶段总在末尾
 
   return (
     <div className="gov-modal-mask" onClick={(e) => { if (e.target === e.currentTarget) args.onClose(); }}>
@@ -2150,7 +2158,7 @@ function AddStageModal(args: {
         <div className="gov-modal__head gov-modal__head--stack">
           <div>追加阶段</div>
           <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>
-            类型「{args.type.name}」现有 {args.type.stages.length} 个阶段，新阶段将排在末尾
+            类型「{args.type.name}」现有 {args.type.stages.length} 个阶段，新阶段将插在末位「已关闭」之前
           </div>
         </div>
         <div className="gov-modal__body">
@@ -2178,24 +2186,10 @@ function AddStageModal(args: {
             <span className="gov-hint">决定这个阶段下的关联文档能否被 ki_search 召回。</span>
           </div>
 
-          {becomesTerminal ? (
-            <div className="gov-field">
-              <span>进入时动作</span>
-              <div className="gov-seg" role="group" aria-label="进入时动作">
-                {([['keep', '保留在库'], ['trash', '移入回收站']] as Array<['keep' | 'trash', string]>).map(([value, label]) => (
-                  <button key={value} aria-pressed={action === value} onClick={() => setAction(value)}>{label}</button>
-                ))}
-              </div>
-              <span className="gov-hint">
-                选「移入回收站」= 事件走到末位阶段时，关联文档自动进回收站（{7} 天内可恢复）。
-                本实现把该动作记在**类型**上，避免以后追加阶段时把原动作覆盖掉。
-              </span>
-            </div>
-          ) : null}
-
           <div className="gov-rowbox">
             <span className="gov-hint">
-              阶段只能追加、不能删除：已有事件停在该阶段后，删除定义会留下悬空状态。要废弃请用「停用」。
+              末位「已关闭」是固定收口阶段：不可停用、不可改名、不可删除。
+              收口时文档去向（保留 / 移入回收站）在末位那行的「进入时动作」里配。
             </span>
           </div>
         </div>
@@ -2204,7 +2198,7 @@ function AddStageModal(args: {
           <button
             className="gov-btn gov-btn--sm gov-btn--primary"
             disabled={args.busy || !name.trim()}
-            onClick={() => args.onSubmit(name.trim(), visibility, becomesTerminal ? action : undefined)}
+            onClick={() => args.onSubmit(name.trim(), visibility)}
           >
             追加阶段
           </button>
@@ -2517,7 +2511,15 @@ function NewEventModal(args: {
 }
 
 
-/** 新建事件类型（demo 弹窗：名称 + 回车加阶段 + 复用已有 + 终态动作） */
+/**
+ * 新建事件类型（demo 弹窗：名称 + 回车加阶段 + 复用已有 + 终态动作）
+ *
+ * 2026-11-26 起末位固定为「已关闭」：弹窗**预置且锁定**（不可删 / 不可移 / 不可拖），
+ * 用户只录中间阶段。与后端 `createType` 的自动补齐同一口径 —— 前端预置是为了让用户
+ * 提交前就看到真实形状，而不是提交后被系统偷偷加一行。
+ */
+const LOCKED_STAGE_NAME = '已关闭';
+
 function NewTypeModal(args: {
   types: EventTypeView[];
   onClose: () => void;
@@ -2532,6 +2534,7 @@ function NewTypeModal(args: {
   const [description, setDescription] = useState('');
   const [stages, setStages] = useState<Array<{ name: string; visibility: Visibility }>>([
     { name: '进行中', visibility: 'hidden' },
+    { name: LOCKED_STAGE_NAME, visibility: 'full' },
   ]);
   const [draft, setDraft] = useState('');
   const [reuseFrom, setReuseFrom] = useState('');
@@ -2546,7 +2549,13 @@ function NewTypeModal(args: {
   const addStage = (): void => {
     const v = draft.trim();
     if (!v) return;
-    setStages((prev) => [...prev, { name: v, visibility: 'hidden' }]);
+    // 末位已有同名：静默忽略（用户可能只是在复述规则，不该因此卡住提交）
+    if (v === LOCKED_STAGE_NAME) {
+      setDraft('');
+      return;
+    }
+    // 插到末位之前：末位是收口入口，不能被新阶段顶掉
+    setStages((prev) => [...prev.slice(0, -1), { name: v, visibility: 'hidden' }, ...prev.slice(-1)]);
     setDraft('');
   };
 
@@ -2555,12 +2564,19 @@ function NewTypeModal(args: {
     if (!id) return;
     const src = args.types.find((t) => t.id === id);
     if (!src) return;
-    setStages(src.stages.map((st) => ({ name: st.name, visibility: st.visibility, })));
+    const copied = src.stages.map((st) => ({ name: st.name, visibility: st.visibility }));
+    const closing = copied.find((s) => s.name === LOCKED_STAGE_NAME);
+    const rest = copied.filter((s) => s !== closing);
+    // 源类型可能是未迁移的老形状（末位叫「已完成 / 已上线」），复制后同样要补末位
+    setStages([...rest, closing ?? { name: LOCKED_STAGE_NAME, visibility: 'full' as Visibility }]);
     setAction(src.terminalAction);
   };
 
   const moveStage = (from: number, to: number): void => {
-    if (to < 0 || to >= stages.length) return;
+    const last = stages.length - 1;
+    // 末位锁定：它自己不动，其它阶段也不能被挪到它之后
+    if (from === last) return;
+    if (to < 0 || to > last - 1) return;
     setStages((prev) => {
       const next = [...prev];
       const [moved] = next.splice(from, 1);
@@ -2576,7 +2592,9 @@ function NewTypeModal(args: {
       <div className="gov-modal">
         <div className="gov-modal__head gov-modal__head--stack">
           <div>新建事件类型</div>
-          <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>先建两条骨架阶段，创建后可逐个追加</div>
+          <div className="gov-hint" style={{ fontWeight: 400, marginTop: 2 }}>
+            已预置「进行中 → 已关闭」两条骨架；中间阶段按需添加，创建后仍可继续追加
+          </div>
         </div>
         <div className="gov-modal__body">
           <label className="gov-field">
@@ -2608,64 +2626,74 @@ function NewTypeModal(args: {
           <div className="gov-field">
             <span>阶段（按回车逐个添加，可拖动排序）</span>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 6 }}>
-              {stages.map((st, i) => (
-                <span
-                  key={`${st.name}-${i}`}
-                  className="gov-badge gov-badge--kb"
-                  draggable
-                  onDragStart={() => { dragFrom.current = i; setDragIndex(i); }}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => {
-                    const from = dragFrom.current;
-                    if (from === null || from === i) return;
-                    moveStage(from, i);
-                    dragFrom.current = null;
-                    setDragIndex(null);
-                  }}
-                  onDragEnd={() => { dragFrom.current = null; setDragIndex(null); }}
-                  style={{ gap: 6, cursor: 'grab', opacity: dragIndex === i ? 0.45 : 1 }}
-                  title="按住拖动可调整阶段顺序"
-                >
-                  {i + 1} {st.name}
-                  {i === stages.length - 1 ? <span style={{ fontSize: 10 }}>终态</span> : null}
-                  <button
-                    className="gov-btn gov-btn--ghost gov-btn--sm"
-                    style={{ padding: '0 4px' }}
-                    title={`点击循环切换可见性（当前：${VIS_TEXT[st.visibility]}）`}
-                    onClick={() => setStages((prev) => prev.map((item, idx) => idx === i
-                      ? { ...item, visibility: CYCLE[(CYCLE.indexOf(item.visibility) + 1) % CYCLE.length] }
-                      : item))}
+              {stages.map((st, i) => {
+                const locked = i === stages.length - 1;
+                return (
+                  <span
+                    key={`${st.name}-${i}`}
+                    className="gov-badge gov-badge--kb"
+                    draggable={!locked}
+                    onDragStart={() => {
+                      if (locked) return;
+                      dragFrom.current = i;
+                      setDragIndex(i);
+                    }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => {
+                      const from = dragFrom.current;
+                      // 丢到末位 = 想挪到它之后，一律无效（末位永远是最后一条）
+                      if (locked || from === null || from === i) return;
+                      moveStage(from, i);
+                      dragFrom.current = null;
+                      setDragIndex(null);
+                    }}
+                    onDragEnd={() => { dragFrom.current = null; setDragIndex(null); }}
+                    style={{ gap: 6, cursor: locked ? 'default' : 'grab', opacity: dragIndex === i ? 0.45 : 1 }}
+                    title={locked ? '末位「已关闭」固定：不可删除 / 不可改名 / 不可移动' : '按住拖动可调整阶段顺序'}
                   >
-                    ●
-                  </button>
-                  <button
-                    className="gov-btn gov-btn--ghost gov-btn--sm"
-                    style={{ padding: '0 4px' }}
-                    disabled={i === 0}
-                    title="前移"
-                    onClick={() => moveStage(i, i - 1)}
-                  >
-                    ←
-                  </button>
-                  <button
-                    className="gov-btn gov-btn--ghost gov-btn--sm"
-                    style={{ padding: '0 4px' }}
-                    disabled={i === stages.length - 1}
-                    title="后移"
-                    onClick={() => moveStage(i, i + 1)}
-                  >
-                    →
-                  </button>
-                  <button
-                    className="gov-btn gov-btn--ghost gov-btn--sm"
-                    style={{ padding: '0 4px' }}
-                    disabled={stages.length <= 1}
-                    onClick={() => setStages((prev) => prev.filter((_, idx) => idx !== i))}
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
+                    {i + 1} {st.name}
+                    {locked ? <span style={{ fontSize: 10 }}>末位·收口</span> : null}
+                    <button
+                      className="gov-btn gov-btn--ghost gov-btn--sm"
+                      style={{ padding: '0 4px' }}
+                      title={`点击循环切换可见性（当前：${VIS_TEXT[st.visibility]}）`}
+                      onClick={() => setStages((prev) => prev.map((item, idx) => idx === i
+                        ? { ...item, visibility: CYCLE[(CYCLE.indexOf(item.visibility) + 1) % CYCLE.length] }
+                        : item))}
+                    >
+                      ●
+                    </button>
+                    <button
+                      className="gov-btn gov-btn--ghost gov-btn--sm"
+                      style={{ padding: '0 4px' }}
+                      disabled={locked || i === 0}
+                      title="前移"
+                      onClick={() => moveStage(i, i - 1)}
+                    >
+                      ←
+                    </button>
+                    <button
+                      className="gov-btn gov-btn--ghost gov-btn--sm"
+                      style={{ padding: '0 4px' }}
+                      // 倒数第二条也不能后移：那会把自己排到末位之后
+                      disabled={locked || i === stages.length - 2}
+                      title="后移"
+                      onClick={() => moveStage(i, i + 1)}
+                    >
+                      →
+                    </button>
+                    <button
+                      className="gov-btn gov-btn--ghost gov-btn--sm"
+                      style={{ padding: '0 4px' }}
+                      disabled={locked || stages.length <= 1}
+                      title={locked ? '末位「已关闭」不可删除' : '删除该阶段'}
+                      onClick={() => setStages((prev) => prev.filter((_, idx) => idx !== i))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                );
+              })}
             </div>
             <input
               className="gov-input"
@@ -2680,8 +2708,8 @@ function NewTypeModal(args: {
               }}
             />
             <span className="gov-hint">
-              先输入的排最前，最后一条自动为「终态」。点圆点按下面三档循环切换：
-              &nbsp;● 语义+全文　○ 仅全文　○ 不可检索
+              先输入的排最前；末位「已关闭」由系统预置并锁定（收口阶段，不可删 / 不可移）。
+              点圆点按下面三档循环切换：&nbsp;● 语义+全文　○ 仅全文　○ 不可检索
             </span>
             <span className="gov-hint">决定这个阶段下的文档能否被 ki_search 召回。</span>
           </div>

@@ -60,7 +60,8 @@ describe('内置类型补齐与认领', () => {
     const names = listTypes(scope).map((t) => t.name);
     assert.ok(names.includes('技术债'), '缺失的内置必须补进来');
     assert.ok(names.includes('需求实现'));
-    assert.equal(listTypes(scope).find((t) => t.name === '技术债')!.stages.length, 4, '补进来的是四阶段版本');
+    // 2026-11-26 起内置都多一条末位「已关闭」（技术债：待处理 → 已排期 → 偿还中 → 已收敛 → 已关闭）
+    assert.equal(listTypes(scope).find((t) => t.name === '技术债')!.stages.length, 5, '补进来的是五阶段版本');
   });
 
   it('② 同名条目被认领：builtin 翻 true，阶段仍以盘上为准', () => {

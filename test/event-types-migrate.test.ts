@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { registerTestScope, cleanupTestConfig } from './test-config.js';
-import { listTypes, updateType } from '../src/lib/events/type-service.js';
+import { listTypes } from '../src/lib/events/type-service.js';
 import { writeTypesDoc } from '../src/lib/events/store.js';
 import { migrateTechDebtStages } from '../src/lib/events/migrate-tech-debt.js';
 import { getKbDir } from '../src/lib/scope.js';
@@ -98,15 +98,10 @@ describe('技术债阶段迁移', () => {
 
   it('③ 半迁移（只缺「偿还中」）只插一条', async () => {
     seedTwoStageDebt(scope, ['待处理', '已排期', '已收敛']);
-    const cur = debtOf(scope);
-    await updateType(scope, cur.id, {
-      revision: cur.revision,
-      stages: [
-        { key: 'st_1', name: '待处理', visibility: 'hidden' },
-        { key: 'st_2', name: '已排期', visibility: 'fts-only' },
-        { key: 'st_3', name: '已收敛', visibility: 'full' },
-      ],
-    });
+    /*
+     * 直接由 seed 造出三阶段形状，**不走 `updateType`**：那条路径会按末位统一规则
+     * 补上「已关闭」（2026-11-26），把「只缺偿还中」这个要测的形状掩盖掉。
+     */
 
     const res = await migrateTechDebtStages(scope);
     assert.deepEqual(res.added, ['偿还中']);

@@ -55,6 +55,12 @@ export const GOVERNANCE_CODE_NUMBERS = {
   EVENT_FORCE_CONFIRM_MISMATCH: 1121,
   /** `force` 只开放给**无关联文档**的事件：有成员时必须先收口或先解绑，否则会留下可见性与索引不一致 */
   EVENT_FORCE_NOT_EMPTY: 1122,
+  /**
+   * 末位阶段不是「已关闭」（2026-11-26）：阶段链的收口入口被统一，末位固定为该名字。
+   * 触发面两条：① 提交的阶段数组末位是别的名字（改名 / 后移）；
+   * ② 存量类型尚未迁移却要写阶段链 —— 文案带 `ki event-types migrate` 的出路。
+   */
+  TERMINAL_STAGE_REQUIRED: 1123,
 
   // ── S-03 可见性（1200-1299）──
   VISIBILITY_INVALID: 1201,

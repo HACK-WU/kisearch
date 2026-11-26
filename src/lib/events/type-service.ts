@@ -12,6 +12,8 @@
  *      用 index 的话拖动一次所有事件就集体漂移一个阶段（S-02 §3.3）；
  *   4. **`terminalAction` 类型级**：不挂阶段。挂在阶段上时，追加一枚阶段就会让原终态
  *      动作失效（demo 的现状）。
+ *   5. **末位名固定为「已关闭」**（2026-11-26）：改名 / 后移 / 删除一律拒绝，创建时自动补、
+ *      追加时自动插到它之前。收口判定按末位 index，靠的正是「末位唯一且语义统一」。
  *
  * 读路径不建目录：`_types.json` 不存在时返回内置 3 类的内存视图，首次写操作才落盘。
  */
@@ -20,10 +22,11 @@ import { withScopeWriteLock } from '../scope-write-lock.js';
 import { GovernanceError } from '../governance-errors.js';
 import { buildBuiltinTypes } from './builtin-types.js';
 import { readTypesDoc, writeTypesDoc, readAllEvents } from './store.js';
-import { EVENT_TYPE_DESCRIPTION_MAX_CHARS } from './types.js';
+import { EVENT_TYPE_DESCRIPTION_MAX_CHARS, TERMINAL_STAGE_NAME } from './types.js';
 import type { EventStage, EventTypeRecord, EventTypesDoc, Visibility } from './types.js';
 
-const MAX_STAGES = 12;
+/** 导出给迁移工具复用：直写 `_types.json` 的路径（migrate-*.ts）绕过了 `validateStages`，需自己兜这两条 */
+export const MAX_STAGES = 12;
 const MIN_STAGES = 2;
 
 /**
@@ -148,6 +151,37 @@ function maxStageNo(stages: EventStage[]): number {
   }, 0);
 }
 
+/**
+ * 把「已关闭」固定到末位（2026-11-26 用户拍板）。
+ *
+ * 三种输入都必须收敛到同一形状：
+ *   · 完全没有 → 用 `makeTerminal()` 造一条追加；
+ *   · 在中间 → 提到末位（**保留原 key 与可见性**：事件位置存 key，换 key 就是数据漂移）；
+ *   · 同名多条 → 只留第一条，其余丢弃（否则「阶段名必须唯一」会报错，用户还看不出该删哪条）。
+ *
+ * **不动 `disabled`**：末位被停用必须由 `validateStages` 显式报 1108 ——
+ * 这里静默清掉会让用户以为「点了停用却没生效」。
+ */
+function pinTerminalStage(stages: EventStage[], makeTerminal: () => EventStage): EventStage[] {
+  const last = stages[stages.length - 1];
+  const closingCount = stages.filter((s) => s.name.trim() === TERMINAL_STAGE_NAME).length;
+  // 已经唯一且在最末：原样返回，绝不重排（重排会换掉末位 key，停在那里的事件就成了悬空引用）
+  if (last && last.name.trim() === TERMINAL_STAGE_NAME && closingCount === 1) return stages;
+
+  /*
+   * 优先保留**末位那条**（哪怕它叫别的名字、另有同名在中间）：
+   * 末位的 key 被已收口事件引用着，换 key 等于让那些事件指向不存在的阶段。
+   */
+  const closing = last?.name.trim() === TERMINAL_STAGE_NAME
+    ? last
+    : stages.find((s) => s.name.trim() === TERMINAL_STAGE_NAME);
+  const rest = stages.filter((s) => s !== closing && s.name.trim() !== TERMINAL_STAGE_NAME);
+  if (closingCount > 1) {
+    console.warn(`[events] 阶段链里有多条「${TERMINAL_STAGE_NAME}」，只保留末位那条`);
+  }
+  return [...rest, closing ?? makeTerminal()];
+}
+
 function validateStages(stages: EventStage[]): void {
   if (!Array.isArray(stages) || stages.length < MIN_STAGES) {
     throw new GovernanceError('TYPE_STAGES_TOO_FEW', `事件类型至少需要 ${MIN_STAGES} 个阶段（末位为终态）`);
@@ -162,7 +196,21 @@ function validateStages(stages: EventStage[]): void {
   if (new Set(names).size !== names.length) {
     throw new GovernanceError('TYPE_STAGES_TOO_FEW', `阶段名必须唯一：${names.join(' / ')}`);
   }
-  if (stages[stages.length - 1].disabled) {
+  /*
+   * 末位名固定（2026-11-26）：收口动作挂在「到达末位」，末位名各类型不一（已完成 / 已上线 /
+   * 已收敛）时看板与 AI 无法统一判断「关没关」。改名先于停用检查 —— 名字错时先纠正名字，
+   * 报「不能停用」会让人以为只需取消停用。
+   */
+  const last = stages[stages.length - 1];
+  if (last.name.trim() !== TERMINAL_STAGE_NAME) {
+    throw new GovernanceError(
+      'TERMINAL_STAGE_REQUIRED',
+      `末位阶段必须是「${TERMINAL_STAGE_NAME}」（收到「${last.name}」）：它是唯一的收口入口，`
+        + '改名会让该类型的事件永远停在中间阶段',
+      { expected: TERMINAL_STAGE_NAME, received: last.name },
+    );
+  }
+  if (last.disabled) {
     throw new GovernanceError(
       'TERMINAL_STAGE_CANNOT_DISABLE',
       '末位阶段是终态，不能停用（停用后该类型的事件永远收不了口）',
@@ -189,15 +237,23 @@ export async function createType(scope: string, input: CreateTypeInput): Promise
       throw new GovernanceError('TYPE_IN_USE', `类型名「${name}」已存在`);
     }
 
-    const rawStages = input.stages ?? [
+    /*
+     * 缺省骨架只给一个中间阶段，末位由 `pinTerminalStage` 补 ——
+     * 自建类型也必须有「已关闭」（2026-11-26 用户要求），不再让用户自己记着加。
+     */
+    const rawStages = input.stages?.length ? input.stages : [
       { name: '进行中', visibility: 'hidden' as Visibility },
-      { name: '已完成', visibility: 'full' as Visibility },
     ];
-    const stages: EventStage[] = rawStages.map((s, i) => ({
+    const baseStages: EventStage[] = rawStages.map((s, i) => ({
       key: `st_${i + 1}`,
       name: s.name.trim(),
       visibility: s.visibility,
       ...(s.disabled ? { disabled: true } : {}),
+    }));
+    const stages = pinTerminalStage(baseStages, () => ({
+      key: `st_${maxStageNo(baseStages) + 1}`,
+      name: TERMINAL_STAGE_NAME,
+      visibility: 'full' as Visibility,
     }));
     validateStages(stages);
 
@@ -255,6 +311,7 @@ export async function updateType(scope: string, id: string, patch: UpdateTypePat
     let stages = current.stages;
     if (patch.stages) {
       const existingByKey = new Map(current.stages.map((s) => [s.key, s] as const));
+      const terminalKey = current.stages[current.stages.length - 1]?.key;
       const nextKeys = new Set(patch.stages.map((s) => s.key).filter((k): k is string => Boolean(k)));
 
       // 已有阶段不许消失（只追加）
@@ -271,6 +328,36 @@ export async function updateType(scope: string, id: string, patch: UpdateTypePat
       stages = patch.stages.map((s) => {
         const old = s.key ? existingByKey.get(s.key) : undefined;
         if (old) {
+          const nextStageName = s.name.trim();
+          /*
+           * 末位名的两端都要拦 —— 归一函数无法替用户决定意图：
+           *   · 把末位改名 → 归一只能理解成「新增中间阶段 + 补一条末位」，用户会看到凭空多一行；
+           *   · 把别的阶段改名成「已关闭」→ 出现两条同名，保留哪条取决于数组顺序，等于随机换 key。
+           * 两者都 fail-loud，文案指向「末位固定」这条规则。
+           */
+          /*
+           * 只看「本来就是末位『已关闭』」的类型：存量未迁移类型（末位仍叫 已完成 / 已上线）
+           * 必须放行，否则用户连可见性都改不了 —— 它们的收口阶段靠归一补齐，不是改名。
+           */
+          if (old.key === terminalKey && old.name.trim() === TERMINAL_STAGE_NAME && nextStageName !== TERMINAL_STAGE_NAME) {
+            throw new GovernanceError(
+              'TERMINAL_STAGE_REQUIRED',
+              `末位阶段固定为「${TERMINAL_STAGE_NAME}」，不能改名（收到「${nextStageName}」）：`
+                + '它是该类型唯一的收口入口；想记录结果请追加一个中间阶段',
+              { expected: TERMINAL_STAGE_NAME, received: nextStageName },
+            );
+          }
+          if (
+            old.key !== terminalKey
+            && nextStageName === TERMINAL_STAGE_NAME
+            && current.stages.some((s) => s.key === terminalKey && s.name.trim() === TERMINAL_STAGE_NAME)
+          ) {
+            throw new GovernanceError(
+              'TERMINAL_STAGE_REQUIRED',
+              `「${TERMINAL_STAGE_NAME}」只能出现在末位：不能把中间阶段改成同名`,
+              { expected: TERMINAL_STAGE_NAME, received: nextStageName },
+            );
+          }
           return {
             key: old.key,
             name: s.name.trim(),
@@ -288,6 +375,20 @@ export async function updateType(scope: string, id: string, patch: UpdateTypePat
           ...(s.disabled ? { disabled: true } : {}),
         };
       });
+      /*
+       * 追加阶段一律落到「已关闭」之前（2026-11-26）：否则新阶段会顶掉收口入口，
+       * 该类型从此再也收不了口。**归一而非报错** —— 前端仍按「追加到末尾」提交，
+       * 顺序由服务端保证唯一，用户不必知道这条规则。
+       *
+       * 这里刻意**不动已有阶段的可见性**：把原末位降档必须与「存量已收口事件吸附」
+       * 成对执行（见 migrate-closing-stage.ts），只降不吸会把停在原末位的历史事件
+       * 静默降为「仅全文」，一次索引重建后语义检索就再也搜不到它们。
+       */
+      stages = pinTerminalStage(stages, () => ({
+        key: `st_${maxStageNo(stages) + 1}`,
+        name: TERMINAL_STAGE_NAME,
+        visibility: 'full',
+      }));
       validateStages(stages);
     }
 
