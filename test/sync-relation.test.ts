@@ -862,3 +862,53 @@ describe('sync-relation Group 留空兜底', () => {
     }
   });
 });
+
+describe('sync-relation 超长正文提示（warning 字段，阈值 4000）', () => {
+  it('超限返回 warning 且不拦截写入，未超限不出现该字段', async () => {
+    const warnScope = `sync-warn-${Date.now()}`;
+    const { initScope } = await import('../src/lib/store.js');
+    const { getKbDir } = await import('../src/lib/scope.js');
+    try {
+      registerTestScope(warnScope);
+      initScope(warnScope);
+
+      const long = '内容'.repeat(2100); // 4200 字符
+      const over = runSync([
+        '--scope', warnScope, '--group', 'warn-group', '--relation', '超长提示',
+        '--module-info', long, '--no-vector',
+      ]);
+      assert.equal(over.ok, true, `超长不应拦截写入：${JSON.stringify(over)}`);
+      assert.equal(typeof over.warning, 'string', `应返回 warning 字段：${JSON.stringify(over)}`);
+      assert.ok(
+        over.warning.includes('4200') && over.warning.includes('建议上限 4000'),
+        `warning 应含实际长度与阈值：${over.warning}`,
+      );
+
+      const short = '内容'.repeat(1900); // 3800 字符
+      const under = runSync([
+        '--scope', warnScope, '--group', 'warn-group', '--relation', '正常长度',
+        '--module-info', short, '--no-vector',
+      ]);
+      assert.equal(under.ok, true, JSON.stringify(under));
+      assert.equal(under.warning, undefined, `未超限不应有 warning：${JSON.stringify(under)}`);
+
+      // 批量通道：逐条各带一条，短条目不带（契约面，两个通道口径必须一致）
+      const inputFile = path.join(path.dirname(getKbDir(warnScope)), `bulk-warn-${Date.now()}.json`);
+      fs.writeFileSync(inputFile, JSON.stringify({
+        items: [
+          { group: 'warn-group', relation: '批量超长', module_info: long },
+          { group: 'warn-group', relation: '批量正常', module_info: short },
+        ],
+      }));
+      const bulk = runSync(['--scope', warnScope, '--input', inputFile, '--no-vector']);
+      assert.equal(bulk.ok, true, JSON.stringify(bulk));
+      const overItem = (bulk.results ?? []).find((r: any) => r.relation === '批量超长');
+      const underItem = (bulk.results ?? []).find((r: any) => r.relation === '批量正常');
+      assert.equal(typeof overItem?.warning, 'string', `批量超长条目应带 warning：${JSON.stringify(bulk.results)}`);
+      assert.equal(underItem?.warning, undefined, `批量正常条目不应带 warning：${JSON.stringify(underItem)}`);
+    } finally {
+      const kbDir = getKbDir(warnScope);
+      if (fs.existsSync(kbDir)) fs.rmSync(kbDir, { recursive: true, force: true });
+    }
+  });
+});

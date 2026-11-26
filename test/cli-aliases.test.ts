@@ -121,9 +121,24 @@ describe('REQ-10 sync-relation 超长 module-info 警告（阈值 4000）', () =
       '--module-info', `# 超长\n${long}`,
     ]);
     const all = stdout + stderr;
+    // 必须同时断言文案里的阈值：只断言"有警告"时，阈值被改回 1000 也照样通过（假保护）
     assert.ok(
-      all.includes('警告: --module-info 长度') || all.includes('超长内容会让单条向量语义被稀释'),
-      `应输出超长警告：${all}`
+      all.includes('警告: --module-info') && all.includes('超过建议上限 4000'),
+      `应输出超 4000 的警告且文案带阈值：${all}`
+    );
+  });
+
+  it('恰好 4000 字符不输出警告（边界，钉死 > 而非 >=）', () => {
+    const exact = '内容'.repeat(2000); // 正好 4000 字符
+    const { stdout, stderr } = runCli([
+      'sync-relation', '-s', 'edge-scope',
+      '-g', 'wiki', '-r', '边界关系',
+      '--module-info', exact,
+    ]);
+    const all = stdout + stderr;
+    assert.ok(
+      !all.includes('警告: --module-info'),
+      `恰好 4000 字符不应输出警告：${all}`
     );
   });
 
@@ -137,7 +152,7 @@ describe('REQ-10 sync-relation 超长 module-info 警告（阈值 4000）', () =
     ]);
     const all = stdout + stderr;
     assert.ok(
-      !all.includes('警告: --module-info 长度'),
+      !all.includes('警告: --module-info'),
       `短 module-info 不应输出警告：${all}`
     );
   });

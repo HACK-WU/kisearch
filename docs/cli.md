@@ -1074,7 +1074,7 @@ ki sync-relation \
   -r <text> --module-info <markdown>
 ```
 
-> **超长警告**：`--module-info` 超过 4000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。4000 字符大约能放下「一张 20~30 节点的流程图 + 800 字说明」，再长就该拆条或改用导入。
+> **超长警告**：`--module-info` 超过 4000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。4000 字符大约能放下「一张 25 节点左右的流程图 + 800 字说明」，再长就该拆条或改用导入。**CLI 走 stderr，MCP 工具 `ki_sync_relation` / `ki_bulk_sync_relation` 走返回体的 `warning` 字段**（批量时逐条各带一条），两者共用同一份文案与阈值。
 
 > **FTS-only 模式（`--no-vector`）**：写 KB 层并把正文写入独立全文 Collection，**不调用 embedding API、不写 dense 向量**——使用 `ki search --mode fulltext` 召回；语义 hybrid 检索仍不会召回该文档。单条与批量模式均支持：
 > ```bash

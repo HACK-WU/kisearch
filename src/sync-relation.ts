@@ -401,6 +401,29 @@ function syncBatch(
 
 // ─── MCP / CLI 共享纯函数 ───
 
+/**
+ * 关系正文的建议上限（字符）。
+ *
+ * 2026-11-26 由 1000 上调：原阈值下一条「图 + 文字结论」的结构化记忆轻松触顶，
+ * 实际效果是逼着写入方只写纯文字（图没地方放）。4000 字符约容纳一张 25 节点左右的
+ * mermaid 图 + 800 字说明，与 `ki import` 的 chunkSize 上限同一量级（embedding 舒适区）。
+ */
+export const RELATION_MODULE_INFO_WARN_CHARS = 4000;
+
+/**
+ * 正文超长提示（单数字符串，不含通道前缀；未超限返回 undefined）。
+ *
+ * CLI 与 MCP 共用同一份文案：CLI 打 stderr（人读）、MCP 放进返回体 `warning` 字段（agent 读）。
+ * 两处各写一份必然漂移 —— 实测过「判断已改、文案还留在旧阈值」的隐患。
+ * 未超限返回 undefined，调用方据此决定字段是否出现（不写空串，避免消费方误判"有提示"）。
+ */
+export function moduleInfoOverLimitNotice(length: number): string | undefined {
+  if (length <= RELATION_MODULE_INFO_WARN_CHARS) return undefined;
+  return `正文 ${length} 字符，超过建议上限 ${RELATION_MODULE_INFO_WARN_CHARS}。`
+    + '超长内容会让单条向量语义被稀释、检索命中变粗：建议拆成多条 Relation，'
+    + '或改用 ki import --source <dir> / ki-upload 上传整篇文档。';
+}
+
 export interface SyncRelationParams {
   scope?: string;
   group: string;
@@ -491,6 +514,8 @@ export interface BulkSyncResultItem {
   ttlDays?: number;
   eventId?: string;
   lifecycleSource?: string;
+  /** 正文超过建议上限（`RELATION_MODULE_INFO_WARN_CHARS`）时的提示；不拦截写入，未超限不出现 */
+  warning?: string;
 }
 
 export type BulkSyncRelationResult =
@@ -836,6 +861,7 @@ async function executeBulkSyncRelationLocal(params: {
 
         const result = syncSingleRelation(cache, scope, resolvedGroup, relation, moduleInfo);
         bulkTouchedGroups.add(resolvedGroup);
+        const moduleInfoWarning = moduleInfoOverLimitNotice(moduleInfo.length);
 
         // 文档级自定义 tag 持久化到 KB 层（与单条模式一致）
         const customTags = parseContentTags(item.tags);
@@ -876,6 +902,7 @@ async function executeBulkSyncRelationLocal(params: {
           ...(lifecycleCheck.summary.expiresAt !== undefined ? { expiresAt: lifecycleCheck.summary.expiresAt } : {}),
           ...(lifecycleCheck.summary.ttlDays !== undefined ? { ttlDays: lifecycleCheck.summary.ttlDays } : {}),
           ...(lifecycleCheck.summary.eventId ? { eventId: lifecycleCheck.summary.eventId } : {}),
+          ...(moduleInfoWarning ? { warning: moduleInfoWarning } : {}),
         });
       } catch (err) {
         // 单条 syncSingleRelation 异常不中断整个批量（对齐 syncBatch 的容错策略）
@@ -1242,6 +1269,8 @@ export type SyncRelationResult =
   relation: string; /** @deprecated 兼容保留，恒为 null（存储层已取消逐出） */ evicted: string | null; hint?: string; vectorPending?: boolean; vectorStored?: boolean; contentTags?: string[]; vectorReason?: string; fullTextStored?: boolean; fullTextReason?: string; /** FTS-only → dense 切换时清掉的旧全文索引条数（无切换则不出现） */ ftsRemoved?: number; /** 旧全文索引清理失败条数（ID 已保留等待重试；不出现 = 全成功） */ ftsCleanupFailed?: number; /** 清理失败原因 / 未清理原因（如 dense 写入未成功） */ ftsCleanupReason?: string; wikiSynced?: boolean; wikiFile?: string; wikiReason?: string;
   /** 分类回显：AI 必须能知道自己写进去的是什么分类（否则写完自己也解释不了） */
   lifecycle?: string; expiresAt?: number; ttlDays?: number; eventId?: string; lifecycleSource?: string;
+  /** 正文超过建议上限（`RELATION_MODULE_INFO_WARN_CHARS`）时的提示；不拦截写入，未超限不出现 */
+  warning?: string;
   /** 绑定事件时回显（AI 引用时用得到） */
   event?: { id: string; shortId: number; title: string } }
   | { ok: false; error: string; code?: string; details?: Record<string, unknown> };
@@ -1621,6 +1650,7 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
 
     // 透出实际写入的内容标签：两种模式都写入 ki-search；差别仅在底层索引类型。
     const contentTags = ['ki-search', ...customTags];
+    const moduleInfoWarning = moduleInfoOverLimitNotice(moduleInfo.length);
 
     if (process.env.KI_DAEMON_OWNER !== '1') await closeFtsEngine(scope);
 
@@ -1659,6 +1689,9 @@ async function executeSyncRelationLocal(params: SyncRelationParams): Promise<Syn
       ...(lifecycleSummary.ttlDays !== undefined ? { ttlDays: lifecycleSummary.ttlDays } : {}),
       ...(lifecycleSummary.eventId ? { eventId: lifecycleSummary.eventId } : {}),
       ...(lifecycleSummary.event ? { event: lifecycleSummary.event } : {}),
+      // 超长提示（2026-11-26）：CLI 走 stderr、MCP 走本字段。不拦截写入，只让写入方感知
+      // 「这条已经不适合再做单条关系」——批量通道同理（见 BulkSyncResultItem.warning）。
+      ...(moduleInfoWarning ? { warning: moduleInfoWarning } : {}),
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -1691,15 +1724,10 @@ program
   .option('--no-vector', 'FTS-only 模式：不调用 embedding，不写 dense 向量；写入独立全文 Collection，可被 fulltext 检索')
   .action(async (opts) => {
     // REQ-10：超长 module-info 输出警告，不自动切分（保持单条关系语义）。
-    // 2026-11-26 阈值 1000 → 4000：原阈值下一条"图 + 文字结论"的结构化记忆轻松触顶，
-    // 实际效果是逼着写入方只写纯文字（图没地方放）。4000 字符约容纳一张 20~30 节点
-    // 的 mermaid 图 + 800 字说明，仍低于"该拆 Relation"的量级 —— 超过它就该拆条或走 ki-upload。
-    if (opts.moduleInfo && opts.moduleInfo.length > 4000) {
-      console.error(
-        `警告: --module-info 长度 ${opts.moduleInfo.length} 字符（>4000）。` +
-        `超长内容会让单条向量语义被稀释、检索命中变粗；建议拆分多条写入，或改用 "ki import --source <dir>" 自动切分导入。`
-      );
-    }
+    // 文案与 MCP 返回体的 `warning` 字段共用 `moduleInfoOverLimitNotice`——CLI 与 MCP 各写一份
+    // 必然漂移（阈值 2026-11-26 由 1000 上调至 4000，口径见该常量注释）。
+    const moduleInfoNotice = opts.moduleInfo ? moduleInfoOverLimitNotice(opts.moduleInfo.length) : undefined;
+    if (moduleInfoNotice) console.error(`警告: --module-info ${moduleInfoNotice}`);
     // 非向量化模式（--no-vector → opts.vector=false）
     const vector = opts.vector !== false;
     // 批量模式
