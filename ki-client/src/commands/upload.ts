@@ -30,7 +30,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { ClientError } from '../errors.js';
-import { getJson, pingRemote, postBinary, postMultipart } from '../http.js';
+import { getJson, pingRemote, postBinary, postJson, postMultipart, type PingInfo } from '../http.js';
 import { createTarGz } from '../lib/tar.js';
 import { readState, sha256File, stateKey, writeState, type UploadState } from '../lib/state.js';
 import type { ParsedArgs } from '../args.js';
@@ -75,6 +75,59 @@ interface UploadResponse {
   accepted?: number;
   /** `saved` = 文档数、`assets` = 附件数、`skipped` = 真丢弃数（服务端 2026-11-26 起分开计） */
   files?: { saved?: number; assets?: number; skipped?: number; skippedSample?: unknown[] };
+}
+
+/** 单条待清理候选（服务端 `ImportPrunePlan.items` 的元素） */
+interface PruneItem {
+  group: string;
+  relation: string;
+  sourcePath: string;
+  /** 所属 group 本次没有任何文件落入 */
+  untouched: boolean;
+}
+
+/**
+ * `POST /open/v1/import/prune` 的响应（**只读**：服务端已剥离 `token` 与内部大字段）。
+ *
+ * 字段语义与页面 `/api/import/prune` 的 `plan` 完全一致——同一份 `planImportPrune` 产出，
+ * 客户端只负责展示，不重新判定（双闸门与上限只有一处真相）。
+ */
+interface PruneResponse {
+  ok?: boolean;
+  scope?: string;
+  group?: string;
+  scanned?: number;
+  plan?: {
+    scope: string;
+    scopeGroups: number;
+    libDocs: number;
+    judicable: number;
+    eligibleCount: number;
+    scanned: number;
+    overlap: number;
+    coordRatio: number;
+    deleteRatio: number;
+    warn: boolean;
+    overLimit: boolean;
+    total: number;
+    items: PruneItem[];
+    truncated: boolean;
+    unableCount: number;
+    untouchedGroups: string[];
+    skipReason?: string;
+    skipDetail?: string;
+  };
+  deletable?: boolean;
+  hint?: string;
+  code?: string;
+  error?: string;
+}
+
+/** `--prune` 的执行结果：失败只影响退出码与汇总，不影响已上传的批次 */
+interface PruneOutcome {
+  ok: boolean;
+  error?: string;
+  response?: PruneResponse;
 }
 
 /**
@@ -327,6 +380,109 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
+/** 候选清单的终端展示上限（完整清单走 `--json` 的 `prune.plan.items`，服务端最多 500 条） */
+const PRUNE_PRINT_LIMIT = 40;
+
+/**
+ * 打印清理候选（人读）。
+ *
+ * ★ 只打前 40 条：候选可达 500 条，全打会淹没上传摘要；完整清单走 `--json`。
+ * ★ 删除出路必须点名「本通道没有删除权」：token 通道只读是既定边界（事件 #105 拍板），
+ *   含糊其辞会让用户以为「再跑一次就能删」。
+ */
+function reportPrune(result: PruneResponse): void {
+  const plan = result.plan;
+  if (!plan) {
+    console.log('清理候选：服务端未返回候选清单（plan 缺失），请核对服务端版本');
+    return;
+  }
+  if (plan.skipReason) {
+    console.log(`\n目录同步清理：已跳过（${plan.skipReason}）——${plan.skipDetail ?? ''}`);
+    return;
+  }
+  console.log(`\n目录同步清理：本次目录 ${plan.scanned} 篇 / 库内可判定 ${plan.eligibleCount} 篇 / 候选 ${plan.total} 篇（占 ${Math.round(plan.deleteRatio * 100)}%）`);
+  if (plan.unableCount > 0) {
+    console.log(`  另有 ${plan.unableCount} 篇没有来源记录（sourcePath 为空），不参与判定`);
+  }
+  if (plan.total === 0) {
+    console.log('  无差异：库内没有「本次目录已不存在」的文档');
+    return;
+  }
+  if (plan.warn) console.log('  ⚠️  候选占比超过 20%：请逐条核对（也可能是选错了目录层级）');
+  if (plan.overLimit) console.log('  候选超过单次上限：请缩小 --group 范围后重试');
+  if (plan.untouchedGroups.length > 0) {
+    const shown = plan.untouchedGroups.slice(0, 5).join(' / ');
+    const more = plan.untouchedGroups.length > 5 ? ` 等 ${plan.untouchedGroups.length} 组` : '';
+    console.log(`  整组本次无文件落入：${shown}${more}`);
+  }
+
+  const byGroup = new Map<string, PruneItem[]>();
+  for (const item of plan.items) {
+    const bucket = byGroup.get(item.group);
+    if (bucket) bucket.push(item);
+    else byGroup.set(item.group, [item]);
+  }
+  let printed = 0;
+  for (const [group, items] of byGroup) {
+    if (printed >= PRUNE_PRINT_LIMIT) break;
+    // `__root__` 是服务端的存储保留键：面向人的输出统一显示「根」（与 Web 端同口径）
+    console.log(`  ${group === '__root__' ? '根' : group || '根'}：${items.length} 篇`);
+    for (const item of items) {
+      if (printed >= PRUNE_PRINT_LIMIT) {
+        console.log(`    …（已达 ${PRUNE_PRINT_LIMIT} 条展示上限，完整清单用 --json 查看 prune.plan.items）`);
+        break;
+      }
+      console.log(`    · ${item.relation}  ← ${item.sourcePath}`);
+      printed += 1;
+    }
+  }
+  console.log('\n本通道只读（Token 无删除权限）。删除二选一：');
+  console.log('  ① Web → 写入 → 目录同步清理 → 勾选后删除');
+  console.log(`  ② 服务端主机执行：ki import --source <同一目录> --group ${result.group ?? '<组>'} --prune --yes`);
+}
+
+/** 本次目录全量的 markdown 相对路径（只交 `.md`：图片是 assets，不进服务端 `sourcePath`） */
+function mdRelPaths(files: Array<{ rel: string }>): string[] {
+  return files.filter((item) => item.rel.toLowerCase().endsWith(DOC_EXT)).map((item) => item.rel);
+}
+
+/**
+ * 目录同步清理候选：把**本次目录全量** md 路径交给远端算差集（只读，不删）。
+ *
+ * 三条硬约束（对应服务端 `routes/prune.ts` 文件头）：
+ *  1. 必须交全量：上传是增量的，服务端只看得到变化的文件；
+ *  2. 只交 `.md`：图片不进 `sourcePath`，混入会稀释服务端闸门的分母；
+ *  3. 只在**所有批次尝试之后**调用一次：某批失败时文件仍在本地，清单要含它。
+ */
+async function runPrunePreview(
+  remote: ResolvedRemote,
+  info: PingInfo,
+  scope: string,
+  group: string | undefined,
+  mdRels: string[],
+): Promise<PruneOutcome> {
+  if (!info.capabilities.prune.query) {
+    const outcome: PruneOutcome = { ok: false, error: `源 "${remote.name}" 不支持清理候选查询（缺少 POST /open/v1/import/prune）` };
+    console.log(`\n清理候选查询失败：${outcome.error}`);
+    console.log('出路：升级服务端，或在服务端主机执行 ki import --source <同一目录> --group <组> --prune 查看差异');
+    return outcome;
+  }
+  try {
+    const response = await postJson<PruneResponse>(
+      remote,
+      '/open/v1/import/prune',
+      { scannedRels: mdRels, ...(group ? { group } : {}) },
+      { scope },
+    );
+    reportPrune(response);
+    return { ok: response.ok !== false, response };
+  } catch (err) {
+    const reason = err instanceof ClientError ? `${err.code}: ${err.message}` : String((err as Error).message);
+    console.log(`\n清理候选查询失败：${reason}`);
+    return { ok: false, error: reason };
+  }
+}
+
 /**
  * 选上传通道。
  *
@@ -379,6 +535,10 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
 
   const scope = args.string('scope')?.trim();
   if (!scope) throw new ClientError('USAGE', '缺参数：scope', '用法：ki-client upload --scope <库> <文件...>');
+  // 清理候选（--prune）依赖「本次目录全量」这个概念：单文件 upload 没有目录，算不出差集
+  if (args.bool('prune') && !isDirMode) {
+    throw new ClientError('USAGE', '--prune 只能用于 upload-dir', '单文件 upload 没有「本次目录全量」概念，无法与库内文档做差集');
+  }
   if (rest.length === 0) {
     throw new ClientError(
       'USAGE',
@@ -450,11 +610,36 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
     // 空跑也要复算：否则「报过缺图 → 原样重跑」会静默返回 0（见 missingRefLines 注释）
     const dryRunMissing = missingRefLines(raw);
     if (dryRunMissing.length > 0) {
-      console.log(`错误：${dryRunMissing.length} 处图片引用在上传列表里找不到对应文件（本次无文件需重传，但仍按失败返回）：`);
+      console.log(`${allowMissingAssets ? '警告' : '错误'}：${dryRunMissing.length} 处图片引用在上传列表里找不到对应文件（本次无文件需重传）：`);
       for (const line of dryRunMissing.slice(0, 10)) console.log(`  - ${line}`);
       if (dryRunMissing.length > 10) console.log(`  ... 另有 ${dryRunMissing.length - 10} 处`);
-      console.log('确认无需这些图可加 --allow-missing-assets；补上图或改掉引用后重跑即可');
-      return allowMissingAssets ? 0 : 1;
+      if (!allowMissingAssets) {
+        console.log('确认无需这些图可加 --allow-missing-assets；补上图或改掉引用后重跑即可');
+        return 1;
+      }
+    }
+    /**
+     * ★ 空跑**必须**也算候选：本地删了文件、又没有新增/变更时 `picked` 恒为空，
+     *   而「删了文件要看远端差异」正是清理功能最主要的用法。早前这里直接 return 0，
+     *   导致增量无变化时 `--prune` 静默不执行（真机踩到）。
+     */
+    if (args.bool('prune')) {
+      const outcome = await runPrunePreview(remote, info, scope, args.string('group'), mdRelPaths(raw));
+      if (args.bool('json')) {
+        console.log(JSON.stringify({
+          ok: outcome.ok,
+          remote: remote.name,
+          skipped,
+          missing: dryRunMissing,
+          batches: [],
+          prune: outcome.response ?? { ok: false, error: outcome.error },
+        }, null, 2));
+      }
+      return outcome.ok ? 0 : 1;
+    }
+    // 空跑在 `--json` 下同样必须有输出：否则脚本拿到空 stdout 会当成解析失败
+    if (args.bool('json')) {
+      console.log(JSON.stringify({ ok: true, remote: remote.name, skipped, missing: dryRunMissing, batches: [] }, null, 2));
     }
     return 0;
   }
@@ -537,17 +722,29 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
     }
   }
 
+  // ── 目录同步清理候选（只读：本通道没有删除权）──
+  // 必须在**所有批次尝试之后**调用一次：某批失败时那些文件仍在本地，全量清单要含它们，
+  // 否则「本批失败」在清单里消失 → 被服务端算成「本地已删」。
+  let prune: PruneOutcome | undefined;
+  if (args.bool('prune')) {
+    prune = await runPrunePreview(remote, info, scope, args.string('group'), mdRelPaths(raw));
+  }
+
   const failed = outcomes.filter((item) => item.error);
   const missingFailed = !allowMissingAssets && missingRefs.length > 0;
+  // 显式要了候选却没拿到 = 失败（上传成功不等于任务完成）；脚本可只看 ok / 退出码
+  const pruneFailed = prune !== undefined && !prune.ok;
+  const ok = failed.length === 0 && !missingFailed && !pruneFailed;
   if (args.bool('json')) {
     console.log(JSON.stringify({
-      ok: failed.length === 0 && !missingFailed,
+      ok,
       remote: remote.name,
       skipped,
       missing: missingRefs,
       batches: outcomes,
+      ...(prune ? { prune: prune.response ?? { ok: false, error: prune.error } } : {}),
     }, null, 2));
-    return failed.length === 0 && !missingFailed ? 0 : 1;
+    return ok ? 0 : 1;
   }
 
   console.log(`\n上传结束：成功 ${outcomes.length - failed.length} 批 / 失败 ${failed.length} 批${skipped > 0 ? ` / 跳过 ${skipped} 个文件` : ''}`);
@@ -558,7 +755,10 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
   if (missingFailed) {
     console.log(`图片缺失 ${missingRefs.length} 处未解决，按失败返回（见上方列表；确认无需这些图可加 --allow-missing-assets）`);
   }
-  return failed.length === 0 && !missingFailed ? 0 : 1;
+  if (pruneFailed) {
+    console.log(`清理候选查询失败，按失败返回（上传本身${failed.length === 0 ? '成功' : '有失败批次'}）：核对 --scope 授权与服务端版本后重跑`);
+  }
+  return ok ? 0 : 1;
 }
 
 function buildForm(batch: PickedFile[]): FormData {

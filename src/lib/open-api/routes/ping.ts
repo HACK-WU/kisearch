@@ -72,6 +72,11 @@ export async function handleOpenApiPing(input: {
        * `maxPackageSize` 必须回显真实值：客户端拿它做本地预检，比「传上去等 413」省一次往返
        * —— 而且 413 在部分客户端库（httpflex 之类）会丢掉响应体，只剩状态码。
        */
+      /**
+       * 目录同步清理的候选查询（2026-11-26）：与 `import/status` 同侧，受 `uploadApi` 管。
+       * 只算不删 —— 删除权不在本通道（见 `routes/prune.ts` 文件头）。
+       */
+      prune: { query: ctx.uploadApi },
       atlas: {
         upload: ctx.uploadApi,
         /**

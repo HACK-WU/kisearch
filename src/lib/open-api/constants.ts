@@ -95,6 +95,17 @@ export interface OpenApiCapabilities {
     /** 图集包上限（与 `MAX_ZIP_BYTES` 同源同值）：客户端据此预检，不必等 413 */
     maxPackageSize: number;
   };
+  /**
+   * 目录同步清理的候选查询（2026-11-26 · 事件 #105 批 2）：`POST /open/v1/import/prune`。
+   *
+   * **只算不删** —— 本通道没有删除权（用户 2026-11-26 拍板），删除在本机 `ki import --prune --yes`
+   * 与页面「目录同步清理」两处。客户端据此判断「远端支不支持算候选」，而不是先打一次 404 去试
+   * （404 与「路径写错」同形，无法区分）。
+   */
+  prune: {
+    /** 该端点是否可用（受 `uploadApi` 管，与 `import/status` 同侧） */
+    query: boolean;
+  };
 }
 
 /**

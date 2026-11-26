@@ -31,6 +31,16 @@ export interface PingInfo {
       /** 服务端图集包上限；`null` = 服务端没回显（按客户端默认值兜底） */
       maxPackageSize: number | null;
     };
+    /**
+     * 目录同步清理的候选查询（2026-11-26 · 事件 #105 批 2）。
+     *
+     * 旧服务端没有这一项 → `query=false`，`upload-dir --prune` 会明确报「服务端不支持」，
+     * 而不是打到一个必然 404 的路径上（404 与「路径写错」同形，客户端无法分支）。
+     */
+    prune: {
+      /** `POST /open/v1/import/prune` 是否可用（受服务端 uploadApi 管） */
+      query: boolean;
+    };
   };
   /** 原始返回体，`--json` 时原样输出 */
   raw: Record<string, unknown>;
@@ -229,9 +239,11 @@ export async function pingRemote(remote: ResolvedRemote, scope?: string): Promis
     download?: { asset?: unknown; doc?: unknown };
     maxAssetSize?: unknown;
     atlas?: { upload?: unknown; download?: unknown; maxPackageSize?: unknown };
+    prune?: { query?: unknown };
   };
   const download = caps.download ?? {};
   const atlas = caps.atlas ?? {};
+  const prune = caps.prune ?? {};
   return {
     contractVersion,
     capabilities: {
@@ -243,6 +255,7 @@ export async function pingRemote(remote: ResolvedRemote, scope?: string): Promis
         download: atlas.download === true,
         maxPackageSize: typeof atlas.maxPackageSize === 'number' ? atlas.maxPackageSize : null,
       },
+      prune: { query: prune.query === true },
     },
     raw,
   };

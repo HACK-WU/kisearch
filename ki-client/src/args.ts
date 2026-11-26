@@ -32,6 +32,8 @@ const BOOL_FLAGS = new Set([
   'archive', 'force', 'no-state',
   // 上传：正文引用的图片缺失时，默认按失败返回；加它降级为警告（#101）
   'allow-missing-assets', 'allowMissingAssets',
+  // 目录同步清理候选（2026-11-26 · 事件 #105）：只算并打印，不删除
+  'prune',
   // 图集：取回 archive 里那一版（`--version` 已是「看版本号」的布尔，故用 --previous 区分）
   'previous',
 ]);

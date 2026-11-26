@@ -21,6 +21,12 @@ import { loadConfig, getEmbeddingConfig, resolveScope, runWithConfigSnapshot } f
 import { readImportIncompleteStatus } from './lib/import-retry.js';
 
 import { handleDirectImport } from './lib/import.js';
+// REQ-20261019-001 · CLI 通道（2026-11-26）：候选类型 + 删除执行
+// 候选口径必须与页面/`/api/import/prune` 同源（`planImportPrune`），这里只用不改
+import type { ImportPrunePlan } from './lib/import-prune.js';
+import { executeBatchDelete } from './delete-relation.js';
+// `__root__` 是存储层保留键，面向人的出口一律映射成「根」（与 open-api 摘要同口径）
+import { groupDisplayName } from './lib/import-path.js';
 import { closeEngine } from './lib/vector-client.js';
 import { parseCleanRules, type CleanRules } from './lib/clean.js';
 import { callDaemon, createDaemonJobId, shouldUseDaemonClient } from './lib/daemon-client.js';
@@ -35,6 +41,108 @@ import { whenIndexMaintenanceIdle, getIndexMaintenanceState, readIndexReadiness,
 
 function output(result: Record<string, unknown>): void {
   console.log(JSON.stringify(result, null, 2));
+}
+
+/** 候选清单的终端展示上限：剩余条目走 stdout JSON（`prune.items` 最多 500 条） */
+const PRUNE_PRINT_LIMIT = 40;
+
+/** `--prune --yes` 的删除回执：写进 stdout JSON 的 `pruneDelete`，脚本据此判定是否删干净 */
+interface PruneDeleteReceipt {
+  /**
+   * 全部删成功 = true。
+   * ★ 必须放进回执本身：`result.ok` 反映的是**导入**结果（导入成功但删除部分失败时它仍为 true），
+   *   只读 JSON 的脚本若只看 `ok` 会把「没删干净」当成成功。退出码与本字段同判据。
+   */
+  ok: boolean;
+  requested: number;
+  selected: number;
+  deleted: number;
+  failed: { group: string; relation: string; reason: string }[];
+  wikiDelete: boolean;
+}
+
+/**
+ * 目录同步清理：候选清单的人类可读摘要。
+ *
+ * ★ 一律走 **stderr**：stdout 是机器可读契约（`output()` 整体打印 result），人读信息混进去
+ *   会让调用方的 `JSON.parse` 直接失败——与文件内既有 ✅/⚠️ 进度同口径。
+ * ★ 只打前 {@link PRUNE_PRINT_LIMIT} 条：候选可达 500 条，全打会淹没终端；完整清单在 stdout。
+ * ★ 已跳过（skipReason）必须说出来：静默等于「告诉用户没有差异」，而实际是没算。
+ */
+function reportPrunePlan(plan: ImportPrunePlan): void {
+  const w = (line = ''): void => { process.stderr.write(`${line}\n`); };
+  if (plan.skipReason) {
+    w(`\n目录同步清理：已跳过（${plan.skipReason}）——${plan.skipDetail ?? ''}`);
+    return;
+  }
+  w(`\n目录同步清理：本次目录 ${plan.scanned} 篇 / 库内可判定 ${plan.eligibleCount} 篇 / 候选 ${plan.total} 篇（占 ${Math.round(plan.deleteRatio * 100)}%）`);
+  if (plan.unableCount > 0) {
+    w(`  另有 ${plan.unableCount} 篇没有来源记录（sourcePath 为空），不参与判定`);
+  }
+  if (plan.total === 0) {
+    w('  无差异：库内没有「本次目录已不存在」的文档');
+    return;
+  }
+  if (plan.warn) w('  ⚠️  候选占比超过 20%：请逐条核对后再删（也可能是选错了目录层级）');
+  if (plan.overLimit) w('  候选超过单次上限：本次不提供一次删除，请缩小 --group 范围后重跑');
+  if (plan.untouchedGroups.length > 0) {
+    const shown = plan.untouchedGroups.slice(0, 5).join(' / ');
+    const more = plan.untouchedGroups.length > 5 ? ` 等 ${plan.untouchedGroups.length} 组` : '';
+    w(`  整组本次无文件落入：${shown}${more}`);
+  }
+
+  const byGroup = new Map<string, ImportPrunePlan['items']>();
+  for (const item of plan.items) {
+    const bucket = byGroup.get(item.group);
+    if (bucket) bucket.push(item);
+    else byGroup.set(item.group, [item]);
+  }
+  let printed = 0;
+  for (const [group, items] of byGroup) {
+    if (printed >= PRUNE_PRINT_LIMIT) break;
+    w(`  ${groupDisplayName(group) || '根'}：${items.length} 篇`);
+    for (const item of items) {
+      if (printed >= PRUNE_PRINT_LIMIT) {
+        w(`    …（已达 ${PRUNE_PRINT_LIMIT} 条展示上限，完整清单见 JSON 的 prune.items）`);
+        break;
+      }
+      w(`    · ${item.relation}  ← ${item.sourcePath}`);
+      printed += 1;
+    }
+  }
+  if (plan.truncated) {
+    w(`  明细只含前 ${plan.items.length} 条（共 ${plan.total} 条），需分批处理`);
+  }
+}
+
+/**
+ * 执行清理（`--prune --yes`）：删除候选文档。
+ *
+ * 安全边界（与页面 `POST /api/import/prune` 同口径）：
+ *  - 候选超上限（`overLimit` / `truncated`）在调用方已拒绝，此处不再兜底：
+ *    只删前 500 条却报「删完了」是假回执，比不删更糟。
+ *  - `selected` 恒等于候选全量 —— CLI 没有勾选交互，`--yes` 就是「全选并确认」。
+ *  - `wikiDelete` 默认 true（与页面一致）：镜像 `.md` 不删的话，下次 `ki import --source <wiki目录>`
+ *    会把文档原样导回来，清理等于白做。想保留镜像用 `--no-wiki-delete`。
+ */
+async function executePrune(
+  plan: ImportPrunePlan,
+  scope: string,
+  wikiDelete: boolean,
+): Promise<PruneDeleteReceipt> {
+  const items = plan.items.map((item) => ({ group: item.group, relation: item.relation }));
+  const batch = await executeBatchDelete(scope, items, { wikiDelete });
+  const failed = batch.results
+    .filter((item) => !item.deleted)
+    .map((item) => ({ group: item.group, relation: item.relation, reason: item.reason ?? '删除失败' }));
+  return {
+    ok: failed.length === 0,
+    requested: plan.total,
+    selected: items.length,
+    deleted: batch.results.filter((item) => item.deleted).length,
+    failed,
+    wikiDelete,
+  };
 }
 
 const program = new Command();
@@ -64,6 +172,11 @@ program
   .option('--max-batch-bytes <n>', '整批最大总字节数（S0-3 预算；默认 4GiB，≤0 显式关闭该项限制）')
   .option('--max-batch-chunks <n>', '整批最大预计 chunk 数（S0-3 预算；默认 300000，≤0 显式关闭该项限制）')
   .option('--retry-incomplete', 'R2：只重试上次未完成的文件（读 <scope>/.ki-import-incomplete.json；可省略 --source，沿用那次导入的源目录与参数）')
+  // ── 目录同步清理（REQ-20261019-001 · CLI 通道，2026-11-26）──
+  // 与页面「目录同步清理」同源：默认不算、算完不删、删除要显式确认。
+  .option('--prune', '目录导入后计算「库中存在、本次目录已没有」的候选（只打印，不删除；加 --yes 才执行）')
+  .option('--yes', '与 --prune 同用：确认执行删除（无 --yes 只预览候选清单）')
+  .option('--no-wiki-delete', '与 --prune --yes 同用：只删知识库记录，保留 wiki 镜像文件（默认一并删除）')
   .action(async (opts) => {
     const requestConfig = loadConfig();
     return runWithConfigSnapshot(requestConfig, async () => {
@@ -74,6 +187,11 @@ program
       // 以保证重试与首次口径一致（切分/向量化/标签/冲突策略）。
       // P2（review）：清单「损坏」与「不存在」必须区分（否则会把损坏说成"没有待办"）；
       // 跨源覆盖留下的备份清单也在这里给出出路。
+      // --prune 与 --retry-incomplete 互斥：**必须先于 retry 清单校验**。
+      // 否则没有未完成清单时会先报「没有待重试清单」，用户看不出真正原因是两个参数不能同用。
+      if (opts.prune && opts.retryIncomplete) {
+        throw new Error('--prune 不能与 --retry-incomplete 同用：重试只处理子集，路径口径与目录全量不一致，候选不可信');
+      }
       const retryStatus = opts.retryIncomplete ? readImportIncompleteStatus(scope) : null;
       if (opts.retryIncomplete && retryStatus?.corrupted) {
         throw new Error(
@@ -100,6 +218,18 @@ program
       const sourceOpt = opts.source ? String(opts.source)
         : (retryRecord!.sourceDir ?? '');
       const sourceDir = path.resolve(sourceOpt);
+      // ── 目录同步清理（REQ-20261019-001 · CLI 通道）：参数组合一律 fail-loud ──
+      // 这几种组合都不报错却让「清理」看起来跑过（候选恒 0），静默比报错更难查。
+      if (opts.prune) {
+        let isDir = false;
+        try { isDir = fs.statSync(sourceDir).isDirectory(); } catch { /* 下面统一给文案 */ }
+        if (!isDir) throw new Error(`--prune 只支持目录导入：--source 指向的不是目录（${sourceDir}）`);
+      } else if (opts.yes) {
+        throw new Error('--yes 只在 --prune 下有意义（用于确认执行清理）；为避免被误解成「确认导入」，这里直接拒绝');
+      }
+      if (opts.wikiDelete === false && !(opts.prune && opts.yes)) {
+        throw new Error('--no-wiki-delete 只在 --prune --yes 下有意义（不执行删除时它不改变任何行为）');
+      }
       if (opts.retryIncomplete) {
         if (!fs.existsSync(sourceDir)) {
           throw new Error(`上次导入的源目录已不存在：${sourceDir}；请用 --source 显式指定当前源目录后重试`);
@@ -168,6 +298,9 @@ program
         wikiWriteback: true,
         // R2：只重试未完成子集（名单外的文件本轮不处理）
         ...(retryRecord ? { onlyRelPaths: retryRecord.items.map((item) => item.path) } : {}),
+        // 目录同步清理（REQ-20261019-001）：CLI 的 --source 恒为目录 ⇒ pickMode 固定 'dir'。
+        // 不传这两项时内核走 graceful 分支（不产候选、不报错），既有行为零变化。
+        ...(opts.prune ? { pickMode: 'dir' as const, pruneStale: true } : {}),
       };
       const daemonJobId = createDaemonJobId();
       const useDaemon = shouldUseDaemonClient();
@@ -299,6 +432,61 @@ program
         }
       } finally {
         if (useDaemon) process.removeListener('SIGINT', onDaemonSignal);
+      }
+      // ── 目录同步清理（REQ-20261019-001 · CLI 通道）：打印候选 →（--yes）删除 ──
+      // 必须在 closeEngine() 之前：删除要写 KB + 删向量。直连路径引擎仍持有；daemon 路径走 RPC。
+      if (opts.prune) {
+        try {
+          const plan = (result as { prune?: ImportPrunePlan }).prune;
+          if (!plan) {
+            // 内核没产出候选（参数未生效或计算异常被 fail-soft 吞掉）：说清，别假装「无差异」
+            process.stderr.write('\n⚠️  目录同步清理：本次未产出候选清单（内核未返回 prune 字段），请核对导入是否完整\n');
+          } else {
+            reportPrunePlan(plan);
+            // 未指定 --group 时判定作用域是**整库**：候选里可能混入页面 / 数据源等其他来源的文档
+            //（页面缺省 group 时同样如此，行为一致）。说清，别让脚本用户以为只清理了本次目录对应的组。
+            if (!group && plan.total > 0) {
+              process.stderr.write('  ⚠️  未指定 --group：作用域是整个库，候选可能包含其他来源导入的文档\n');
+            }
+            const deletable = !plan.skipReason && plan.total > 0;
+            if (!deletable) {
+              // 无候选 / 闸门跳过：--yes 也要明确说「没删」，否则用户以为执行过了
+              if (opts.yes) process.stderr.write('本次未删除任何文档\n');
+            } else if (!opts.yes) {
+              process.stderr.write(
+                `\n候选 ${plan.total} 篇未删除。执行删除：同一条命令加 --yes`
+                + '（默认一并删除 wiki 镜像文件；加 --no-wiki-delete 只删知识库记录）\n',
+              );
+            } else if (plan.overLimit || plan.truncated) {
+              // 明细只有前 500 条：删一部分却报「完成」是假回执
+              process.stderr.write('已跳过删除：候选超过单次上限，请缩小 --group 范围后重跑（本次未删除任何文档）\n');
+            } else {
+              const wikiDelete = opts.wikiDelete !== false;
+              process.stderr.write(
+                `\n即将删除 ${plan.total} 篇文档`
+                + `${wikiDelete ? '，并一并删除对应 wiki 镜像文件（--no-wiki-delete 可保留）' : '（保留 wiki 镜像文件）'}…\n`,
+              );
+              const receipt = await executePrune(plan, scope, wikiDelete);
+              (result as Record<string, unknown>).pruneDelete = receipt;
+              process.stderr.write(`删除完成：成功 ${receipt.deleted} / 失败 ${receipt.failed.length}\n`);
+              for (const item of receipt.failed.slice(0, 20)) {
+                process.stderr.write(`  - ${groupDisplayName(item.group)}/${item.relation}：${item.reason}\n`);
+              }
+              if (receipt.failed.length > 20) {
+                process.stderr.write(`  …另有 ${receipt.failed.length - 20} 条失败，详见 JSON 的 pruneDelete.failed\n`);
+              }
+              // 显式要求删除却没删干净 = 失败（fail-loud）；设 exitCode 而非 exit，避免跳过 finally 的引擎释放
+              if (receipt.failed.length > 0) process.exitCode = 1;
+            }
+          }
+        } finally {
+          // ★ 删除会重新打开 FTS 句柄（`executeBatchDelete` 要删全文索引），而导入收尾的那次
+          //   `closeFtsEngine` 已经在前面执行过了 —— 这里不再关一次，进程会一直挂着不退
+          //   （实测：打印「删除完成」后 shell 不返回）。daemon 路径句柄在 daemon 进程内，无需关。
+          if (!useDaemon) {
+            try { await closeFtsEngine(scope); } catch { /* best effort */ }
+          }
+        }
       }
       await closeEngine();
       // R1（REQ-20261009-001，Q2 同口径）：部分成功 = **成功**（退出码 0、JSON ok:true），

@@ -23,6 +23,13 @@ import { OPEN_API_ATLAS_PATH, OPEN_API_PREFIX, OPEN_API_READ_PATHS, OPEN_API_UPL
 import { sendOpenApiError } from './respond.js';
 import { handleOpenApiPing } from './routes/ping.js';
 import { handleOpenApiImportStatus, handleOpenApiImportUpload } from './routes/import.js';
+/**
+ * 目录同步清理的**只读**候选查询（2026-11-26 · 事件 #105 批 2）。
+ *
+ * 与 `import/status` 同侧（上传流程的一部分），因此路径放在 `OPEN_API_UPLOAD_PATH` 前缀下，
+ * 自动受 `uploadApi` 开关与 daemon 漂移守卫覆盖。**没有删除端点**——token 通道不提供删除权。
+ */
+import { handleOpenApiImportPrune } from './routes/prune.js';
 import { handleOpenApiEvents } from './routes/events.js';
 import { handleOpenApiAtlasPackage, handleOpenApiAtlasStatus } from './routes/atlas.js';
 /**
@@ -76,6 +83,12 @@ const ROUTES: OpenApiRoute[] = [
   { method: 'GET', path: `${OPEN_API_PREFIX}/ping`, handler: handleOpenApiPing },
   { method: 'POST', path: `${OPEN_API_UPLOAD_PATH}/upload`, handler: handleOpenApiImportUpload },
   { method: 'GET', path: `${OPEN_API_UPLOAD_PATH}/status`, handler: handleOpenApiImportStatus },
+  /**
+   * 清理候选查询（2026-11-26）：纯读，POST 只因清单要走 JSON body（GET 塞不下几千条路径）。
+   * ⚠️ 认证层按**方法**判只读 Token → 本端点对只读 Token 返 403，这是既定边界
+   * （`--prune` 依附上传，上传本就需可写 Token），不是遗漏。
+   */
+  { method: 'POST', path: `${OPEN_API_UPLOAD_PATH}/prune`, handler: handleOpenApiImportPrune },
   /**
    * 事件状态查询（2026-11-19）：`lifecycle=event` 上传前先查一次，避免「包传完才发现
    * 事件不存在/已收口」。**不在 `isUploadPath` 里** —— 关掉上传接口后它照常可用，

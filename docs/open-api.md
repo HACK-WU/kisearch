@@ -165,6 +165,55 @@ curl -s -H "Authorization: Bearer $KI_TOKEN" \
 - **`skipped` 偏大是正常的**：重复上传同一批文档时，这些文件早已在 wiki 目录里，会全部计入 `skipped`。
 - **服务重启后再查同一任务**：状态改为从任务记录读（`source: "ledger"`），那份记录只存文件数与错误数，`result` 里不再有 `wikiWriteback`——不等于没写回，要复核请在下一次上传后当次读取，或看服务端日志。
 
+### 算「本地已删」的候选（只算不删）
+
+增量同步时，远端库里可能还留着本地已经删掉的文档。这个接口把它们**列出来**，供你确认：
+
+```bash
+curl -s -H "Authorization: Bearer $KI_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"scannedRels":["guide/a.md","guide/b.md"]}' \
+  "http://127.0.0.1:7423/open/v1/import/prune?scope=default&group=guide"
+```
+
+```json
+{
+  "ok": true,
+  "scope": "default",
+  "group": "guide",
+  "scanned": 2,
+  "plan": {
+    "eligibleCount": 3,
+    "scanned": 2,
+    "coordRatio": 1,
+    "deleteRatio": 0.333,
+    "warn": true,
+    "overLimit": false,
+    "total": 1,
+    "items": [{ "group": "guide/api", "relation": "旧文档", "sourcePath": "guide/api/old.md" }],
+    "truncated": false,
+    "unableCount": 0,
+    "untouchedGroups": []
+  },
+  "deletable": false,
+  "hint": "本通道只读：删除请到 Web「目录同步清理」勾选，或在服务端主机执行 ki import --prune --yes"
+}
+```
+
+`scannedRels` 必须是**这次目录里的全部 `.md` 相对路径**，不是刚上传的那批——增量上传只发变化的文件，交那批会把没变化的文档全算成「已删」。图片不要放进来。
+
+**没有 `skipReason` 字段 = 正常给了候选**；该字段出现表示没给候选，原因在 `skipDetail`：
+
+| 原因 | 含义 |
+|------|------|
+| `GATE_COORD` | 你给的路径与库里现有文档重合不到 80%，多半是目录选错了一层 |
+| `GATE_SCALE` | 这样删会删掉库里 80% 以上的文档，等于清库 |
+| `EMPTY_SOURCE` | 这次没扫到任何文档 |
+| `EMPTY_LIBRARY` | 库里没有可判断来源的文档，无需清理 |
+
+**这个接口不能删**：Token 通道没有删除权限，响应里 `deletable` 恒为 `false`。删除请到 Web「写入 → 目录同步清理」勾选，或在 ki 所在机器上执行 `ki import --source <同一目录> --group <组> --prune --yes`（不带 `--yes` 只预览）。
+
+> 本端点和上传一样，需要**可写 Token**：它用 `POST` 收清单，而只读 Token 按 HTTP 方法一律被拦（返回 `OPEN_API_TOKEN_READONLY`）。服务端关闭上传接口（`uploadApi: false`）时，它同样返回 404。
+
 ### 上传参数（都放在 URL 查询串里）
 
 | 参数 | 默认 | 说明 |
@@ -290,7 +339,7 @@ ki mcp status                      # 查看当前状态：uploadApi / uploadApiS
 
 也可以在配置里写 `mcp.http.uploadApi: false`，重启后生效。关闭后的行为：
 
-- `/open/v1/import/upload` 与 `/open/v1/import/status` 一律返回 **404**（不暴露接口是否存在）。
+- `/open/v1/import/upload`、`/open/v1/import/status` 与 `/open/v1/import/prune` 一律返回 **404**（不暴露接口是否存在）。
 - `/open/v1/atlas/package` 与 `/open/v1/atlas/status`（图集部署）同样返回 **404**——它们也属于「外部往库里写」。
 - `/open/v1/ping` 与 `/open/v1/events` 仍然可用（确认 Token、服务状态，以及有哪些事件可供挂载）。
 - Web 页面、`/api/*`、`/mcp` 工具、`/healthz` **完全不受影响**。
