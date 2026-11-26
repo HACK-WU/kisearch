@@ -112,9 +112,9 @@ describe('REQ-12 位置参数解析', () => {
   });
 });
 
-describe('REQ-10 sync-relation 超长 module-info 警告', () => {
-  it('>1000 字符时输出警告文案', () => {
-    const long = '内容'.repeat(600); // 1200 字符
+describe('REQ-10 sync-relation 超长 module-info 警告（阈值 4000）', () => {
+  it('>4000 字符时输出警告文案', () => {
+    const long = '内容'.repeat(2100); // 4200 字符
     const { stdout, stderr } = runCli([
       'sync-relation', '-s', 'warn-scope',
       '-g', 'wiki', '-r', '超长关系',
@@ -122,13 +122,14 @@ describe('REQ-10 sync-relation 超长 module-info 警告', () => {
     ]);
     const all = stdout + stderr;
     assert.ok(
-      all.includes('警告: --module-info 长度') || all.includes('超长内容可能导致向量质量稀释'),
+      all.includes('警告: --module-info 长度') || all.includes('超长内容会让单条向量语义被稀释'),
       `应输出超长警告：${all}`
     );
   });
 
-  it('≤1000 字符不输出警告', () => {
-    const short = '内容'.repeat(400); // 800 字符
+  it('≤4000 字符不输出警告', () => {
+    // 3800 字符：图 + 文字结论的正常量级，旧阈值 1000 下会误报
+    const short = '内容'.repeat(1900);
     const { stdout, stderr } = runCli([
       'sync-relation', '-s', 'normal-scope',
       '-g', 'wiki', '-r', '正常关系',

@@ -78,7 +78,7 @@ ki get-module-info --scope ${scope} --group "目标Group" --relation "Relation�
 
 批量读取：`--relation` 逗号分隔多个（≤10 条且须同 Group），或 MCP 工具传 `relations` 数组——返回逐条 `results`，部分失败不影响其他。
 
-> 超长 `--module-info`（>1000 字符）在写入时会收到警告，建议拆分或改用 `ki import` 自动切分。
+> 超长 `--module-info`（>4000 字符）在写入时会收到警告，建议拆分或改用 `ki import` 自动切分。
 
 ### 第④步：语义兜底与回问用户
 

@@ -6,7 +6,7 @@
 - **高频参数短别名**：`-s`(--scope)、`-q`(--query)、`-t`(--text)、`-g`(--group)、`-r`(--relation)、`-i`(--input)、`-n`(--name)。
   > `-o`(--output) 不支持：`export` 只认 `--output` 长选项。
 - **必填文本参数位置化**：`ki search "sas"`、`ki store "内容"` 可直接传位置参数；`--query` / `--text` 保留兼容，位置参数优先。
-- **超长内容警告**：`sync-relation --module-info` 超过 1000 字符时输出警告（建议拆分或改用 `ki import --source`），不自动切分。
+- **超长内容警告**：`sync-relation --module-info` 超过 4000 字符时输出警告（建议拆分或改用 `ki import --source`），不自动切分。
 
 **配置优先级**
 1. `--config <path>`（按扩展名判定 YAML / JSON 解析器）
@@ -1074,7 +1074,7 @@ ki sync-relation \
   -r <text> --module-info <markdown>
 ```
 
-> **超长警告**：`--module-info` 超过 1000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。
+> **超长警告**：`--module-info` 超过 4000 字符时输出警告，建议拆分多条写入或改用 `ki import --source <dir>` 自动切分；`sync-relation` 不自动切分（保持单条关系语义）。4000 字符大约能放下「一张 20~30 节点的流程图 + 800 字说明」，再长就该拆条或改用导入。
 
 > **FTS-only 模式（`--no-vector`）**：写 KB 层并把正文写入独立全文 Collection，**不调用 embedding API、不写 dense 向量**——使用 `ki search --mode fulltext` 召回；语义 hybrid 检索仍不会召回该文档。单条与批量模式均支持：
 > ```bash

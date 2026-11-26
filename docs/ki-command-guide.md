@@ -195,7 +195,7 @@ ki group delete "父Group路径/目标Group名" --yes --scope <scope>
 
 ## 超长 module-info 提示
 
-`sync-relation` 对超长 `--module-info`（>1000 字符）输出警告（建议拆分多条写入或改用 `ki import --source` 自动切分），但仍正常写入单条。
+`sync-relation` 对超长 `--module-info`（>4000 字符）输出警告（建议拆分多条写入或改用 `ki import --source` 自动切分），但仍正常写入单条。4000 字符足够放「一张 20~30 节点的流程图 + 800 字说明」。
 
 ---
 

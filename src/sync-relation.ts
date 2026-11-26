@@ -1690,11 +1690,14 @@ program
   .option('--tags <tags>', '文档内容自定义标签（逗号分隔多个，叠加在默认 ki-search 之上，如 api,auth）')
   .option('--no-vector', 'FTS-only 模式：不调用 embedding，不写 dense 向量；写入独立全文 Collection，可被 fulltext 检索')
   .action(async (opts) => {
-    // REQ-10：超长 module-info（>1000 字符）输出警告，不自动切分（保持单条关系语义）
-    if (opts.moduleInfo && opts.moduleInfo.length > 1000) {
+    // REQ-10：超长 module-info 输出警告，不自动切分（保持单条关系语义）。
+    // 2026-11-26 阈值 1000 → 4000：原阈值下一条"图 + 文字结论"的结构化记忆轻松触顶，
+    // 实际效果是逼着写入方只写纯文字（图没地方放）。4000 字符约容纳一张 20~30 节点
+    // 的 mermaid 图 + 800 字说明，仍低于"该拆 Relation"的量级 —— 超过它就该拆条或走 ki-upload。
+    if (opts.moduleInfo && opts.moduleInfo.length > 4000) {
       console.error(
-        `警告: --module-info 长度 ${opts.moduleInfo.length} 字符（>1000）。` +
-        `超长内容可能导致向量质量稀释；建议拆分多条写入，或改用 "ki import --source <dir>" 自动切分导入。`
+        `警告: --module-info 长度 ${opts.moduleInfo.length} 字符（>4000）。` +
+        `超长内容会让单条向量语义被稀释、检索命中变粗；建议拆分多条写入，或改用 "ki import --source <dir>" 自动切分导入。`
       );
     }
     // 非向量化模式（--no-vector → opts.vector=false）

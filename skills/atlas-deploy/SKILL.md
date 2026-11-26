@@ -1,6 +1,6 @@
 ---
 name: atlas-deploy
-description: 把 project-atlas 生成的图集包部署进 kisearch：校验压缩包形状、用 ki atlas upload 装机、验完再收工。触发："部署图集"、"上传知识地图"、"把图集装进 kisearch"、"atlas deploy"、"ki atlas upload"。
+description: 把 project-atlas 生成的图集包部署进 kisearch：校验压缩包形状、用 ki atlas upload 装机、把图集导出成 Markdown 同步给 AI 检索、验完再收工。触发："部署图集"、"上传知识地图"、"把图集装进 kisearch"、"图集同步给 AI"、"atlas deploy"、"ki atlas upload"。
 ---
 
 # 图集部署（atlas-deploy）
@@ -10,8 +10,8 @@ description: 把 project-atlas 生成的图集包部署进 kisearch：校验压�
 ## 概述（AI 说明层）
 
 - **目的**：补上「图集画完了怎么装进 kisearch」这一步，避免 agent 自己拼命令、漏校验、装完不验。
-- **功能**：包形状校验（唯一 html / baked / 无外链 / 体积）→ `ki atlas upload` 装机 → 三步入验证 → 按错误码排障 → 红线清单。
-- **使用场景**：本地或远端 agent 拿到 `project-atlas` 产物后要上架；图集装不上要定位；回滚上一版。
+- **功能**：包形状校验（唯一 html / baked / 无外链 / 体积）→ `ki atlas upload` 装机 → `export_markdown.py` 导出 md 并导入「知识地图」group（让 AI 也读得到）→ 四步验证 → 按错误码排障 → 红线清单。
+- **使用场景**：本地或远端 agent 拿到 `project-atlas` 产物后要上架；**要让 AI 也能检索图集内容**；图集装不上要定位；回滚上一版。
 - **不适用**：普通文档上传（用 `ki-upload`）、图集怎么画（用 `project-atlas`）。
 
 ## 0. 速览
@@ -24,7 +24,7 @@ description: 把 project-atlas 生成的图集包部署进 kisearch：校验压�
    ├─ ② 选目标库（§1：存在、可写、非只读）
    ├─ ③ ki atlas upload --scope <库> --file <zip>   （§3.1）
    ├─ ④ export_markdown.py 导出 md 目录              （§2.3，需图集目录在手）
-   ├─ ⑤ 导进同库的「知识地图」group                    （§3.2）
+   ├─ ⑤ 导进同库的「知识地图」group（带 --prune）       （§3.2）
    ├─ ⑥ ki atlas status --json 核对 sha/基线          （§4.1）
    ├─ ⑦ 打开 /atlas 点一个节点，抽屉里有代码          （§4.2）
    ├─ ⑧ AI 检索命中一页 + 取回一张图                  （§4.4）
@@ -125,11 +125,13 @@ ki atlas upload --scope <库> --file dist/atlas.zip --json
 
 ```bash
 # 远端（ki-client，自动分批 + 文件级增量）
-ki-client upload-dir dist/atlas-md/ --scope <库> --group 知识地图 --remote <源名> --wait
+ki-client upload-dir dist/atlas-md/ --scope <库> --group 知识地图 --remote <源名> --wait --prune
 
 # 同机（ki CLI，语义等价）
-ki import --scope <库> --source dist/atlas-md --group 知识地图
+ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune
 ```
+
+`--prune` 上传完再算「库中存在、本次目录已没有」的候选并打印，**不删除**；只对 `upload-dir` 有效（单文件 `upload` 没有「本次目录全量」，算不出差集）。减页/改名后的清理见 §3.3。
 
 落库形状（2026-11-26 实测）：
 
@@ -143,7 +145,9 @@ ki import --scope <库> --source dist/atlas-md --group 知识地图
 
 **文档数按「页数 + 1」核对**：根目录的 `README.md` 也会导入，落到 `知识地图` 根 group。8 页的图集实际是 **9 篇**（`createdTotal: 9`），别按页数认为多导了。
 
-> `ki-client upload-dir` 走 tar.gz 通道（含子目录或图片时自动切换），本次只做了代码核对、**未实测**；同机场景优先用 `ki import`（两条命令底层都是 `resolveGroupForSource`，group 拼接规则一致）。
+> `ki-client upload-dir` 走 tar.gz 通道（含子目录或图片时自动切换）。2026-11-26 实测：9 组 / 17 个文件（9 md + 8 svg）1.4 MB 一批传完，失败 0；两条通道底层都是 `resolveGroupForSource`，group 拼接规则一致。
+>
+> ⚠️ **两条通道的「篇数」口径不同，别拿去对账**：`ki-client` 打印的「导入完成：共 N 篇」取的是 `stats.total = entries.length`（`src/lib/import.ts:2401`），是**切分后的 chunk 数**；`ki import` 的 `createdTotal` 才是**文档数**。同一个目录前者报 16、后者报 9，不是丢文档。
 
 五条纪律：
 
@@ -171,22 +175,41 @@ ls /root/.ki-data/<库>/知识地图/                                   # md 在
 >
 > **检索口径要看视图成员**：若图集所在库不在 AI 常用视图里（本项目图集在 `default`，而 `kisearch-docs` 成员只有 `kisearch-memory` + `kisearch-xperts`），用视图名检索就命中不到，需显式叠加 `scope: "kisearch-docs,default"`。这是使用侧口径，不是导入失败。
 
-### 3.3 重部署与卸载的清理
+### 3.3 重部署与清理（用 `--prune`，不必删 group）
 
-导入**从不删除**旧文档，所以三条清理纪律：
+导入本身**只增不删**：改了同名覆盖，减页/改名的旧文档会留下。清理走服务端的「目录同步清理」，不靠删 group：
+
+```bash
+# ① 算候选（只打印，不删）——两条 CLI 都支持
+ki-client upload-dir dist/atlas-md/ --scope <库> --group 知识地图 --remote <源名> --prune
+ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune
+
+# ② 真删（只有同机 CLI 能删；远端 token 通道只读）
+ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune --yes
+#    拿不到同机 CLI 时：回页面「目录同步清理」勾选后删除
+```
 
 | 场景 | 做法 |
 |---|---|
-| 图集内容变了（页数不变） | 直接重导，同名覆盖 |
-| 图集**少了页面** | 先 `ki group delete "知识地图" -s <库> --yes` 再重导；否则已下线的那页仍留在库里被 AI 检索到 |
-| **卸载图集** | ① 页面顶栏「卸载图集」（或 `DELETE /api/atlas/package?scope=<库>`）；② `ki group delete "知识地图" -s <库> --yes`（**级联**子组 + KB + assets + 向量）。**两步都要做**——卸载图集包不会动 group |
-| **换库（迁移）** | 新库按 §3.1 + §3.2 重做一遍，再回旧库走上一行的卸载清理。只做前一半 = 两个库各有一份，版本迟早不一致 |
+| 图集内容变了（页数不变） | 重导 + `--prune`，候选应为 **0**；不为 0 说明页名变过 |
+| 图集**少了页面** | 重导 + `--prune` 看候选 → 同机 `--prune --yes`，或页面勾选删除 |
+| **卸载图集** | ① 页面顶栏「卸载图集」（或 `DELETE /api/atlas/package?scope=<库>`）；② group 默认**保留**（占位无副作用）。确实要清空痕迹再执行 `ki group delete "知识地图" -s <库> --yes`（级联子组 + KB + assets + 向量，进回收站） |
+| **换库（迁移）** | 新库按 §3.1 + §3.2 重做，再回旧库按上两行清理。只做前一半 = 两库各一份，版本迟早不一致 |
 
-> 🔴 **`-s <库>` 不能省**：`ki group delete` 的 scope 是**选项**不是位置参数，漏了就用 `default` 库——会在毫不相干的库里删掉同名组。同理 `ki import --scope` 也必须显式给。
+`--prune` 的六条口径（2026-11-26 实测 + 服务端 `import-prune.ts` / `open-api/routes/prune.ts` 实证）：
 
-⚠️ 两条边界：
+- **默认不算不删**：不加 `--prune` 时行为与以前逐字节一致
+- **双闸门 0.8 / 0.8**：本次目录与库内 `sourcePath` 的重合率 < 0.8（闸门 A，`GATE_COORD`），或候选占可判定文档 > 0.8（闸门 B，`GATE_SCALE`）时整体跳过，返回 `skipReason` 而不给候选 —— 防「传错目录把库清空」
+- **单次上限 500 篇**（`PRUNE_MAX_ITEMS`），超限分批删；候选指纹在删成功任一条后失效，重算才对得上
+- **只读 token 用不了**：`/open/v1/import/prune` 是 POST，只读 token 会被 403 `OPEN_API_TOKEN_READONLY`。这不是缺陷 —— prune 依附上传，上传本就需要可写 token。**只读库**则放行（纯读，与页面 `dryRun` 同口径）
+- **只能用于 `upload-dir`**：单文件 `upload` 没有「本次目录全量」概念，算不出差集；增量无变化时也会照常算（2026-11-26 实测：整批文件全部跳过上传后，仍打印「本次目录 8 篇 / 库内可判定 9 篇 / 候选 1 篇」，并额外点出「整组本次无文件落入：知识地图/05-模块地图」）。服务端不支持时会提示升级，不静默跳过
+- **退出码**：预览态恒为 0（有候选也不算失败）；`--prune --yes` 若有删除失败项则退出码 1（fail-loud），脚本据此判断是否删干净
 
-- **级联删 group 只有同机 CLI 能做**：MCP 的 `ki_group_delete_empty` 只删空叶子组；HTTP / open-api 没有 group 删除接口。远端 agent 做不了卸载清理，须回同机执行。
+> 🔴 **`-s <库>` 不能省**（仅删 group 那条命令用到）：`ki group delete` 的 scope 是**选项**不是位置参数，漏了就用 `default` 库——会在毫不相干的库里删掉同名组。同理 `ki import --scope` 也必须显式给。
+
+两条边界：
+
+- **删除只有同机 CLI 和页面能做**：`ki-client` 的 `--prune` 是只读的（open-api 不提供删除端点）；级联删 group 也只在同机 CLI（MCP 的 `ki_group_delete_empty` 只删空叶子组，HTTP 无该接口）。远端 agent 只能算候选、不能删 —— 见事件 #105 的分权拍板。
 - **删 group 会进回收站**（`KI_TRASH_DISABLED=1` 才硬删），彻底清零要等过期或走治理页 purge。
 
 ## 4. 验证（§4.1 + §4.2 必做；做了 §3.2 还要过 §4.4）
@@ -254,7 +277,7 @@ curl -sG 'http://127.0.0.1:7423/api/asset' \
 | AI 检索命中不到图集内容 | — | 没做 §3.2，或 group 名不是 `知识地图` | 按 §3.2 重导；`ki search --scope <库>` 确认命中 |
 | 文档里图裂 | — | 图片没随包上传，或 group 路径对不上 | 查 `{group}/assets/images/` 是否有文件；远端上传时看缺图 fail-loud 报错（退出码 1） |
 | 检索片段里没有 `file:line` | — | 正常现象：chunk 被 `codePath` 清洗 | 用 `ki_get_module_info` 读全文，位置列在 |
-| 图集改版后 AI 仍引旧页 | — | 导入不删除，下线页残留 | 按 §3.3 先删 group 再重导 |
+| 图集改版后 AI 仍引旧页 | — | 导入不删除，下线页残留 | 重导带 `--prune` 看候选，再 `--prune --yes` 或页面勾选删除（§3.3）；不必删 group |
 
 ## 6. 红线
 
