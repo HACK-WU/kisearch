@@ -95,7 +95,7 @@ remotes:
 | `asset get --scope --group --refs --out` | 附件落盘（输出绝对路径 + sha256） |
 | `doc get --scope --group --relation --out` | 正文还原成 `.md` + 文中附件按相对路径落盘（`--no-assets` 只取正文） |
 | `upload --scope <库> <文件...>` | 上传 markdown（可带 `--group` / `--tags` / `--lifecycle` / `--ttl-days` / `--event`） |
-| `upload-dir --scope <库> <目录>` | 上传整个目录（保留相对路径；只收 `.md` 与 `assets/` 下的图片；默认增量） |
+| `upload-dir --scope <库> <目录>` | 上传整个目录（保留相对路径；收 `.md` 与白名单后缀的图片，**不限目录**；默认增量） |
 | `atlas upload --scope <库> --file <zip>` | 把图集包装进远端库（`--title` 补标题 / `--force` 强制重传 / `--json`） |
 | `atlas status --scope <库>` | 核对已部署图集的基线、体积、包指纹 |
 | `status --task <id>` | 查一次导入进度（`upload --wait` 会自动轮询到终态） |
@@ -126,6 +126,8 @@ ki-client upload-dir --scope kb ./docs --no-state  # 不读不写状态文件
 ```
 
 失败的批次**不写状态**，重跑同一条命令即可补齐。
+
+**缺图默认算失败**：正文引用了、但上传列表里没有的图，服务端不会报错（md 导入成功、`errors: 0`，图变死链）——客户端会逐条列出并按退出码 1 返回。确认这些图本来就不需要时，加 `--allow-missing-assets` 降级为警告。注意「全部文件未变化」的空跑也会复算一次，不会因为增量跳过而把上次的缺图吞掉。
 
 全局参数：`--remote`、`--config`、`--json`、`--help`、`--version`。
 
@@ -190,7 +192,7 @@ via remote=prod (http://10.0.0.7:7423)
 npm install
 npm run build       # tsc → dist/
 npm run typecheck
-npm test            # 先 build，再跑 node:test（84 例：参数解析 / URL 拼接 / 文件名净化 /
+npm test            # 先 build，再跑 node:test（92 例：参数解析 / URL 拼接 / 文件名净化 /
                     #   配置读写 / 源解析 / ustar 打包（含真 tar 解包校验）/ HTTP 层 /
                     #   分批与通道选择 / md+附件分组 / 图集远程部署）
 node dist/cli.js --help

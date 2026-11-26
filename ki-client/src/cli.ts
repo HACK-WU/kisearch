@@ -39,7 +39,9 @@ const HELP = `ki-client —— ki 的远端取件客户端（多源，类比 git
                            把正文还原成 .md 并取回文中附件（--no-assets 只取正文）
   upload --scope <库> [--group <组>] <文件...>
   upload-dir --scope <库> [--group <组>] <目录>
-                           上传 markdown 与 assets 下的图片，保留目录结构（--wait 等导入完成）
+                           上传 markdown 与图片（任意目录，后缀白名单），保留目录结构
+                           （--wait 等导入完成；缺图默认按失败返回，
+                           确认不需要时加 --allow-missing-assets）
   atlas upload --scope <库> --file <zip> [--title <标题>] [--force]
                            把打包好的图集装进远端库（同包重传默认跳过，--force 强制）
   atlas status --scope <库>

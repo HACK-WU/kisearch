@@ -30,6 +30,8 @@ const VALUE_FLAGS = new Set([
 const BOOL_FLAGS = new Set([
   'json', 'help', 'version', 'overwrite', 'wait', 'no-assets', 'token-stdin',
   'archive', 'force', 'no-state',
+  // 上传：正文引用的图片缺失时，默认按失败返回；加它降级为警告（#101）
+  'allow-missing-assets', 'allowMissingAssets',
   // 图集：取回 archive 里那一版（`--version` 已是「看版本号」的布尔，故用 --previous 区分）
   'previous',
 ]);

@@ -151,7 +151,9 @@ ki-client upload --scope kb ./note.md --group wiki --wait     # 单个文件
 ki-client upload-dir --scope kb ./docs --group wiki           # 整个目录，保留相对路径
 ```
 
-只收两类文件：`.md`，以及 `assets/` 下的图片。其它文件会被明确拒绝（报错说明可用的后缀），不会静默丢掉。
+只收两类文件：`.md`，以及图片（`.png` / `.jpg` / `.jpeg` / `.gif` / `.svg` / `.webp` / `.ico` / `.bmp` / `.avif`）。**图片放在哪个目录都可以**——`images/`、`screenshots/`、`assets/` 都行，只要正文里的引用路径与它对应得上。其它后缀的文件会被跳过，并告诉你跳过了多少个。
+
+两种上传方式都**保留目录结构**：`upload docs/a.md` 落成 group 下的 `docs/a.md`，`upload-dir ./docs` 同样保留相对层级。这不是装饰——正文里 `./images/x.svg` 这类引用只有在结构完整时才对得上，图片才能跟着落库。
 
 常用参数：
 
@@ -162,15 +164,17 @@ ki-client upload-dir --scope kb ./docs --group wiki           # 整个目录，�
 | `--lifecycle` / `--ttl-days` | 文档分类与保留期 |
 | `--event` | 把上传的文档挂到某个事件上 |
 | `--wait` | 传完等导入跑完再返回（并据此判断成功与否） |
-| `--batch-bytes` | 每批上限，默认 32MB |
+| `--batch-bytes` | 每批上限，默认 64MB（单批超 32MB 时改用打包通道） |
 | `--archive` | 强制走打包通道 |
 | `--force` / `--no-state` | 忽略增量状态全传 / 不读不写状态 |
+| `--allow-missing-assets` | 正文引用的图片没随包上传时，默认按失败返回；加上它降级为警告 |
 
-三条机制，不必记，但要知道会怎样：
+四条机制，不必记，但要知道会怎样：
 
 - **通道自动选择**：根目录的纯 Markdown 走 multipart（最快）；出现子目录或图片、或单批过大时自动改用 tar.gz。带图时用 tar.gz 是**必须**的——multipart 通道当前不会落盘附件，Markdown 导入成功但 `assets/` 是空的，图全变死链。客户端已经自动规避，你不用判断。
 - **超大批次靠分批**：每批大小受服务端 `mcp.http.uploadMaxBytes` 约束。你给的 `--batch-bytes` 超过服务端上限时，会自动收窄并提示一次。
 - **增量是文件级的**：每个文件传成功后立刻记进 `~/.ki-client/state/`，下次只补没记过或内容变了的。**失败的批次不写状态**，重跑同一条命令即可补齐。
+- **缺图默认算失败**：正文引用了某张图、但上传的文件里没有它时，服务端不会报错（导入成功、图变死链），所以客户端替你兜住——逐条列出缺失、并按退出码 1 返回。确认这些图本来就不需要，加 `--allow-missing-assets` 即可降级为警告。
 
 ---
 

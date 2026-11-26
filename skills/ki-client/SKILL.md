@@ -87,6 +87,8 @@ ki-client upload-dir --scope kb ./docs --batch-bytes 33554432
 - **超大目录靠分批不靠压缩**：默认读 `ping` 回的 `limits.maxRequestBody`，你给的 `--batch-bytes` 超了会自动收窄并提示一次
 - **增量是文件级**：每个文件传成功后立刻记进 `~/.ki-client/state/<key>.json`（按「源 + 库 + 组 + 目录」派生），重跑同一条命令只补没记过或内容变了的；`--force` 全重传、`--no-state` 不读不写状态
 - **失败的批次不写状态**，重跑同一条命令即可补齐
+- **图片不限目录**：`.md` + 后缀白名单里的图片（`images/`、`screenshots/`、`assets/` 都行），只要正文引用路径与目录结构对得上；其它后缀跳过并报个数
+- **缺图默认算失败**：正文引用了但包里没有的图，服务端不会报错（md 成功、图变死链）→ 客户端逐条列出并按退出码 1 返回；确认不需要这些图时加 `--allow-missing-assets` 降级为警告。看到退出码 1 先看是不是这一类，别当成网络失败
 
 ## 图集部署：atlas upload / status
 

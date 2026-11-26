@@ -35,7 +35,13 @@ import { readState, sha256File, stateKey, writeState, type UploadState } from '.
 import type { ParsedArgs } from '../args.js';
 import type { ResolvedRemote } from '../remote.js';
 
-/** 与导入内核一致：正文只收 .md，附件只收白名单后缀（其余会在服务端被跳过） */
+/**
+ * 收集判据：正文只收 .md，附件只收白名单后缀（其余会在服务端被跳过）。
+ *
+ * ★ 附件**不按目录过滤**：服务端按「md 所在目录 + md 内的相对引用」去找文件，落点是
+ *   `{group}/assets/<ref 原文>`，跟目录是否叫 `assets/` 无关。曾在此加过 `assets/`
+ *   目录白名单，导致 `images/x.svg` 一张都进不了包（事件 #101）。
+ */
 const DOC_EXT = '.md';
 const ASSET_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp', '.avif']);
 
@@ -92,16 +98,18 @@ interface StatusResponse {
   };
 }
 
-function isWanted(file: string): boolean {
+export function isWanted(file: string): boolean {
   const ext = path.extname(file).toLowerCase();
   if (ext === DOC_EXT) return true;
-  if (!ASSET_EXT.has(ext)) return false;
-  // 附件只认 assets 目录下的（与导入侧「从文档相对引用收集附件」的口径一致）
-  return /(^|[\\/])assets[\\/]/.test(file);
+  // 任意目录下的白名单图片都收：目录名不参与判定（见文件头注释 + 事件 #101）
+  return ASSET_EXT.has(ext);
 }
 
-function collectFromDir(root: string): Array<{ rel: string; abs: string }> {
-  const picked: Array<{ rel: string; abs: string }> = [];
+type CollectedFile = { rel: string; abs: string };
+
+function collectFromDir(root: string): { picked: CollectedFile[]; skipped: string[] } {
+  const picked: CollectedFile[] = [];
+  const skipped: string[] = [];
   const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const abs = path.join(dir, entry.name);
@@ -110,16 +118,36 @@ function collectFromDir(root: string): Array<{ rel: string; abs: string }> {
         walk(abs);
         continue;
       }
-      if (!entry.isFile() || !isWanted(abs)) continue;
-      picked.push({ rel: path.relative(root, abs).split(path.sep).join('/'), abs });
+      if (!entry.isFile()) continue;
+      const rel = path.relative(root, abs).split(path.sep).join('/');
+      if (!isWanted(abs)) {
+        // 只记账不失败：目录里混 .json/.txt 属常态。真正的失败是「md 引用了却不在包里」，
+        // 那条由 missing 走 fail-loud（#101），这里不再静默（至少让调用方知道跳过了多少）。
+        skipped.push(rel);
+        continue;
+      }
+      picked.push({ rel, abs });
     }
   };
   walk(root);
-  return picked.sort((a, b) => a.rel.localeCompare(b.rel));
+  return { picked: picked.sort((a, b) => a.rel.localeCompare(b.rel)), skipped };
 }
 
-function collectFromPaths(paths: string[]): Array<{ rel: string; abs: string }> {
-  const picked: Array<{ rel: string; abs: string }> = [];
+/**
+ * 单文件模式的相对路径：能算成 cwd 相对就保留目录结构，否则退 basename。
+ *
+ * 必须保留结构：md 里的 `images/x.svg` 是相对 md 的，若把文件拍平成 basename，
+ * `groupDocs` 的 ref 解析必然全部落空（#101 的第二个坑）。cwd 外的文件无从推断结构，
+ * 只能退 basename。
+ */
+export function uploadedRelFor(abs: string): string {
+  const rel = path.relative(process.cwd(), abs).split(path.sep).join('/');
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return path.basename(abs);
+  return rel;
+}
+
+function collectFromPaths(paths: string[]): CollectedFile[] {
+  const picked: CollectedFile[] = [];
   for (const raw of paths) {
     const abs = path.resolve(raw);
     if (!fs.existsSync(abs)) {
@@ -131,11 +159,11 @@ function collectFromPaths(paths: string[]): Array<{ rel: string; abs: string }> 
     if (!isWanted(abs)) {
       throw new ClientError(
         'USAGE',
-        `${raw} 不会被导入内核接收（只收 .md 与 assets 下的图片）`,
+        `${raw} 不会被导入内核接收（只收 .md 与白名单后缀的图片）`,
         `可用后缀：${DOC_EXT} / ${[...ASSET_EXT].join(' ')}`,
       );
     }
-    picked.push({ rel: path.basename(abs), abs });
+    picked.push({ rel: uploadedRelFor(abs), abs });
   }
   return picked;
 }
@@ -176,18 +204,49 @@ export function normalizeRef(raw: string): string {
   return text.replace(/\\/g, '/');
 }
 
-/** 抽取一篇 markdown 引用的本地附件路径（外链跳过） */
+/**
+ * 是否为「可随包上传的本地相对引用」：与服务端 `isCollectibleRelativeAsset` 对齐。
+ *
+ * 外链 / `data:` / 协议相对（`//host/x`）/ posix 与 windows 绝对路径一律排除。
+ * 它们本就不在包里，若算进 missing 会让 fail-loud 变成满屏误报（#101）。
+ */
+export function isCollectibleRef(ref: string): boolean {
+  if (!ref) return false;
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(ref)) return false;
+  if (ref.startsWith('/')) return false;
+  if (/^[a-zA-Z]:[\\/]/.test(ref)) return false;
+  if (ref.startsWith('#')) return false;
+  return true;
+}
+
+/** 抽取一篇 markdown 引用的本地附件路径（外链 / 绝对路径跳过） */
 export function extractImageRefs(markdown: string): string[] {
   const found = new Set<string>();
   for (const match of markdown.matchAll(MD_REF_RE)) {
     const ref = normalizeRef(match[1] ?? '');
-    if (ref && !/^[a-z][a-z0-9+.-]*:/i.test(ref)) found.add(ref);
+    if (isCollectibleRef(ref)) found.add(ref);
   }
   for (const match of markdown.matchAll(HTML_IMG_RE)) {
     const ref = normalizeRef(match[1] ?? '');
-    if (ref && !/^[a-z][a-z0-9+.-]*:/i.test(ref)) found.add(ref);
+    if (isCollectibleRef(ref)) found.add(ref);
   }
   return [...found];
+}
+
+/**
+ * 把 md 内的引用解析成「相对上传根」的候选路径（顺序即优先级）。
+ *
+ * 为什么必须相对 md 目录解析：md 里的 `./images/x.svg` 相对**它自己**，而收集列表里的
+ * `rel` 相对**上传根**。`01-总览/a.md` + `images/x.svg` 只有拼成 `01-总览/images/x.svg`
+ * 才对得上；直接 `byPath.get(ref)` 永远命中不了（#101 的第二个坑）。
+ *
+ * 第二个候选是 ref 原样：兼容「目录已整理成引用即相对上传根」的历史形态，
+ * 命中时与改动前行为一致，不会把原来能传的包改坏。
+ */
+export function refCandidates(docRel: string, ref: string): string[] {
+  const docDir = path.posix.dirname(docRel.replace(/\\/g, '/'));
+  const joined = docDir === '.' ? ref : path.posix.join(docDir, ref);
+  return joined === ref ? [joined] : [joined, ref];
 }
 
 /**
@@ -212,10 +271,12 @@ export function groupDocs(files: PickedFile[]): DocGroup[] {
       // 读不出来就当没有附件，正文照传（服务端会报读不到）
     }
     for (const ref of extractImageRefs(markdown)) {
-      const hit = byPath.get(ref);
-      if (!hit || hit.rel === doc.rel) {
-        // 引用了但本次没带这个文件：服务端会静默丢图，这里记下来由调用方提示
-        if (!hit) missing.push(ref);
+      const hit = refCandidates(doc.rel, ref)
+        .map((candidate) => byPath.get(candidate))
+        .find((item): item is PickedFile => item !== undefined && item.rel !== doc.rel);
+      if (!hit) {
+        // 引用了但本次没带这个文件：服务端会静默丢图，这里记下来由调用方 fail-loud
+        missing.push(ref);
         continue;
       }
       if (claimed.has(hit.rel)) continue;
@@ -242,6 +303,19 @@ export function groupDocs(files: PickedFile[]): DocGroup[] {
     }
   }
   return groups;
+}
+
+/**
+ * 缺图清单（`<md 相对路径> → <ref>`）。
+ *
+ * 抽出来是为了让「全部文件都未变化」的空跑也能复算一遍：那种情况下 `picked` 为空、
+ * 顺序上根本走不到正常路径的 missing 检查，而增量状态里已经记过「文件传成功」——
+ * 结果就是「上次报缺图 → 用户原样重跑 → 静默返回 0」，fail-loud 只生效一次（#101）。
+ */
+export function missingRefLines(files: Array<{ rel: string; abs: string }>): string[] {
+  const groups = groupDocs(files.map((item) => ({ ...item, bytes: 0, sha256: '' })));
+  return groups.flatMap((group) =>
+    group.missing.map((ref) => `${group.doc?.rel ?? '(附件)'} → ${ref}`));
 }
 
 /** 人类可读体积（400B 不该显示成 0.0MB） */
@@ -314,9 +388,15 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
   }
 
   const rootDir = isDirMode ? path.resolve(rest[0]!) : process.cwd();
-  const raw = isDirMode ? collectFromDir(rootDir) : collectFromPaths(rest);
+  const collected = isDirMode
+    ? collectFromDir(rootDir)
+    : { picked: collectFromPaths(rest), skipped: [] as string[] };
+  const raw = collected.picked;
   if (raw.length === 0) {
-    throw new ClientError('USAGE', '没有可上传的文件（只收 .md 与 assets 下的图片）', '确认目录里确实有 markdown');
+    throw new ClientError('USAGE', '没有可上传的文件（只收 .md 与白名单后缀的图片）', '确认目录里确实有 markdown');
+  }
+  if (collected.skipped.length > 0) {
+    console.log(`跳过 ${collected.skipped.length} 个非文档/非图片文件（后缀不在白名单，例如 ${collected.skipped[0]}）`);
   }
 
   // 写操作必须先说清楚「发给谁」（多源下这是最重要的一行）
@@ -359,8 +439,23 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
   if (skipped > 0) {
     console.log(`跳过 ${skipped} 个未变化的文件（内容指纹相同；--force 可强制重传）`);
   }
+  /**
+   * 缺图必须 fail-loud（#101）：服务端遇到找不到的附件**不报错**（`errors: 0`），
+   * md 导入成功、图变死链，用户以为传完了。默认按失败返回，`--allow-missing-assets`
+   * 才降级为警告 —— 给出路，不静默。
+   */
+  const allowMissingAssets = args.bool('allow-missing-assets') || args.bool('allowMissingAssets');
   if (picked.length === 0) {
     console.log('没有需要上传的文件（全部未变化）');
+    // 空跑也要复算：否则「报过缺图 → 原样重跑」会静默返回 0（见 missingRefLines 注释）
+    const dryRunMissing = missingRefLines(raw);
+    if (dryRunMissing.length > 0) {
+      console.log(`错误：${dryRunMissing.length} 处图片引用在上传列表里找不到对应文件（本次无文件需重传，但仍按失败返回）：`);
+      for (const line of dryRunMissing.slice(0, 10)) console.log(`  - ${line}`);
+      if (dryRunMissing.length > 10) console.log(`  ... 另有 ${dryRunMissing.length - 10} 处`);
+      console.log('确认无需这些图可加 --allow-missing-assets；补上图或改掉引用后重跑即可');
+      return allowMissingAssets ? 0 : 1;
+    }
     return 0;
   }
 
@@ -378,9 +473,15 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
   const missingRefs = groups.flatMap((group) =>
     group.missing.map((ref) => `${group.doc?.rel ?? '(附件)'} → ${ref}`));
   if (missingRefs.length > 0) {
-    console.log(`警告：${missingRefs.length} 处图片引用找不到对应文件，服务端会静默丢这些图（不报错）：`);
+    console.log(`${allowMissingAssets ? '警告' : '错误'}：${missingRefs.length} 处图片引用在上传列表里找不到对应文件，服务端会静默丢这些图（md 导入成功、errors 0）：`);
     for (const line of missingRefs.slice(0, 10)) console.log(`  - ${line}`);
     if (missingRefs.length > 10) console.log(`  ... 另有 ${missingRefs.length - 10} 处`);
+    if (!allowMissingAssets) {
+      console.log('按 fail-loud 约定本次按失败返回（退出码 1）。三条出路：');
+      console.log('  ① 这些图确实不需要 → 加 --allow-missing-assets 降级为警告');
+      console.log('  ② 图在别的目录 → 把它们放进上传目录，或用 upload 逐个传');
+      console.log('  ③ 引用写错了（路径层级 / 大小写 / 带了不存在的子目录）→ 改 md 里的引用');
+    }
   }
   const batches = planBatches(groups, effectiveLimit);
 
@@ -437,9 +538,16 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
   }
 
   const failed = outcomes.filter((item) => item.error);
+  const missingFailed = !allowMissingAssets && missingRefs.length > 0;
   if (args.bool('json')) {
-    console.log(JSON.stringify({ ok: failed.length === 0, remote: remote.name, skipped, batches: outcomes }, null, 2));
-    return failed.length === 0 ? 0 : 1;
+    console.log(JSON.stringify({
+      ok: failed.length === 0 && !missingFailed,
+      remote: remote.name,
+      skipped,
+      missing: missingRefs,
+      batches: outcomes,
+    }, null, 2));
+    return failed.length === 0 && !missingFailed ? 0 : 1;
   }
 
   console.log(`\n上传结束：成功 ${outcomes.length - failed.length} 批 / 失败 ${failed.length} 批${skipped > 0 ? ` / 跳过 ${skipped} 个文件` : ''}`);
@@ -447,7 +555,10 @@ export async function runUpload(args: ParsedArgs, remote: ResolvedRemote): Promi
     console.log('失败的批次未写入增量状态，重跑同一命令即可补齐');
     for (const item of failed) console.log(`  - 第 ${item.index + 1} 批：${item.error}`);
   }
-  return failed.length === 0 ? 0 : 1;
+  if (missingFailed) {
+    console.log(`图片缺失 ${missingRefs.length} 处未解决，按失败返回（见上方列表；确认无需这些图可加 --allow-missing-assets）`);
+  }
+  return failed.length === 0 && !missingFailed ? 0 : 1;
 }
 
 function buildForm(batch: PickedFile[]): FormData {
