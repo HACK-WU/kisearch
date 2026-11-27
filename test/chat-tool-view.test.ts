@@ -120,6 +120,44 @@ describe('对话 ki_group_list 视图展开', () => {
     assert.equal(out.buckets, undefined);
   });
 
+  it('ki_get_module_info 视图下走成员库（不再报「尚未导入」）', async () => {
+    const { getChatTool } = await import('../src/lib/chat/mcp-tool-registry.js');
+    const tool = getChatTool('ki_get_module_info') as unknown as ChatToolEntry;
+    const out = await tool.run('solo', { group: 'g', relation: 'r' });
+    // 成员库是空 Group 树 → 文档不存在；关键是不再拿视图名当 scope
+    assert.equal(out.ok, false);
+    assert.equal(out.view, 'solo');
+    assert.deepEqual(out.searched, ['kisearch']);
+    assert.ok(!String(out.error).includes('尚未导入'), `不应再报尚未导入：${String(out.error)}`);
+  });
+
+  it('ki_get_module_info 视图下 member 越界 → 拒绝并给成员清单', async () => {
+    const { getChatTool } = await import('../src/lib/chat/mcp-tool-registry.js');
+    const tool = getChatTool('ki_get_module_info') as unknown as ChatToolEntry;
+    const out = await tool.run('team', { group: 'g', relation: 'r', member: 'nope' });
+    assert.equal(out.ok, false);
+    assert.ok(String(out.error).includes('不是视图 team 的成员'));
+    assert.deepEqual(out.members, ['kisearch', 'kisearch-memory']);
+  });
+
+  it('ki_get_module_info 批量 + start_line 仍然 fail-loud（不得静默从文首返回）', async () => {
+    const { getChatTool } = await import('../src/lib/chat/mcp-tool-registry.js');
+    const tool = getChatTool('ki_get_module_info') as unknown as ChatToolEntry;
+    // solo 是单成员视图 → 批量免 member，直接落到成员库；起点参数必须由核心 fail-loud
+    const out = await tool.run('solo', { group: 'g', relations: ['r1'], start_line: 100 });
+    assert.equal(out.ok, false);
+    assert.match(String(out.error), /批量查询不支持/, `应指路而非静默忽略：${JSON.stringify(out).slice(0, 160)}`);
+  });
+
+  it('ki_tag_list 视图下返回合并形状（view/members，不是空 scope 结果）', async () => {
+    const { getChatTool } = await import('../src/lib/chat/mcp-tool-registry.js');
+    const tool = getChatTool('ki_tag_list') as unknown as ChatToolEntry;
+    const out = await tool.run('solo', {});
+    assert.equal(out.view, 'solo', `应走视图合并分支，实际：${JSON.stringify(out).slice(0, 120)}`);
+    assert.deepEqual(out.members, ['kisearch']);
+    assert.ok(Array.isArray(out.tags));
+  });
+
   it('视图整体超时：剩余成员进 skipped，不整体失败', async () => {
     const { queryGroupByScope } = await import('../src/lib/group-list-view.js');
     const out = await queryGroupByScope('team', {

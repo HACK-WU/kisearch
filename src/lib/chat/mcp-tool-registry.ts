@@ -31,8 +31,10 @@ import { runWithConfigSnapshot, loadConfig } from '../config.js';
 import { withTimeout, TOOL_TIMEOUT } from '../mcp-tools/util.js';
 import { executeSearch } from '../../search.js';
 import { queryGroupByScope, VIEW_TOTAL_TIMEOUT } from '../group-list-view.js';
-import { executeGetModuleInfo, executeGetModuleInfoBatch, PAGE_MIN_CHARS, PAGE_MAX_CHARS } from '../../get-module-info.js';
-import { executeTagList } from '../../tag.js';
+import { PAGE_MIN_CHARS, PAGE_MAX_CHARS } from '../../get-module-info.js';
+import { getModuleInfoByScope } from '../get-module-info-view.js';
+import { tagListByScope } from '../tag-list-view.js';
+import { isViewRequest, resolveScopeTargets } from '../scope-view.js';
 import { executeScopeList } from '../../scope.js';
 import { executeGroupCreate } from '../group-create.js';
 import { executeGroupDelete } from '../group-delete.js';
@@ -487,6 +489,7 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
             group: { type: 'string', description: 'Group 路径（支持向量语义兜底）' },
             relation: { type: 'string', description: 'Relation（文档）名称，精确匹配。单条查询用；与 relations 二选一' },
             relations: { type: 'array', items: { type: 'string' }, maxItems: 10, description: '同 Group 下批量查询（≤10 条）。与 relation 二选一；批量不支持 start_line / start_char' },
+            member: { type: 'string', description: '视图会话里指定来源库：同一 group+relation 在多个成员库都存在时必须指定（批量查询同样要指定）' },
             start_line: { type: 'integer', minimum: 1, description: '分段读取：起始行（1-based）。上次返回 nextStart 时用它续读；不传从第 1 行开始' },
             start_char: { type: 'integer', minimum: 0, description: '分段读取：起始行内字符偏移。仅当上次返回的 nextStart.char > 0 时才需要带上' },
             max_chars: { type: 'integer', minimum: PAGE_MIN_CHARS, maximum: PAGE_MAX_CHARS, description: `分段读取：本次正文的字符上限（${PAGE_MIN_CHARS}–${PAGE_MAX_CHARS}）。不传时按本轮工具返回预算自动取值` },
@@ -499,10 +502,15 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       { key: 'group', type: 'string', required: true },
       { key: 'relation', type: 'string' },
       { key: 'relations', type: 'stringArray', maxItems: 10 },
+      { key: 'member', type: 'string' },
       { key: 'start_line', type: 'int', min: 1 },
       { key: 'start_char', type: 'int', min: 0 },
       { key: 'max_chars', type: 'int', min: PAGE_MIN_CHARS, max: PAGE_MAX_CHARS },
     ],
+    /**
+     * 视图展开必须走 `getModuleInfoByScope`：会话 scope 可以被用户选成视图，
+     * 直接调 `executeGetModuleInfo` 会把视图名当物理库名报「尚未导入」（#110 同根因）。
+     */
     run: (scope, a) => submitScoped('ki_get_module_info', scope, async () => {
       // 分段参数：只在模型（或预算注入）真的给了才下传，缺省仍走全文语义
       const page = {
@@ -510,26 +518,59 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
         ...(a.start_char !== undefined ? { startChar: a.start_char as number } : {}),
         ...(a.max_chars !== undefined ? { maxChars: a.max_chars as number } : {}),
       };
-      if (a.relations !== undefined) {
-        return withTimeout(
-          executeGetModuleInfoBatch({
-            scope,
-            group: a.group as string,
-            relations: a.relations as string[],
-            // 起点参数下传而非丢弃：批量下它们无意义，由核心函数 fail-loud 指路
-            ...(a.start_line !== undefined ? { startLine: a.start_line as number } : {}),
-            ...(a.start_char !== undefined ? { startChar: a.start_char as number } : {}),
-            ...(a.max_chars !== undefined ? { maxChars: a.max_chars as number } : {}),
-          }),
-          TOOL_TIMEOUT.READ,
-          'ki_get_module_info',
-        );
+      const outcome = await getModuleInfoByScope({
+        scope,
+        group: a.group as string,
+        relation: a.relation as string | undefined,
+        relations: a.relations as string[] | undefined,
+        member: a.member as string | undefined,
+        page,
+        timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_get_module_info' },
+        totalMs: VIEW_TOTAL_TIMEOUT.CHAT,
+      });
+      switch (outcome.kind) {
+        case 'single':
+          // 视图唯一命中 / 指定了 member 时，把来源库一并告诉模型（同文档可能在别库另有版本）
+          return outcome.member
+            ? { ...(outcome.result as Record<string, unknown>), member: outcome.member }
+            : outcome.result;
+        case 'view-empty':
+          return {
+            ok: false,
+            view: outcome.view,
+            error: `视图 ${outcome.view} 没有可用的成员库`,
+            skipped: outcome.skipped,
+          };
+        case 'bad-member':
+          return {
+            ok: false,
+            view: outcome.view,
+            error: `member "${outcome.member}" 不是视图 ${outcome.view} 的成员`,
+            members: outcome.members,
+          };
+        case 'batch-needs-member':
+          return {
+            ok: false,
+            view: outcome.view,
+            error: '视图模式下批量查询必须指定 member（同一 Group 下逐库调用，或先指定来源库）',
+            candidates: outcome.candidates,
+          };
+        case 'ambiguous':
+          return {
+            ok: false,
+            view: outcome.view,
+            error: `该文档在视图 ${outcome.view} 的多个知识库中同时存在，请用 member 指定来源库`,
+            candidates: outcome.candidates,
+          };
+        case 'not-found':
+          return {
+            ok: false,
+            view: outcome.view,
+            error: `在视图 ${outcome.view} 的 ${outcome.searched.length} 个成员库中均未找到该文档`,
+            searched: outcome.searched,
+            ...(outcome.failures.length > 0 ? { failed: outcome.failures } : {}),
+          };
       }
-      return withTimeout(
-        executeGetModuleInfo({ scope, group: a.group as string, relation: a.relation as string, ...page }),
-        TOOL_TIMEOUT.READ,
-        'ki_get_module_info',
-      );
     }),
   }),
   /**
@@ -560,6 +601,7 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
               maxItems: MAX_IMAGES_PER_CALL,
               description: `images[].ref 原样传回，1~${MAX_IMAGES_PER_CALL} 张`,
             },
+            member: { type: 'string', description: '视图会话里指定图片来源库（必须是当前视图的成员库）；单成员视图可省略，多成员视图必填' },
           },
           required: ['group', 'refs'],
         },
@@ -568,14 +610,37 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
     specs: [
       { key: 'group', type: 'string', required: true },
       { key: 'refs', type: 'stringArray', required: true, maxItems: MAX_IMAGES_PER_CALL },
+      { key: 'member', type: 'string' },
     ],
-    run: (scope, a) => submitScoped('ki_get_image', scope, () =>
-      withTimeout(
+    /**
+     * 图片按 `dataDir/<scope>/…/assets` 取，**视图名不是物理目录**：
+     * 会话 scope 是视图时必须落到成员库，否则取图必然"文件缺失"。
+     * member 只允许视图成员库（或会话自身），防止借 member 越权读别的库。
+     */
+    run: (scope, a) => submitScoped('ki_get_image', scope, async () => {
+      const targets = resolveScopeTargets(loadConfig(), scope);
+      const allowed = isViewRequest(targets) ? targets.scopes : [scope];
+      const asked = a.member as string | undefined;
+      if (asked !== undefined && !allowed.includes(asked)) {
+        return {
+          ok: false,
+          error: `member "${asked}" 不在当前会话的检索范围内（可用：${allowed.join('、')}）`,
+        };
+      }
+      const target = asked ?? (allowed.length === 1 ? allowed[0] : undefined);
+      if (target === undefined) {
+        return {
+          ok: false,
+          error: `当前会话是视图，取图需指定 member（成员库：${allowed.join('、')}）`,
+        };
+      }
+      return withTimeout(
         // allowSvg：SVG 走 worker 栅格化（D9）；READ 档 30s 覆盖"3 张 × 单张 10s"最坏情况
-        executeGetImage({ scope, group: a.group as string, refs: a.refs as string[], allowSvg: true }),
+        executeGetImage({ scope: target, group: a.group as string, refs: a.refs as string[], allowSvg: true }),
         TOOL_TIMEOUT.READ,
         'ki_get_image',
-      )),
+      );
+    }),
   }),
   makeEntry({
     name: 'ki_tag_list',
@@ -589,8 +654,32 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       },
     },
     specs: [],
-    run: (scope) => submitScoped('ki_tag_list', scope, () =>
-      withTimeout(executeTagList({ scope }), TOOL_TIMEOUT.READ, 'ki_tag_list')),
+    /** 视图合并各成员库 tag 并累加计数；直连核心会拿视图名查出空列表（静默冒充「没有 tag」） */
+    run: (scope) => submitScoped('ki_tag_list', scope, async () => {
+      const outcome = await tagListByScope(scope, {
+        timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_tag_list' },
+        totalMs: VIEW_TOTAL_TIMEOUT.CHAT,
+      });
+      if (outcome.kind === 'view-empty') {
+        return {
+          ok: false,
+          view: outcome.view,
+          error: `视图 ${outcome.view} 没有可用的成员库`,
+          skipped: outcome.skipped,
+        };
+      }
+      if (outcome.kind === 'view') {
+        return {
+          ok: true,
+          view: outcome.view,
+          members: outcome.members,
+          count: outcome.tags.length,
+          tags: outcome.tags,
+          ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+        };
+      }
+      return outcome.result;
+    }),
   }),
   makeEntry({
     name: 'ki_scope_list',

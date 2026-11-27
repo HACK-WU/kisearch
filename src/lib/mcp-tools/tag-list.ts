@@ -1,9 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { executeTagList } from '../../tag.js';
-import { loadConfig } from '../config.js';
-import { isViewRequest, resolveScopeTargets } from '../scope-view.js';
-import { withTimeout, TOOL_TIMEOUT } from './util.js';
+import { tagListByScope } from '../tag-list-view.js';
+import { TOOL_TIMEOUT } from './util.js';
 
 export function registerTagListTool(server: McpServer): void {
   server.tool(
@@ -15,82 +13,53 @@ export function registerTagListTool(server: McpServer): void {
     async (args) => {
       try {
         /**
-         * 视图：**合并 + 计数累加**（与 group/doc 的分桶不同）。
-         * tag 是跨库筛选维度，Agent 要的是"整个视图有哪些 tag、各多少篇"；
-         * 分桶会让它逐库调一遍才知道全貌。
-         */
-        const targets = resolveScopeTargets(loadConfig(), args.scope);
-        /*
+         * 视图展开统一交给 `tagListByScope`（CLI / 对话侧共用）。
          * ★ 判据是「名字命中视图」，不能叠加成员数：单成员视图落到单库分支
          *   会拿视图名去 `vectorListTags`，返回空列表冒充"没有 tag"（静默错误答案）。
          */
-        if (isViewRequest(targets)) {
-          if (targets.scopes.length === 0) {
-            return {
-              isError: true,
-              content: [{
-                type: 'text',
-                text: JSON.stringify({
-                  ok: false,
-                  view: targets.views[0],
-                  error: `视图 ${targets.views[0]} 没有可用的成员库`,
-                  skipped: targets.skipped,
-                }, null, 2),
-              }],
-            };
-          }
-          const merged = new Map<string, { tag: string; count: number; scopes: string[] }>();
-          const skipped: { scope: string; reason: string }[] = [...targets.skipped];
-          for (const member of targets.scopes) {
-            try {
-              const r = await withTimeout(
-                executeTagList({ scope: member }),
-                TOOL_TIMEOUT.READ,
-                'ki_tag_list',
-              );
-              if (!r.ok) { skipped.push({ scope: member, reason: r.error }); continue; }
-              for (const t of r.tags) {
-                const hit = merged.get(t.tag);
-                if (hit) {
-                  hit.count += t.count;
-                  if (!hit.scopes.includes(member)) hit.scopes.push(member);
-                } else {
-                  merged.set(t.tag, { tag: t.tag, count: t.count, scopes: [member] });
-                }
-              }
-            } catch (err) {
-              skipped.push({ scope: member, reason: (err as Error).message });
-            }
-          }
-          const tags = [...merged.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+        const outcome = await tagListByScope(args.scope, {
+          timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_tag_list' },
+        });
+
+        if (outcome.kind === 'view-empty') {
           return {
+            isError: true,
             content: [{
               type: 'text',
               text: JSON.stringify({
-                ok: true,
-                view: targets.views[0],
-                members: targets.scopes,
-                count: tags.length,
-                tags,
-                ...(skipped.length > 0 ? { skipped } : {}),
+                ok: false,
+                view: outcome.view,
+                error: `视图 ${outcome.view} 没有可用的成员库`,
+                skipped: outcome.skipped,
               }, null, 2),
             }],
           };
         }
 
-        const result = await withTimeout(
-          executeTagList({ scope: args.scope }),
-          TOOL_TIMEOUT.READ,
-          'ki_tag_list'
-        );
-        if (!result.ok) {
+        if (outcome.kind === 'view') {
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify({
+                ok: true,
+                view: outcome.view,
+                members: outcome.members,
+                count: outcome.tags.length,
+                tags: outcome.tags,
+                ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+              }, null, 2),
+            }],
+          };
+        }
+
+        if (!outcome.result.ok) {
           return {
             isError: true,
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            content: [{ type: 'text', text: JSON.stringify(outcome.result, null, 2) }],
           };
         }
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(outcome.result, null, 2) }],
         };
       } catch (err) {
         return {
@@ -98,6 +67,6 @@ export function registerTagListTool(server: McpServer): void {
           content: [{ type: 'text', text: (err as Error).message }],
         };
       }
-    }
+    },
   );
 }
