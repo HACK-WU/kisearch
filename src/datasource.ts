@@ -86,7 +86,7 @@ function logProgress(event: { progress: { phase?: string; done: number; total: n
   }
 }
 
-/** 短命 CLI：删除/同步会打开 dense/FTS 引擎，不关会留住 worker 让进程不退出 */
+/** 短命 CLI：删除/同步会打开 dense/FTS 引擎；worker 空闲已 unref，不关也能退出，但不做 closeSync flush、锁要等进程结束 */
 async function shutdownEngines(): Promise<void> {
   try { await closeEngine(); } catch { /* ignore */ }
   try { await closeFtsEngine(); } catch { /* ignore */ }

@@ -103,6 +103,8 @@ export class ZvecEngineProxy {
     try {
       this.persistedSchema = await readyPromise;
       this.state = 'open';
+      // open 完就进入空闲态：调用方若不再发请求，不该被 worker 拖着不退（见 unrefWhenIdle）
+      this.unrefWhenIdle();
       return this.persistedSchema;
     } catch (err) {
       this.state = 'failed';
@@ -119,11 +121,20 @@ export class ZvecEngineProxy {
         new WorkerUnavailableError(`worker not open (state=${this.state})`),
       );
     }
+    // 有在途请求时必须 ref：否则「空闲 unref + 最后一个请求」会让进程在写操作完成前退出
+    this.refWorker();
     const id = newMessageId();
     const req = { id, kind, payload } as WorkerRequest;
     return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
-      this.post(req, transfer);
+      try {
+        this.post(req, transfer);
+      } catch (err) {
+        // post 失败必须回收 pending：条目永久残留会让 unrefWhenIdle 永远判「有在途请求」，
+        // 进程重新变成挂住不退（与 #109 要修的现象同源），且调用方拿到的是永不 settle 的 Promise
+        this.pending.delete(id);
+        reject(err as Error);
+      }
     });
   }
 
@@ -134,6 +145,8 @@ export class ZvecEngineProxy {
     if (this.state === 'closed' || this.state === 'crashed' || this.state === 'failed') {
       return;
     }
+    // 收尾期间必须保活：drain/closeSync 的等待若只剩 unref 句柄，进程会先退出（锁靠 OS 回收）
+    this.refWorker();
     if (this.state !== 'open') {
       // opening 中调 close：原生 ZVecOpen 可能已经拿到 flock，直接 terminate 会让
       // `<dbPath>/LOCK` 永久滞留在本进程（"幽灵占用"：此后连本进程自己 probe 都判 locked）。
@@ -172,6 +185,12 @@ export class ZvecEngineProxy {
    * 强制 terminate（不等 drain，用于 destroy/crash 场景）
    */
   async terminate(): Promise<void> {
+    // terminate 本身也是异步收尾：先 ref，避免进程在 worker 真正终止前退出
+    this.refWorker();
+    // 状态必须**先**落定再 await：unrefWhenIdle 的回调是延迟执行的，若此刻仍是 'open'
+    // 且 pending 已清空，它会把正在 terminate 的 worker unref 掉 —— 主线程随即没有 ref
+    // 句柄，进程（或 node:test 的事件循环）会在 terminate 落定前判定为空并退出。
+    this.state = 'closed';
     this.rejectAllPending(new WorkerUnavailableError('worker terminated'));
     if (this.worker) {
       try {
@@ -223,6 +242,33 @@ export class ZvecEngineProxy {
 
   // ─── 内部 ───
 
+  /** 有在途请求时重新 ref，避免进程在写操作中途退出 */
+  private refWorker(): void {
+    try { this.worker?.ref(); } catch { /* ignore */ }
+  }
+
+  /**
+   * 空闲时 unref worker（不再阻塞进程退出）。
+   *
+   * 背景（事件 #109）：worker 历来是 ref 的，短命令 / 调试脚本忘记 `closeEngine()` 时，
+   * 进程会永久挂住并持续持有该 collection 的 LOCK（实测一个只读脚本 87s 不退、30 个 fd，
+   * 另一个脚本挂 3 天）。改为「send 时 ref、pending 清空且 open 时 unref」后：有在途
+   * 请求仍保活，空闲则允许进程自然结束（fd 与 flock 由 OS 回收）；daemon 有 HTTP server
+   * 句柄、CLI 有显式 closeEngine，都不依赖 worker 兜底。
+   *
+   * 用 setImmediate 延后一拍：onMessage 里 resolve 之后调用方续体才执行，立刻 unref 会让
+   * 「续体」与「退出判定」赛跑；延后一拍保证续体先跑完（本拍仍由 setImmediate 自己保活）。
+   *
+   * 不改变 close/terminate 语义：两者入口已 ref，收尾期间不会因 unref 被截断。
+   */
+  private unrefWhenIdle(): void {
+    if (this.state !== 'open' || this.pending.size > 0) return;
+    setImmediate(() => {
+      if (this.state !== 'open' || this.pending.size > 0) return;
+      try { this.worker?.unref(); } catch { /* ignore */ }
+    });
+  }
+
   private post(req: WorkerRequest, transfer?: Transferable[]): void {
     if (!this.worker) {
       throw new WorkerUnavailableError('worker not spawned');
@@ -243,6 +289,7 @@ export class ZvecEngineProxy {
   }
 
   private sendRaw(kind: WorkerRequest['kind'], payload: unknown): Promise<unknown> {
+    this.refWorker();
     const id = newMessageId();
     const req = { id, kind, payload } as WorkerRequest;
     return new Promise((resolve, reject) => {
@@ -268,7 +315,12 @@ export class ZvecEngineProxy {
     }
     const { id } = msg as { id: string };
     const entry = this.pending.get(id);
-    if (!entry) return;   // 防御：未知 id
+    if (!entry) {
+      // 未知 id（协议异常/晚到的重复响应）：同样要重新评估空闲态，
+      // 否则 worker 会被上一轮请求永久 ref 住（#109 的挂住现象会从这条缝隙复现）
+      this.unrefWhenIdle();
+      return;
+    }
     this.pending.delete(id);
     if ((msg as { ok: boolean }).ok) {
       entry.resolve((msg as { result?: unknown }).result);
@@ -276,6 +328,8 @@ export class ZvecEngineProxy {
       const errMsg = msg as unknown as { error: import('./worker-protocol.js').SerializedError };
       entry.reject(deserializeError(errMsg.error));
     }
+    // 本批在途请求已全部完成 → 允许进程退出（有后续 send 会立刻 ref 回来）
+    this.unrefWhenIdle();
   }
 
   private handleCrash(err: Error): void {

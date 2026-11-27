@@ -87,7 +87,7 @@ program
       tags: opts.tags,
     });
     console.log(JSON.stringify(result, null, 2));
-    // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出
+    // CLI per-call：关闭 engine（terminate worker + 释放 LOCK）；worker 空闲已 unref，不关也能退出，但不做 closeSync flush、锁要等进程结束
     await closeEngine();
     if (!result.ok) process.exit(1);
   });

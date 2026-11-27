@@ -22,6 +22,16 @@ export interface LockHolder {
   cmd: string;
   /** 持锁者就是当前进程自己（提示需换措辞：不是"别的进程"，而是本进程的旧句柄/孤儿 worker） */
   self: boolean;
+  /**
+   * 进程启动时刻（epoch ms）；读不到为 undefined。
+   *
+   * 为什么要它：撞锁时最容易误判「持锁者还在写数据」。运行时长能把两种情形分开——
+   * 刚启动几秒（大概真在干活） vs 静置几小时/几天（多半是干完不退的残留进程），
+   * 后者才适合直接 kill（事件 #109，实测一个只读脚本持锁 9 分钟、另一个挂 3 天）。
+   */
+  startedAtMs?: number;
+  /** 已运行毫秒数（`now - startedAtMs`，clamp 到 0）；读不到为 undefined */
+  uptimeMs?: number;
 }
 
 /** 命令行摘要上限（避免把超长参数整段吐到提示里） */
@@ -75,6 +85,69 @@ export function parseProcLocks(content: string, ino: string, devKey?: string): n
   return null;
 }
 
+/**
+ * Linux USER_HZ：`/proc/<pid>/stat` 的 starttime 单位（jiffies）。
+ * 常规 x86/arm 内核恒为 100（与 `getconf CLK_TCK` 一致）；容器内同样继承。
+ * 取不到时宁可少报运行时长，也不要为它同步 spawn 一个 getconf（撞锁路径要快）。
+ */
+const USER_HZ = 100;
+
+/**
+ * 从 `/proc/<pid>/stat` 内容解析 starttime（第 22 字段，jiffies since boot）。
+ *
+ * 解析必须从**最后一个 `)`** 之后切分：第 2 字段 comm 可含空格与括号
+ * （如 `(node /path/with space)`），按空格直接 split 会整体错位。
+ */
+export function parseProcStatStartTicks(stat: string): number | null {
+  const close = stat.lastIndexOf(')');
+  if (close < 0) return null;
+  // 切片后第 1 项 = 原第 3 项 state，故原第 22 项 starttime 落在索引 19
+  const fields = stat.slice(close + 1).trim().split(/\s+/);
+  const raw = fields[19];
+  if (!raw) return null;
+  const ticks = Number(raw);
+  return Number.isFinite(ticks) && ticks >= 0 ? ticks : null;
+}
+
+/** `/proc/stat` 的 `btime`（开机时刻，epoch 秒）；读不到为 null */
+function readBootTimeMs(): number | null {
+  try {
+    const matched = /^btime\s+(\d+)/m.exec(fs.readFileSync('/proc/stat', 'utf8'));
+    if (!matched) return null;
+    const sec = Number(matched[1]);
+    return Number.isFinite(sec) ? sec * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 进程启动时刻（epoch ms）；任一步不可得返回 null（调用方降级为不带时长） */
+function readProcessStartMs(pid: number): number | null {
+  try {
+    const ticks = parseProcStatStartTicks(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    if (ticks === null) return null;
+    const bootMs = readBootTimeMs();
+    if (bootMs === null) return null;
+    return Math.round(bootMs + (ticks * 1000) / USER_HZ);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 运行时长的人类可读形式：`48秒` / `15分22秒` / `3小时7分` / `3天16小时`。
+ * 只用于判断"刚启动"还是"挂了两天"，不需要更细的秒级精度。
+ */
+export function formatUptime(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec}秒`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}分${sec % 60}秒`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}小时${min % 60}分`;
+  return `${Math.floor(hour / 24)}天${hour % 24}小时`;
+}
+
 function readComm(pid: number): string {
   try {
     return fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim() || '?';
@@ -108,10 +181,25 @@ export function findLockHolder(lockFilePath: string): LockHolder | null {
     // 先按 device+inode 精确匹配；device 编码不一致时退回 inode-only（宁可少报设备也不漏报持锁者）
     const pid = parseProcLocks(content, ino, deviceKeyOf(stat.dev)) ?? parseProcLocks(content, ino);
     if (pid === null) return null;
-    return { pid, name: readComm(pid), cmd: readCmdline(pid), self: pid === process.pid };
+    // 运行时长是"能不能直接 kill"的关键判据：读不到就省略，不让提示整体降级
+    const startedAtMs = readProcessStartMs(pid);
+    return {
+      pid,
+      name: readComm(pid),
+      cmd: readCmdline(pid),
+      self: pid === process.pid,
+      ...(startedAtMs !== null
+        ? { startedAtMs, uptimeMs: Math.max(0, Date.now() - startedAtMs) }
+        : {}),
+    };
   } catch {
     return null;
   }
+}
+
+/** 运行时长片段（读不到进程启动时刻时为空串，不改变原有措辞） */
+function uptimeNote(holder: LockHolder): string {
+  return holder.uptimeMs === undefined ? '' : `，已运行 ${formatUptime(holder.uptimeMs)}`;
 }
 
 /**
@@ -120,11 +208,24 @@ export function findLockHolder(lockFilePath: string): LockHolder | null {
  */
 export function formatLockHolder(holder: LockHolder): string {
   const label = `${holder.name}${holder.self ? '，本进程' : ''}`;
+  const uptime = uptimeNote(holder);
   if (holder.self) {
     // 末尾不加标点：调用方可能在其后接换行（lockedHint）或 `；`（health-check 提取）
-    return `  ● 持锁进程：PID ${holder.pid} (${label}) —— 锁被本进程自己持有（如 probe 孤儿 worker /`
+    return `  ● 持锁进程：PID ${holder.pid} (${label})${uptime} —— 锁被本进程自己持有（如 probe 孤儿 worker /`
       + ` 旧句柄未释放），重启本服务通常可解`;
   }
   const cmd = holder.cmd === '?' ? '' : ` — ${holder.cmd}`;
-  return `  ● 持锁进程：PID ${holder.pid} (${label})${cmd}`;
+  return `  ● 持锁进程：PID ${holder.pid} (${label})${uptime}${cmd}`;
+}
+
+/**
+ * 单行紧凑版（无前缀/换行），给撞锁重试日志用。
+ *
+ * 重试日志原来只给 PID 与进程名，看不出"它在干什么"；把命令行与运行时长一起带出来，
+ * 才能在刷屏日志里直接判断是长任务还是干完不退的残留进程（事件 #109）。
+ */
+export function formatLockHolderBrief(holder: LockHolder): string {
+  const label = `${holder.name}${holder.self ? '，本进程' : ''}`;
+  const cmd = holder.cmd === '?' ? '' : ` — ${holder.cmd}`;
+  return `PID ${holder.pid} (${label})${uptimeNote(holder)}${cmd}`;
 }

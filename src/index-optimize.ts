@@ -36,7 +36,7 @@ program
     });
     // outcome 自身含 ok（联合类型），勿再重复声明
     console.log(JSON.stringify({ action: 'index-optimize', scope, ...outcome }, null, 2));
-    // CLI per-call：必须关闭引擎（terminate worker + 释放 LOCK），否则进程无法退出
+    // CLI per-call：必须关闭引擎（terminate worker + 释放 LOCK）；worker 空闲已 unref，不关也能退出，但不做 closeSync flush、锁要等进程结束
     await closeEngine();
     if (!outcome.ok) process.exit(1);
   });

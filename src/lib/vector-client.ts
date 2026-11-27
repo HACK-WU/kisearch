@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'crypto';
-import { findLockHolder, formatLockHolder } from './lock-holder.js';
+import { findLockHolder, formatLockHolder, formatLockHolderBrief } from './lock-holder.js';
 // 注意：从 dist（编译产物）而非源码导入——zvec-engine 的 worker_threads 需要加载
 // 编译后的 worker.js，源码目录无法直接运行；故 dist 是运行时必需品，
 // 源码变更后需 npx tsc -p tsconfig.src.json（npm run build）重建。
@@ -223,9 +223,9 @@ async function probeWithRetry(dbPath: string): Promise<ProbeResult> {
     // 首次重试就把持锁者带出来：用户第一眼看到的往往正是这条刷屏日志（见 lib/lock-holder.ts）。
     // 只查一次（attempt===0），避免每条重试都读 /proc；查不到时日志保持原样。
     const holder = attempt === 0 ? findLockHolder(path.join(dbPath, 'LOCK')) : null;
-    const holderNote = holder
-      ? `（持锁进程 PID ${holder.pid} (${holder.name})${holder.self ? '，本进程' : ''}）`
-      : '';
+    // 带命令行与运行时长：刷屏日志里直接能看出「在干什么 / 挂多久了」，
+    // 不必再去 ps 反查（事件 #109：只给 PID 时无法判断该不该 kill）。
+    const holderNote = holder ? `（持锁进程 ${formatLockHolderBrief(holder)}）` : '';
     process.stderr.write(
       `[kisearch]${source ? `[${source}]` : ''} 向量库被其他进程占用${holderNote}，等待 ${LOCK_RETRY_INTERVAL_MS / 1000}s 后重试（${attempt + 1}/${LOCK_RETRY_MAX}）...\n`,
     );
@@ -775,7 +775,9 @@ export function getEngine(scope = 'default'): Promise<ZvecEngine> {
 
 /**
  * 关闭 engine（terminate worker + 释放 LOCK）并重置缓存。
- * CLI per-call 命令结束时必须调用，否则 worker 线程持引用导致进程无法退出。
+ * CLI per-call 命令结束时仍应调用：worker 空闲虽已 unref（#109，不调用也能退出），
+ * 但只有这里走 worker `closeSync` 做优雅 flush 并立即释放 LOCK；不调用则锁要等进程
+ * 结束由 OS 回收，且跳过 flush。
  */
 export async function closeEngine(scope?: string): Promise<void> {
   // 传 scope 时只释放该 Collection；scope delete 等 daemon 内操作不能因为

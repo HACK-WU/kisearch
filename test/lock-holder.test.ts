@@ -18,7 +18,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
-import { deviceKeyOf, findLockHolder, formatLockHolder, parseProcLocks, redactCmdline } from '../src/lib/lock-holder.js';
+import {
+  deviceKeyOf,
+  findLockHolder,
+  formatLockHolder,
+  formatLockHolderBrief,
+  formatUptime,
+  parseProcLocks,
+  parseProcStatStartTicks,
+  redactCmdline,
+} from '../src/lib/lock-holder.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -58,6 +67,9 @@ test('③ 真实链路：flock(1) 持锁时能反查到该进程，退出后不�
     assert.equal(holder.pid, child.pid, `PID 应为 ${child.pid}，实际 ${holder.pid}`);
     assert.equal(holder.self, false, '持锁者是子进程，不是当前进程');
     assert.match(holder.cmd, /(flock|sleep)/, `命令行应指向 flock/sleep，实际 "${holder.cmd}"`);
+    // 运行时长用于区分「刚启动正在干活」与「干完不退的残留进程」（#109）
+    assert.equal(typeof holder.uptimeMs, 'number', '应能算出运行时长');
+    assert.ok(holder.uptimeMs! >= 0 && holder.uptimeMs! < 60_000, `运行时长应在合理区间，实际 ${holder.uptimeMs}`);
   } finally {
     child.kill('SIGKILL');
     await sleep(50);
@@ -106,4 +118,34 @@ test('⑥ redactCmdline：敏感参数值被遮蔽后才展示（提示会进日
   assert.equal(redactCmdline('node srv.js --authorization Bearer sk-live-123'), 'node srv.js --authorization ***');
   assert.equal(redactCmdline('ki mcp --web --http'), 'ki mcp --web --http', '普通参数不得被改写');
   assert.equal(redactCmdline('flock -x /tmp/x/LOCK sleep 10'), 'flock -x /tmp/x/LOCK sleep 10', '含 lock 的路径不得误判为敏感');
+});
+
+test('⑦ /proc/<pid>/stat 解析：comm 含空格与括号时 starttime 不得错位', () => {
+  // 第 2 字段 comm 内嵌 ")" 与空格：必须从**最后一个** ")" 之后切分
+  const stat = '4242 (node /path/with space (x)) S 1 4242 4242 0 -1 4194560 1000 0 0 0 5 6 0 0 20 0 1 0 987654 123 456';
+  assert.equal(parseProcStatStartTicks(stat), 987654);
+  assert.equal(parseProcStatStartTicks('garbage'), null, '没有 ")" 应返回 null');
+  assert.equal(parseProcStatStartTicks('1 (x) R 1 2 3'), null, '字段不足应返回 null');
+});
+
+test('⑧ formatUptime：秒/分/小时/天四档', () => {
+  assert.equal(formatUptime(0), '0秒');
+  assert.equal(formatUptime(48_000), '48秒');
+  assert.equal(formatUptime(922_000), '15分22秒');
+  assert.equal(formatUptime(3 * 3600_000 + 7 * 60_000), '3小时7分');
+  assert.equal(formatUptime(3 * 86_400_000 + 16 * 3600_000), '3天16小时');
+});
+
+test('⑨ 提示文案带运行时长；brief 版为单行（供撞锁重试日志）', () => {
+  const holder = { pid: 42, name: 'node', cmd: 'jiti temp/repro.ts', self: false, uptimeMs: 48_000 };
+  assert.match(formatLockHolder(holder), /已运行 48秒/, '完整提示应带运行时长');
+  assert.match(formatLockHolder(holder), /jiti temp\/repro\.ts/, '完整提示仍带命令行');
+
+  const brief = formatLockHolderBrief(holder);
+  assert.equal(brief, 'PID 42 (node)，已运行 48秒 — jiti temp/repro.ts');
+  assert.ok(!brief.includes('\n'), 'brief 不得含换行（要拼进一行重试日志）');
+
+  // 读不到启动时刻时保持原文案，不出现空的「已运行」
+  const noUptime = formatLockHolderBrief({ pid: 7, name: 'node', cmd: '?', self: true });
+  assert.equal(noUptime, 'PID 7 (node，本进程)');
 });
