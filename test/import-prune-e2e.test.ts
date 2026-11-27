@@ -20,6 +20,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { registerTestScope, cleanupTestConfig } from './test-config.js';
 import { readAllGroupCaches } from '../src/lib/group-cache.js';
+import { ROOT_GROUP_KEY, resolveGroupForSource } from '../src/lib/import-path.js';
 
 const { handleDirectImport } = await import('../src/lib/import.js');
 const { planImportPrune } = await import('../src/lib/import-prune.js');
@@ -35,8 +36,14 @@ for (const name of ['a', 'b', 'c']) {
   fs.writeFileSync(path.join(sourceDir, `${name}.md`), `# ${name}\n${name} 的正文内容。\n`);
 }
 
-/** 不传 group → 文件落在源目录根部 → groupPath = scope 名 */
-const importedGroups = (rels: string[]) => [...new Set(rels.map(() => SCOPE))];
+/**
+ * 不传 group → 文件落在源目录根部 → 落根保留键 `ROOT_GROUP_KEY`（`__root__`）。
+ *
+ * ★ 2026-11-02 起不再用 scope 名做根（用 scope 名会与源目录里真实存在的同名子目录共用 group 键，
+ *   同名 relation 被误判幂等重导、后一篇内容丢失，见 `src/lib/import-path.ts`）。
+ *   这里一律走 `resolveGroupForSource` 推导，落点策略再变时不用逐行改断言。
+ */
+const importedGroups = (rels: string[]) => [...new Set(rels.map((rel) => resolveGroupForSource('', rel, SCOPE)))];
 
 after(async () => {
   // 必须显式关引擎：FTS / zvec worker 常驻会让 node:test 进程不退出（外部还得靠 timeout 兜底）
@@ -89,7 +96,12 @@ describe('端到端：导入 → 候选 → 重算 → 删除', () => {
     assert.equal(plan.skipReason, undefined, `不应被闸门关闭：${plan.skipDetail ?? ''}`);
     assert.equal(plan.total, 1, `应恰好 1 篇候选，实际 ${plan.total}`);
     assert.equal(plan.items[0].sourcePath, 'b.md');
-    assert.equal(plan.items[0].group, SCOPE);
+    assert.equal(plan.items[0].group, ROOT_GROUP_KEY, `缺省 group 的根散文件应落 ${ROOT_GROUP_KEY}`);
+    // 这两条守的是**生产侧**：`handleDirectImport` 的 importedGroups 与落点同源（import.ts 用
+    // resolveGroupForSource 推导）。若该处改用错组名，候选会被误标 untouched / 误报未触及组。
+    // 注：本文件的 `importedGroups()` 辅助函数只喂 ③④ 的重算入参，改错它不会触发这两条。
+    assert.equal(plan.items[0].untouched, false, '本组本次确有文件落入，不该标记为未触及');
+    assert.deepEqual(plan.untouchedGroups, [], '库内只有本组且本次已触及，未触及组应为空');
     assert.equal(plan.coordRatio, 1, '本次 2 篇都能在库里找到');
     assert.ok(plan.token, '候选非空且未超限时必须给 token');
   });
@@ -133,16 +145,16 @@ describe('端到端：导入 → 候选 → 重算 → 删除', () => {
 
   it('⑤ 删除候选后 cache 中该 relation 消失', { timeout: 60_000 }, async () => {
     const groupsBefore = readAllGroupCaches(SCOPE);
-    const relationsBefore = groupsBefore.get(SCOPE)?.hot_relations.map((item) => item.text) ?? [];
+    const relationsBefore = groupsBefore.get(ROOT_GROUP_KEY)?.hot_relations.map((item) => item.text) ?? [];
     assert.ok(relationsBefore.includes('b'), `删除前应存在 relation b，实际：${relationsBefore.join(',')}`);
 
-    const outcome = await executeBatchDelete(SCOPE, [{ group: SCOPE, relation: 'b' }]);
+    const outcome = await executeBatchDelete(SCOPE, [{ group: ROOT_GROUP_KEY, relation: 'b' }]);
     assert.equal(outcome.ok, true);
     // `BatchDeleteResult` 没有聚合的 `deleted` 字段（只有 results/total/failed）——按条统计
     assert.equal(outcome.results.filter((item) => item.deleted).length, 1);
 
     const groupsAfter = readAllGroupCaches(SCOPE);
-    const relationsAfter = groupsAfter.get(SCOPE)?.hot_relations.map((item) => item.text) ?? [];
+    const relationsAfter = groupsAfter.get(ROOT_GROUP_KEY)?.hot_relations.map((item) => item.text) ?? [];
     assert.ok(!relationsAfter.includes('b'), `删除后不应再存在 relation b，实际：${relationsAfter.join(',')}`);
     assert.deepEqual(relationsAfter.sort(), ['a', 'c']);
   });
