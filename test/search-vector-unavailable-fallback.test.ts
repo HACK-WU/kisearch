@@ -47,7 +47,10 @@ resetConfigCache();
 
 describe('executeSearch · 向量服务不可用 → 降级全文', () => {
   before(() => {
-    // 不需要建任何 Collection：本用例要证的正是"没有向量能力时也能给出全文答案"
+    // 不需要建任何 Collection：本用例要证的正是"没有向量能力时也能给出全文答案"。
+    // ★ 但 KB 目录必须存在（事件 #111：检索以目录存在为库可用判据），否则会被判成
+    //   「库不存在」，走不到向量不可用的降级分支。
+    fs.mkdirSync(path.join(tmpRoot, 'kb', SCOPE), { recursive: true });
   });
 
   after(async () => {

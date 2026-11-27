@@ -53,6 +53,10 @@ resetConfigCache();
 
 describe('executeSearch · 向量库无 tag → 回退全文', () => {
   before(async () => {
+    // ★ 事件 #111：检索按「KB 目录是否存在」判库可用（与 ki_group_list 同源）。
+    //   本用例要证的是「库存在但一条 dense 文档都没有」，故 KB 目录必须落盘，
+    //   否则会被判成「库不存在」而根本走不到降级路径。
+    fs.mkdirSync(path.join(tmpRoot, 'kb', SCOPE), { recursive: true });
     const config = loadConfig();
     ensureVectorLayout(config);
     // 只建空集合（**不写任何 dense 文档**）：模拟"库内文档全部是 FTS-only"的形态

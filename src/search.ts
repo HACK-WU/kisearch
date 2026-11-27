@@ -17,7 +17,7 @@ import { vectorSearch, fullTextSearch, vectorListTags, ensureVectorAvailable, cl
 import type { VectorSearchResult } from './lib/vector-client.js';
 import { getRelationMap, getRelationAuxIndex, resolveAuxHit, AUX_PATH_TAG, AUX_RELATION_TAG } from './lib/relation-map.js';
 import { hiddenEditIndexIds } from './lib/relation-edit-draft.js';
-import { readJson } from './lib/store.js';
+import { readJson, scopeDirExists } from './lib/store.js';
 import {
   createOriginalLocator,
   DEFAULT_ORIGINAL_MATCH_LIMIT,
@@ -347,7 +347,6 @@ async function executeSearchLocal(params: {
     const config = loadConfig();
     const expandStartedAt = Date.now();
     const targets = resolveScopeTargets(config, params.scope);
-    const scopes = targets.scopes;
     const skipped: { scope: string; reason: string }[] = [...targets.skipped];
     /**
      * 是否走多库响应结构（返回 scopes / 命中标来源库）。
@@ -355,10 +354,53 @@ async function executeSearchLocal(params: {
      *   但响应仍须给 scopes（既有调用方据此知道实际检索了哪些库）。
      */
     const multi = targets.multiRequested || targets.views.length > 0;
+    /**
+     * KB 目录存在性闸门（事件 #111）—— 检索只对**真实存在**的库发起。
+     *
+     * 为什么必须有：`resolveScopeTargets` 只做字符集校验与视图展开，default 模式下
+     * 任意名字都会解析成功（那是写路径为兼容「未注册但有数据」的库设计的放行语义）；
+     * 而检索层对不存在的库只会返回空数组。于是同一个名字在 `ki search` 得到
+     * `ok:true / total:0`、在 `ki_group_list` 得到「知识库尚未导入（KB 目录不存在）」，
+     * 用户与 AI 无法区分「库名不存在」与「库里确实没搜到」，只会反复换关键词重试。
+     *
+     * 判据用 `scopeDirExists`（目录存在），**不用** `listAllScopes`（要求有 KB 关系数据）：
+     * 写路径（group create / import / sync-relation）都会 ensureScopeDir，故有数据的库
+     * 目录必然存在；反过来「已建库但还没导入文档」应继续返回空结果，不能报不存在。
+     *
+     * 为什么放在这里而不是 `resolveScopeTargets`：那个函数是视图的**唯一展开点**，被
+     * doc / tag / group-info / group-list / scope-heat 等 9 处复用且是零 IO 纯函数，
+     * 在它内部落盘探测会把影响面扩到所有调用方（见事件 #111 的影响分析）。
+     */
+    const scopes: string[] = [];
+    for (const scope of targets.scopes) {
+      if (scopeDirExists(scope)) {
+        scopes.push(scope);
+        continue;
+      }
+      skipped.push({
+        scope,
+        // ★ reason 刻意**不以** MISSING_COLLECTION_REASON_PREFIX（'无向量 Collection'）开头：
+        //   hybrid 降级为全文时，下方会按该前缀整批清理 skipped（那条提示届时确实不成立），
+        //   撞前缀会让「库根本不存在」这条唯一诊断在降级路径上被自己删掉 —— 修了等于没修。
+        reason: `知识库 "${scope}" 尚未导入（KB 目录不存在）`,
+      });
+    }
     // O1：查询 embedding 降级为 FTS-only 时记录一次（两处 vectorSearch 调用共用）
     let degradeReason: string | undefined;
 
     if (scopes.length === 0) {
+      /**
+       * 纯单库请求（`multi=false`）走与 `ki_group_list` / `ki_get_module_info` 同源的文案
+       * 并给出路，避免用户在同一名字上拿到两个答案。视图请求恒为 `multi=true`，
+       * 多库 / 视图仍按既有格式逐项列出原因（调用方据此定位是哪一段写错了）。
+       */
+      const single = !multi && skipped.length === 1 ? skipped[0] : null;
+      if (single) {
+        return {
+          ok: false,
+          error: `${single.reason}；请核对库名，若以为是知识视图请执行 ki view list 查看`,
+        };
+      }
       return {
         ok: false,
         error: `无可检索的 scope：${skipped.map((k) => `${k.scope}（${k.reason}）`).join('；')}`,
@@ -1019,7 +1061,7 @@ program
       ...(opts.semanticBonus !== undefined ? { semanticBonus: Number(opts.semanticBonus) } : {}),
     });
     console.log(JSON.stringify(result, null, 2));
-    // CLI per-call：关闭 engine（terminate worker + 释放 LOCK），否则进程无法退出
+    // CLI per-call：关闭 engine（terminate worker + 释放 LOCK）；worker 空闲已 unref，不关也能退出，但不做 closeSync flush、锁要等进程结束
     await closeEngine();
     if (!result.ok) process.exit(1);
   });

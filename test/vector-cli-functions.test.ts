@@ -22,7 +22,18 @@ import { MAX_TOPK as ENGINE_MAX_TOPK } from '../src/zvec-engine/search/router.js
 
 const testConfigPath = path.join(os.tmpdir(), `cli-fn-test-config-${Date.now()}.json`);
 const testVectorDir = path.join(os.tmpdir(), `cli-fn-test-vector-${Date.now()}`);
-fs.writeFileSync(testConfigPath, JSON.stringify({ vectorDir: testVectorDir }), 'utf-8');
+/**
+ * 临时 KB 根目录 + 预建库目录（事件 #111）。
+ *
+ * 检索侧现在按「KB 目录是否存在」判库可用（与 ki_group_list 同源判据）：测内要放行的
+ * 库名必须落成空目录，否则会走 fail-loud 分支；同时把 dataDir 指到临时目录，
+ * 用例不再依赖本机 `~/.ki-data` 的真实库（原先省略 dataDir 会读到真实目录）。
+ */
+const testKbDir = path.join(os.tmpdir(), `cli-fn-test-kb-${Date.now()}`);
+for (const name of ['test', 'default', 'alpha', 'beta', 'registered']) {
+  fs.mkdirSync(path.join(testKbDir, name), { recursive: true });
+}
+fs.writeFileSync(testConfigPath, JSON.stringify({ vectorDir: testVectorDir, dataDir: testKbDir }), 'utf-8');
 process.env.KI_CONFIG_PATH = testConfigPath;
 
 // ─── Mock vector-client ───
@@ -55,6 +66,11 @@ const DEFAULT_MOCK_TAGS = [
 let mockTags = DEFAULT_MOCK_TAGS;
 
 async function loadModulesWithMock() {
+  // ★ 先清配置缓存再加载：文件顶部若有任何静态 import 触发过 loadConfig，
+  //   缓存会停留在「KI_CONFIG_PATH 设置之前」的真实配置上 —— 事件 #111 后检索要按
+  //   dataDir 判库存在，缓存指向真实目录会让临时库全部被判「不存在」。
+  const configMod = await import('../src/lib/config.js');
+  configMod.resetConfigCache();
   // 先 import vector-client（会读 KI_CONFIG_PATH）
   vectorClientModule = await import('../src/lib/vector-client.js');
 
@@ -661,8 +677,11 @@ describe('CLI 纯函数 · scope 护栏 strict 模式', () => {
 
   before(async () => {
     // strict 配置：白名单仅注册 scope "registered"
+    // dataDir 与主配置同一个临时目录 —— 事件 #111 后检索要按目录判存在，
+    // 白名单内的 registered 必须真有 KB 目录才能走到 ok:true 主路径。
     fs.writeFileSync(strictConfigPath, JSON.stringify({
       vectorDir: testVectorDir,
+      dataDir: testKbDir,
       scopeMode: 'strict',
       scopes: { registered: {} },
     }), 'utf-8');
@@ -757,4 +776,10 @@ describe('CLI 纯函数 · scope 护栏 strict 模式', () => {
       );
     }
   });
+});
+
+// 临时 KB 目录由全部 describe 共用（事件 #111 后检索按目录判库存在），只能在全部用例
+// 跑完后清理 —— 放进单个 describe 的 after 会提前删掉后续 describe 还要用的库。
+after(() => {
+  fs.rmSync(testKbDir, { recursive: true, force: true });
 });

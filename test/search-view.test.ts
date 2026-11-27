@@ -55,11 +55,20 @@ after(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+/** 本文件会用到的库名（视图成员 a/b + 单库与混写场景的 kisearch） */
+const USED_SCOPES = ['a', 'b', 'kisearch'];
+
 function reset(views?: Record<string, string[]>, extra: Record<string, unknown> = {}): void {
   fs.rmSync(viewsPath, { force: true });
   fs.rmSync(`${viewsPath}.lock`, { force: true });
   if (views) writeViews(views);
   writeConfig(extra);
+  // ★ 事件 #111：检索以「KB 目录是否存在」判库可用（与 ki_group_list 同源判据）。
+  //   本文件要证的都是「展开 / 请求形态」语义，不是「库不存在」，故把用到的库名落成
+  //   空目录：空库照常返回空结果，改造前后行为一致。
+  for (const name of USED_SCOPES) {
+    fs.mkdirSync(path.join(tmpDir, 'kb', name), { recursive: true });
+  }
   configLib.resetConfigCache();
 }
 
