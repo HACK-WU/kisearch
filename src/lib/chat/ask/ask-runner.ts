@@ -393,7 +393,7 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
       userText: composeAskUserText(input.question, input.background),
       // ★ MCP 通道适配块：`buildSystemMessages` 会把它追加在注入块之后（硬性规则之后），
       //   故无需改 tool-loop（见 ask-prompt.ts 文件头）
-      convSystemPrompt: MCP_ASK_ADAPT_BLOCK,
+      convSystemPrompt: [input.rulesBlock?.trim(), MCP_ASK_ADAPT_BLOCK].filter(Boolean).join('\n\n'),
       ...(input.capabilities ? { capabilities: input.capabilities } : {}),
       // 始终传内部 controller：它已与 input.signal 联动（任一触发即中止）
       signal: controller.signal,

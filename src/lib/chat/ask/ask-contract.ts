@@ -126,6 +126,11 @@ export interface AskInput {
    */
   background?: string;
   /**
+   * 规则段（S-02）：由 MCP 工具层按 scope 加载并渲染，追加在 `MCP_ASK_ADAPT_BLOCK` 之前。
+   * 缺省 = 不注入，行为与改造前逐字节一致。
+   */
+  rulesBlock?: string;
+  /**
    * 续接：传回上一次返回的 `contextId`；**缺省 = 全新问答**（一期语义，行为与一期逐字段一致）。
    *
    * 传了但不存在 / 已过期 / 非本人 → 专用错误码，**绝不静默当新会话**（S-03 §4.3）。

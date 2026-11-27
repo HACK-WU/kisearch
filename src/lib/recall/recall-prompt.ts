@@ -40,6 +40,11 @@ export interface RecallRuntimeCfg {
    * 否则模型会按提示词里的过时清单去试，然后吃一堆错误。
    */
   scopeNote?: string;
+  /**
+   * 规则段（S-02）：由 `loadRulesForScopes` + `buildRulesBlock` 生成，调用方传入。
+   * 位置在 skill 之后、scopeNote 之前；为空时不插入。
+   */
+  rulesBlock?: string;
   reasoningEffort?: string;
   skills: Array<{ id: string; name: string; content: string; enabled: boolean }>;
 }
@@ -106,6 +111,7 @@ export function buildRecallSystemPrompt(cfg: RecallRuntimeCfg): string {
       ...skills.map((s) => `### ${s.name}\n${s.content.trim()}`),
     ].join('\n'));
   }
+  if (cfg.rulesBlock && cfg.rulesBlock.trim()) blocks.push(cfg.rulesBlock.trim());
   if (cfg.scopeNote && cfg.scopeNote.trim()) blocks.push(cfg.scopeNote.trim());
   if (typeof cfg.maxToolCalls === 'number' && cfg.maxToolCalls > 0) {
     blocks.push(toolCallBudgetNote(cfg.maxToolCalls));

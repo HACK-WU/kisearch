@@ -190,7 +190,7 @@ function dirPathIssue(raw: string): string | null {
 }
 
 /** 设置页的能力分组（与 `/settings/ai` 左栏一一对应） */
-export type CapabilitySection = 'chat' | 'analysis' | 'find';
+export type CapabilitySection = 'chat' | 'analysis' | 'find' | 'rules';
 
 export interface PromptConfigLayerProps {
   onClose: () => void;

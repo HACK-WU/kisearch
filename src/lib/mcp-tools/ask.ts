@@ -22,6 +22,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { loadConfig } from '../config.js';
+import { buildRulesBlock, loadRulesForScopes, maybeGcRules } from '../rules/index.js';
 import { executeScopeList } from '../../scope.js';
 import { readViews } from '../scope-view.js';
 import { listTokens, tokenLabel } from '../mcp-token.js';
@@ -234,11 +235,23 @@ export function registerAskTool(server: McpServer, principalKey = 'local'): void
       // ⑥⑦⑧ 执行 → 审计 → 释放（释放必须在 finally）
       try {
         const contextIdArg = typeof args.context_id === 'string' ? args.context_id.trim() : '';
+        /*
+         * S-02：ki_ask 只接受单个物理 scope，规则按该库加载。
+         * 规则读取失败不阻塞问答；ki_ask 不是只读 Token 可调工具，故可直接触发 GC。
+         */
+        let rulesBlock = '';
+        try {
+          rulesBlock = buildRulesBlock(loadRulesForScopes(config, [scope]));
+          maybeGcRules(config, [scope]);
+        } catch {
+          rulesBlock = '';
+        }
         const result = await withTimeout(
           runAsk({
             scope,
             question,
             ...(background.value.length > 0 ? { background: background.value } : {}),
+            ...(rulesBlock ? { rulesBlock } : {}),
             ...(contextIdArg.length > 0 ? { contextId: contextIdArg } : {}),
             // 归属校验用：不同 Token 不能续接同一个 contextId（S-03 §4.3）
             principalKey,

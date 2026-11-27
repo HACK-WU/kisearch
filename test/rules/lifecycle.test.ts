@@ -169,7 +169,7 @@ describe('rules/lifecycle', () => {
     }
     assert.throws(
       () => createHumanRule(config, { scope: 's', text: '再多一条', expiresAt: null, createdBy: 'user:1' }),
-      (err: unknown) => err instanceof RulesError && err.code === 'RULES_SCOPE_QUOTA',
+      (err: unknown) => err instanceof RulesError && err.code === 'RULE_SCOPE_QUOTA',
     );
   });
 
@@ -200,7 +200,7 @@ describe('rules/lifecycle', () => {
 
     assert.throws(
       () => promoteAiRule(config, ai.rule.id, 'user:1'),
-      (err: unknown) => err instanceof RulesError && err.code === 'RULES_SCOPE_QUOTA',
+      (err: unknown) => err instanceof RulesError && err.code === 'RULE_SCOPE_QUOTA',
     );
   });
 
@@ -256,5 +256,16 @@ describe('rules/lifecycle', () => {
       () => deleteAiRule(config, { scope: 's' }, 'token:1'),
       (err: unknown) => err instanceof RulesError && err.code === 'RULE_TARGET_INVALID',
     );
+  });
+
+  it('规则正文换行归一为空格', () => {
+    const config = makeConfig();
+    const rule = createHumanRule(config, {
+      scope: 's',
+      text: '第一行\n第二行',
+      expiresAt: null,
+      createdBy: 'user:1',
+    });
+    assert.equal(rule.text, '第一行 第二行');
   });
 });

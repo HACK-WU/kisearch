@@ -42,6 +42,7 @@ import {
   type RecallRuntimeCfg,
 } from '../recall/recall-prompt.js';
 import { resolveRecallTargets } from '../recall/targets.js';
+import { buildRulesBlock, loadRulesForScopes, maybeGcRules } from '../rules/index.js';
 import {
   DEFAULT_LIMIT,
   EXCLUDE_MAX,
@@ -60,6 +61,7 @@ import { ToolTimeoutError, withTimeout } from './util.js';
 const TOOL_DESCRIPTION = '拿到新任务 / 需求 / bug、还不知道该读哪些文档时调用：给一段任务描述 + '
   + '必填的 `scope`（库名或知识视图，可多个），由 ki 自己的模型读正文判断后返回'
   + '「该先读哪几篇 + 为什么 + 整体结论 + 判断不了的点」。'
+  + '调用时会自动加载该库的项目规则（人工规则 + AI 规则）；'
   + '工具不会替你挑库：不知道有哪些库就先调 `ki_scope_list` / `ki_view_list`，漏传会直接报错并回可用清单。'
   + '`scope` 只是**默认检索范围**：内部模型可按问题需要换库 / 换视图（每次调用都可不同，受授权范围限制），'
   + '实际用过的范围见返回的 `scopesUsed`。'
@@ -90,6 +92,8 @@ export interface RecallToolDeps {
   scopeDeps?: Omit<import('../events/find-targets.js').FindTargetDeps, 'tokenScopes'>;
   /** 调用方键（审计与频控维度） */
   principalKey?: string;
+  /** 只读 Token：只做规则过滤，不触发异步 GC（S-02） */
+  readOnly?: boolean;
   /**
    * 取消信号（2026-11-19）：事件 AI 分析在开场预取时传入，用户点「停止」即中断，
    * 不让一次没人要的预取继续烧模型调用。
@@ -361,8 +365,22 @@ export async function executeRecall(
 
   // 范围说明必须与运行期校验同源（模型据此换库），因此按本次实际授权生成
   const cat = resolver.scopeCatalog();
+
+  /*
+   * S-02：规则段只按「本次已鉴权的物理 scope」加载；失败不阻塞检索。
+   * 只读 Token 不触发 GC，避免读接口写配置。
+   */
+  let rulesBlock = '';
+  try {
+    rulesBlock = buildRulesBlock(loadRulesForScopes(config, pre.physicalTargets));
+    if (!deps.readOnly) maybeGcRules(config, pre.physicalTargets);
+  } catch {
+    rulesBlock = '';
+  }
+
   const effectiveCfg = {
     ...recallCfg,
+    ...(rulesBlock ? { rulesBlock } : {}),
     scopeNote: buildScopeNote({
       defaultTargets: pre.targets,
       canSwitch: true,
@@ -521,7 +539,11 @@ export function resolveRecallSection(config: KiConfig): RecallRuntimeCfg {
 
 // ─── 注册 ──────────────────────────────────────────────
 
-export function registerRecallTool(server: McpServer, principalKey: string): void {
+export function registerRecallTool(
+  server: McpServer,
+  principalKey: string,
+  opts?: { readOnly?: boolean },
+): void {
   server.tool(
     'ki_recall',
     TOOL_DESCRIPTION,
@@ -544,6 +566,9 @@ export function registerRecallTool(server: McpServer, principalKey: string): voi
         .describe('已读清单："scope::group::name" 或 "group::name"；再次调用时传入，避免重复推荐'),
       limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe('候选条数上限，默认 8'),
     },
-    async (args) => executeRecall(args as RecallArgs, { principalKey }),
+    async (args) => executeRecall(args as RecallArgs, {
+      principalKey,
+      ...(opts?.readOnly === true ? { readOnly: true } : {}),
+    }),
   );
 }

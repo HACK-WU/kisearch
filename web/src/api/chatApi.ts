@@ -25,6 +25,11 @@ import type {
   PromptConfig,
   PromptConfigOk,
   PromptConfigSaveOk,
+  RuleDeleteOk,
+  RuleMutateOk,
+  RulesImportResult,
+  RulesListView,
+  RulesMetaView,
 } from '@/api/chatContract';
 import { notifyUnauthorized } from '@/lib/authEvents';
 
@@ -526,4 +531,67 @@ export async function* streamEditMessage(
   );
   if (!res.ok) throw await toApiError(res);
   yield* readSseEvents(res, signal);
+}
+
+// ─── AI 规则（S-03）────────────────────────────────────────
+
+export async function getRulesMeta(): Promise<RulesMetaView> {
+  return reqJson<RulesMetaView>(`${CHAT_API_BASE}/rules/meta`);
+}
+
+export async function getRules(scope: string): Promise<RulesListView> {
+  return reqJson<RulesListView>(`${CHAT_API_BASE}/rules?scope=${encodeURIComponent(scope)}`);
+}
+
+export async function createRule(input: {
+  scope: string;
+  text: string;
+  expiresAt: string | null;
+}): Promise<RuleMutateOk> {
+  return reqJson<RuleMutateOk>(`${CHAT_API_BASE}/rules`, jsonBody(input));
+}
+
+export async function updateRule(
+  id: string,
+  patch: { text?: string; expiresAt?: string | null },
+): Promise<RuleMutateOk> {
+  return reqJson<RuleMutateOk>(`${CHAT_API_BASE}/rules/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function promoteRule(id: string): Promise<RuleMutateOk> {
+  return reqJson<RuleMutateOk>(
+    `${CHAT_API_BASE}/rules/${encodeURIComponent(id)}/permanent`,
+    { method: 'PUT' },
+  );
+}
+
+export async function deleteRule(id: string): Promise<RuleDeleteOk> {
+  return reqJson<RuleDeleteOk>(`${CHAT_API_BASE}/rules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function exportRules(scope: string, includeAi: boolean): Promise<Blob> {
+  const qs = new URLSearchParams({ scope });
+  if (includeAi) qs.set('includeAi', '1');
+  const res = await fetch(`${CHAT_API_BASE}/rules/export?${qs.toString()}`);
+  if (!res.ok) {
+    if (res.status === 401) notifyUnauthorized('chat');
+    throw await toApiError(res);
+  }
+  return res.blob();
+}
+
+export async function importRules(
+  pkg: unknown,
+  mode: 'merge' | 'replace',
+  dryRun: boolean,
+): Promise<RulesImportResult> {
+  return reqJson<RulesImportResult>(`${CHAT_API_BASE}/rules/import`, {
+    method: 'POST',
+    body: JSON.stringify({ mode, dryRun, package: pkg }),
+  });
 }

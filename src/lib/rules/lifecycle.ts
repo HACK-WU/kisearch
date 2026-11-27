@@ -41,7 +41,8 @@ function newRuleId(): string {
 }
 
 function validateText(raw: string): string {
-  const text = typeof raw === 'string' ? raw.trim() : '';
+  // 规则是单行约定：换行会破坏规则段的列表/标题结构，写入时归一为空格
+  const text = typeof raw === 'string' ? raw.replace(/[\r\n]+/g, ' ').trim() : '';
   if (text.length === 0) {
     throw new RulesError('RULE_TEXT_INVALID', '规则正文不能为空');
   }
@@ -93,7 +94,7 @@ function oldestFirst(a: RuleRecord, b: RuleRecord): number {
 
 function quotaError(scope: string, next: number): RulesError {
   return new RulesError(
-    'RULES_SCOPE_QUOTA',
+    'RULE_SCOPE_QUOTA',
     `知识库「${scope}」的人工规则总字数将达 ${next}，超过上限 ${MAX_INJECT_CHARS}`,
   );
 }
@@ -255,7 +256,7 @@ export function addAiRule(
  * 异常：
  *   `RULE_TEXT_INVALID` — text 空 / 超 200 字
  *   `RULE_EXPIRY_INVALID` — `expiresAt` 非空且不是未来时间
- *   `RULES_SCOPE_QUOTA` — 该 scope 人工规则总字数将超 2000
+ *   `RULE_SCOPE_QUOTA` — 该 scope 人工规则总字数将超 2000
  *   `RULES_BUSY` / `RULES_WRITE_FAILED`
  * 预期行为：持锁 → 读取 → 校验 text/expiresAt/配额 → 插入 → 原子写
  * 设计文档：§ S-01 §5.1 / §6
@@ -308,7 +309,7 @@ export function createHumanRule(
  *   `RULE_NOT_FOUND` — id 不存在
  *   `RULE_NOT_HUMAN` — 目标是 AI 规则（AI 规则只能转永久或删除）
  *   `RULE_PATCH_EMPTY` — text 与 expiresAt 都没传
- *   `RULE_TEXT_INVALID` / `RULE_EXPIRY_INVALID` / `RULES_SCOPE_QUOTA`
+ *   `RULE_TEXT_INVALID` / `RULE_EXPIRY_INVALID` / `RULE_SCOPE_QUOTA`
  *   `RULES_BUSY` / `RULES_WRITE_FAILED`
  * 预期行为：持锁 → 定位 → 校验 patch 非空 → 重算配额 → 更新 `updatedAt` → 写盘
  * 设计文档：§ S-01 §5.1 / §6
@@ -361,7 +362,7 @@ export function updateHumanRule(
  * 返回：更新后的 `RuleRecord`（source='human'、expiresAt=null）
  * 异常：
  *   `RULE_NOT_FOUND` / `RULE_NOT_AI`
- *   `RULES_SCOPE_QUOTA` — 转永久后人工总字数将超 2000
+ *   `RULE_SCOPE_QUOTA` — 转永久后人工总字数将超 2000
  *   `RULES_BUSY` / `RULES_WRITE_FAILED`
  * 预期行为：持锁 → 定位 AI 规则 → 校验人工配额 → 改 source/expiresAt → 写盘
  * 设计文档：§ S-01 §5.1 / §6

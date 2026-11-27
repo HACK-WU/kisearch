@@ -15,6 +15,9 @@ import { registerEditRelationTool } from './mcp-tools/edit-relation.js';
 import { registerBulkSyncRelationTool } from './mcp-tools/bulk-sync-relation.js';
 import { registerGroupTools } from './mcp-tools/group.js';
 import { registerSearchTool } from './mcp-tools/search.js';
+import { registerRuleListTool } from './mcp-tools/rule-list.js';
+import { registerRuleAddTool } from './mcp-tools/rule-add.js';
+import { registerRuleDeleteTool } from './mcp-tools/rule-delete.js';
 import { registerStoreTool } from './mcp-tools/store.js';
 import { registerBulkStoreTool } from './mcp-tools/bulk-store.js';
 import { registerDeleteRelationTool } from './mcp-tools/delete-relation.js';
@@ -54,10 +57,11 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
     },
     readOnly ? { instructions: READ_ONLY_INSTRUCTIONS } : undefined,
   );
-  // ── 读工具（11 个）：只读会话同样注册 ──
+  // ── 读工具（12 个）：只读会话同样注册 ──
   // ⚠️ 新增读工具时同步加入 mcp-tools/tool-access.ts::READ_ONLY_TOOL_NAMES，
   //    否则只读 Token 看不见它（方向安全，但功能缺失）。
-  registerSearchTool(server);
+  registerSearchTool(server, { readOnly });
+  registerRuleListTool(server);
   registerGetModuleInfoTool(server);
   /*
    * `ki_get_image` 已**不在对外 MCP 面注册**（2026-11-25）：
@@ -83,8 +87,8 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
    * 故只读 Token 也能看见并调用（已从 `MODEL_CONSUMING_TOOL_NAMES` 移出）。
    * 虽然内部会跑模型，但代价（模型额度 + 内容外发）已由产品确认接受（S-02 D-02-3）。
    */
-  registerRecallTool(server, auth?.id ?? 'local');
-  // ── 写工具（11 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
+  registerRecallTool(server, auth?.id ?? 'local', { readOnly });
+  // ── 写工具（13 个）：只读会话**不注册** ⇒ tools/list 不出现（用户诉求「不显示」）──
   // ⚠️ 新增写工具必须放在本块内，否则会暴露给只读 Token；
   //    tools/call 侧另有一道白名单拦截（mcp-http.ts::findReadOnlyViolation）兜住缓存/构造调用。
   if (!readOnly) {
@@ -104,6 +108,10 @@ export function buildKiMcpServer(auth: TokenAuth | null = null): McpServer {
     registerStoreTool(server);
     registerBulkStoreTool(server);
     registerDeleteRelationTool(server);
+
+    // AI 规则写工具（S-04）：只写 AI 池，人工规则只能走设置页
+    registerRuleAddTool(server, auth?.id ?? 'local');
+    registerRuleDeleteTool(server, auth?.id ?? 'local');
 
     // ── 模型消耗型工具（REQ-20261113-001）：只读会话**不注册** ──
     // ⚠️ 它**不是写工具**（对库只做只读检索），但会消耗上游 LLM 额度并外发知识库内容，

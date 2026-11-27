@@ -54,7 +54,9 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
    * 故按 `knowledge.read` 而非 `knowledge.ask`（后者是"给答案"的能力）。不进 CHAT_MCP_TOOLS。
    */
   ki_recall: 'knowledge.read',
-  // 写工具（11）
+  /** AI 规则只读列表（S-04）：列出人工 + AI 规则，只读 Token 可用 */
+  ki_rule_list: 'knowledge.read',
+  // 写工具（13）
   ki_store: 'knowledge.write',
   ki_bulk_store: 'knowledge.write',
   ki_sync_relation: 'knowledge.write',
@@ -68,6 +70,9 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
   ki_event_delete: 'knowledge.write',
   /** 事件编辑（REQ-20261123-009）：描述 / 结论上传 / 关联文档 / 参考文档 / 阶段，单值 action */
   ki_event_edit: 'knowledge.write',
+  /** AI 规则写工具（S-04）：只写 AI 池，人工规则必须走设置页 */
+  ki_rule_add: 'knowledge.write',
+  ki_rule_delete: 'knowledge.write',
 };
 
 export const ALL_TOOL_NAMES: readonly string[] = Object.keys(TOOL_CAPABILITIES);

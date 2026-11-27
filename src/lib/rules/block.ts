@@ -42,7 +42,8 @@ export function buildRulesBlock(
 
   for (const [scope, rules] of entries) {
     lines.push(`### ${scope}`);
-    for (const rule of rules) lines.push(`- ${rule.text.trim()}`);
+    // 旧数据可能带换行：渲染时再归一一次，避免破坏列表/标题结构
+    for (const rule of rules) lines.push(`- ${rule.text.trim().replace(/[\r\n]+/g, ' ')}`);
   }
 
   if (loaded.truncated > 0) {

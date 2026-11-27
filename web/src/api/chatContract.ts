@@ -739,3 +739,75 @@ export const DEGRADED_LABELS: Record<DegradedReason, string> = {
   'retrieval-unavailable': '本次检索未成功',
   'semantic-degraded': '语义检索降级为全文',
 };
+
+// ─────────────────────────────────────────────────────────────
+// 5. AI 规则（S-03）
+// ─────────────────────────────────────────────────────────────
+
+export interface RuleView {
+  id: string;
+  scope: string;
+  text: string;
+  source: 'human' | 'ai';
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  expired: boolean;
+}
+
+export interface RuleScopeUsage {
+  humanChars: number;
+  humanLimit: number;
+  aiCount: number;
+  aiLimit: number;
+}
+
+export interface RulesListView {
+  ok: true;
+  scope: string;
+  isView: boolean;
+  members?: string[];
+  rules: RuleView[];
+  usage: RuleScopeUsage | null;
+}
+
+export interface RulesMetaView {
+  ok: true;
+  scopes: string[];
+  views: Record<string, string[]>;
+  orphans: Array<{ scope: string; count: number }>;
+}
+
+export interface RuleMutateOk {
+  ok: true;
+  rule: RuleView;
+}
+
+export interface RuleDeleteOk {
+  ok: true;
+  id: string;
+}
+
+export interface RulesExportPackage {
+  version: 1;
+  exportedAt: string;
+  generator: string;
+  rules: Array<{
+    scope: string;
+    text: string;
+    source: 'human' | 'ai';
+    expiresAt: string | null;
+    createdAt: string;
+  }>;
+}
+
+export interface RulesImportResult {
+  ok: true;
+  imported: number;
+  skippedDuplicate: number;
+  skippedAi: number;
+  expired: number;
+  orphanScopes: Array<{ scope: string; count: number }>;
+  scopes: number;
+}

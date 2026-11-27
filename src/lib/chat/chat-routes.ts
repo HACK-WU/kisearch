@@ -65,7 +65,7 @@ import {
 import { loadConfig, atomicWriteConfig, resetConfigCache, type KiConfig } from '../config.js';
 import type { Capability } from '../auth/capabilities.js';
 import type { Role } from '../user-store.js';
-import { validateScope, ScopeError } from '../scope.js';
+import { validateScope, ScopeError, listAllScopes } from '../scope.js';
 import {
   ConversationNotFoundError,
   ChatWriteFailedError,
@@ -125,6 +125,22 @@ import {
 } from './prompt-config.js';
 import { listRegisteredDataSourceRecords } from '../datasource.js';
 import { readViews } from '../scope-view.js';
+import {
+  AI_SOFT_CAP,
+  MAX_INJECT_CHARS,
+  RulesError,
+  applyImport,
+  buildExportPackage,
+  createHumanRule,
+  deleteRule,
+  planImport,
+  promoteAiRule,
+  readRules,
+  updateHumanRule,
+  type ImportMode,
+  type RuleRecord,
+  type RulesFile,
+} from '../rules/index.js';
 import { resolveChatCodeRoots } from './code-tools.js';
 // agent 问答只读视图（REQ-20261116-003）：列表 / 详情，独立于主会话列表
 import { AgentAskError, getAgentAsk, listAgentAskGroups } from './agent-asks.js';
@@ -436,6 +452,28 @@ export async function handleChatRoutes(
     if (segs.length === 1 && segs[0] === 'prompt-config') {
       if (method === 'GET') { await handlePromptConfigGet(res, url, ctx); return true; }
       if (method === 'PUT') { await handlePromptConfigPut(req, res, ctx); return true; }
+    }
+
+    // ── AI 规则（S-03）：列表 / meta / 孤儿 / CRUD / 转永久 ──
+    if (segs[0] === 'rules') {
+      if (segs.length === 1 && method === 'GET') { await handleRulesList(res, url, ctx); return true; }
+      if (segs.length === 2 && segs[1] === 'export' && method === 'GET') {
+        await handleRulesExport(res, url, ctx);
+        return true;
+      }
+      if (segs.length === 2 && segs[1] === 'import' && method === 'POST') {
+        await handleRulesImport(req, res, ctx);
+        return true;
+      }
+      if (segs.length === 2 && segs[1] === 'meta' && method === 'GET') { handleRulesMeta(res, ctx); return true; }
+      if (segs.length === 2 && segs[1] === 'orphans' && method === 'GET') { handleRulesOrphans(res, ctx); return true; }
+      if (segs.length === 1 && method === 'POST') { await handleRulesCreate(req, res, ctx); return true; }
+      if (segs.length === 2 && method === 'PUT') { await handleRulesUpdate(req, res, ctx, segs[1]!); return true; }
+      if (segs.length === 3 && segs[2] === 'permanent' && method === 'PUT') {
+        await handleRulesPermanent(res, ctx, segs[1]!);
+        return true;
+      }
+      if (segs.length === 2 && method === 'DELETE') { await handleRulesDelete(res, ctx, segs[1]!); return true; }
     }
 
     // ── REQ-20261116-003 /api/chat/agent-asks（`ki_ask` 问答只读视图）──
@@ -856,6 +894,306 @@ export async function handlePromptConfigPut(
     throw new ChatApiError(500, CHAT_ERROR_CODES.CHAT_WRITE_FAILED, `对话配置写入失败：${(err as Error).message}`);
   }
   sendOk(res, 200, { config: saved as unknown as Record<string, unknown> });
+}
+
+// ─────────────────────────────────────────────────────────────
+// AI 规则（S-03）：/api/chat/rules*
+// ─────────────────────────────────────────────────────────────
+
+interface RuleView {
+  id: string;
+  scope: string;
+  text: string;
+  source: 'human' | 'ai';
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string;
+  expired: boolean;
+}
+
+interface RuleScopeUsage {
+  humanChars: number;
+  humanLimit: number;
+  aiCount: number;
+  aiLimit: number;
+}
+
+function ruleActor(ctx: ChatRouteContext): string {
+  return ctx.userId ? `user:${ctx.userId}` : 'local';
+}
+
+function isRuleExpired(rule: RuleRecord): boolean {
+  if (rule.source !== 'human' || rule.expiresAt === null) return false;
+  const at = Date.parse(rule.expiresAt);
+  return Number.isFinite(at) && at <= Date.now();
+}
+
+function toRuleView(rule: RuleRecord): RuleView {
+  return { ...rule, expired: isRuleExpired(rule) };
+}
+
+function ruleScopeUsage(file: RulesFile, scope: string): RuleScopeUsage {
+  let humanChars = 0;
+  let aiCount = 0;
+  for (const rule of file.rules) {
+    if (rule.scope !== scope) continue;
+    if (rule.source === 'human') humanChars += rule.text.length;
+    else aiCount += 1;
+  }
+  return { humanChars, humanLimit: MAX_INJECT_CHARS, aiCount, aiLimit: AI_SOFT_CAP };
+}
+
+function safeRuleViews(config: KiConfig): ReturnType<typeof readViews> {
+  try {
+    return readViews(config);
+  } catch {
+    return {};
+  }
+}
+
+function knownRuleScopes(): string[] {
+  try {
+    return listAllScopes();
+  } catch {
+    return [];
+  }
+}
+
+/** 写规则只接受物理 scope：视图语义模糊，未知库会产出孤儿 */
+function assertWritableRuleScope(config: KiConfig, scope: string): void {
+  if (!scope) throw new ChatApiError(400, 'RULE_SCOPE_REQUIRED', 'scope 必填');
+  if (Object.prototype.hasOwnProperty.call(safeRuleViews(config), scope)) {
+    throw new ChatApiError(400, 'RULE_SCOPE_VIEW', '视图不能直接写规则，请改传成员库名');
+  }
+  if (!knownRuleScopes().includes(scope)) {
+    throw new ChatApiError(400, 'RULE_SCOPE_UNKNOWN', `知识库「${scope}」不存在`);
+  }
+}
+
+async function readRuleBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  try {
+    const body = await readJsonBody(req, 64 * 1024);
+    if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('body 必须是 JSON 对象');
+    return body as Record<string, unknown>;
+  } catch (err) {
+    throw new ChatApiError(400, 'RULE_BODY_INVALID', `请求体不合法：${(err as Error).message}`);
+  }
+}
+
+function mapRuleError(err: unknown): never {
+  if (err instanceof RulesError) {
+    const status = err.code === 'RULE_NOT_FOUND' ? 404
+      : err.code === 'RULES_BUSY' ? 409
+        : err.code === 'RULES_IMPORT_TOO_LARGE' ? 413
+          : err.code === 'RULES_CORRUPT' || err.code === 'RULES_WRITE_FAILED' ? 500
+            : 400;
+    throw new ChatApiError(status, err.code, err.message);
+  }
+  throw err;
+}
+
+async function handleRulesList(res: ServerResponse, url: URL, ctx: ChatRouteContext): Promise<void> {
+  const scope = (url.searchParams.get('scope') ?? '').trim();
+  if (!scope) throw new ChatApiError(400, 'RULE_SCOPE_REQUIRED', 'scope 必填');
+
+  const config = snapshotConfig(ctx);
+  const views = safeRuleViews(config);
+  const isView = Object.prototype.hasOwnProperty.call(views, scope);
+  let members: string[] = [];
+
+  if (isView) {
+    members = views[scope]!.members;
+    for (const m of members) if (!requireScope(ctx, m, '/rules', res)) return;
+  } else {
+    const known = knownRuleScopes().includes(scope);
+    if (!known) {
+      // 孤儿库没有可鉴权的 scope：只允许全库权限查看
+      if (ctx.authScopes !== null && !ctx.authScopes.includes(ALL_SCOPES)) {
+        throw new ChatApiError(403, 'SCOPE_FORBIDDEN', 'Forbidden: 无权访问该 scope');
+      }
+    } else if (!requireScope(ctx, scope, '/rules', res)) {
+      return;
+    }
+  }
+
+  const file = readRules(config);
+  const names = isView ? members : [scope];
+  sendOk(res, 200, {
+    scope,
+    isView,
+    ...(isView ? { members } : {}),
+    rules: file.rules.filter((r) => names.includes(r.scope)).map(toRuleView),
+    usage: isView ? null : ruleScopeUsage(file, scope),
+  });
+}
+
+function ruleOrphanEntries(config: KiConfig): Array<{ scope: string; count: number }> {
+  const file = readRules(config);
+  const known = new Set([...knownRuleScopes(), ...Object.keys(safeRuleViews(config))]);
+  const counts = new Map<string, number>();
+  for (const rule of file.rules) {
+    if (known.has(rule.scope)) continue;
+    counts.set(rule.scope, (counts.get(rule.scope) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([scope, count]) => ({ scope, count }));
+}
+
+function handleRulesMeta(res: ServerResponse, ctx: ChatRouteContext): void {
+  const config = snapshotConfig(ctx);
+  const views = safeRuleViews(config);
+  const scopes = knownRuleScopes().filter((s) => scopeAllowed(ctx.authScopes, s));
+  const visibleViews: Record<string, string[]> = {};
+  for (const [name, view] of Object.entries(views)) {
+    if (view.members.every((m) => scopeAllowed(ctx.authScopes, m))) visibleViews[name] = view.members.slice();
+  }
+  const canSeeOrphans = ctx.authScopes === null || ctx.authScopes.includes(ALL_SCOPES);
+  sendOk(res, 200, {
+    scopes,
+    views: visibleViews,
+    orphans: canSeeOrphans ? ruleOrphanEntries(config) : [],
+  });
+}
+
+function handleRulesOrphans(res: ServerResponse, ctx: ChatRouteContext): void {
+  if (ctx.authScopes !== null && !ctx.authScopes.includes(ALL_SCOPES)) {
+    throw new ChatApiError(403, 'FORBIDDEN', 'Forbidden: 只有全库权限可以查看已删除库的规则');
+  }
+  sendOk(res, 200, { orphans: ruleOrphanEntries(snapshotConfig(ctx)) });
+}
+
+async function handleRulesCreate(req: IncomingMessage, res: ServerResponse, ctx: ChatRouteContext): Promise<void> {
+  if (!requireGlobalConfigWrite(res, ctx)) return;
+  const body = await readRuleBody(req);
+  const config = snapshotConfig(ctx);
+  const scope = typeof body.scope === 'string' ? body.scope.trim() : '';
+  const text = typeof body.text === 'string' ? body.text : '';
+  const expiresAt = body.expiresAt === undefined || body.expiresAt === null ? null : String(body.expiresAt);
+  assertWritableRuleScope(config, scope);
+  try {
+    const rule = createHumanRule(config, { scope, text, expiresAt, createdBy: ruleActor(ctx) });
+    sendOk(res, 201, { rule: toRuleView(rule) });
+  } catch (err) {
+    mapRuleError(err);
+  }
+}
+
+async function handleRulesUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ChatRouteContext,
+  id: string,
+): Promise<void> {
+  if (!requireGlobalConfigWrite(res, ctx)) return;
+  const body = await readRuleBody(req);
+  const patch: { text?: string; expiresAt?: string | null } = {};
+  if (Object.prototype.hasOwnProperty.call(body, 'text')) {
+    patch.text = typeof body.text === 'string' ? body.text : '';
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'expiresAt')) {
+    patch.expiresAt = body.expiresAt === null ? null : String(body.expiresAt);
+  }
+  try {
+    const rule = updateHumanRule(snapshotConfig(ctx), id, patch, ruleActor(ctx));
+    sendOk(res, 200, { rule: toRuleView(rule) });
+  } catch (err) {
+    mapRuleError(err);
+  }
+}
+
+async function handleRulesPermanent(res: ServerResponse, ctx: ChatRouteContext, id: string): Promise<void> {
+  if (!requireGlobalConfigWrite(res, ctx)) return;
+  try {
+    const rule = promoteAiRule(snapshotConfig(ctx), id, ruleActor(ctx));
+    sendOk(res, 200, { rule: toRuleView(rule) });
+  } catch (err) {
+    mapRuleError(err);
+  }
+}
+
+async function handleRulesDelete(res: ServerResponse, ctx: ChatRouteContext, id: string): Promise<void> {
+  if (!requireGlobalConfigWrite(res, ctx)) return;
+  try {
+    const rule = deleteRule(snapshotConfig(ctx), id, ruleActor(ctx));
+    sendOk(res, 200, { id: rule.id });
+  } catch (err) {
+    mapRuleError(err);
+  }
+}
+
+async function handleRulesExport(res: ServerResponse, url: URL, ctx: ChatRouteContext): Promise<void> {
+  const rawScope = (url.searchParams.get('scope') ?? '').trim();
+  const includeAi = url.searchParams.get('includeAi') === '1';
+  const config = snapshotConfig(ctx);
+  const views = safeRuleViews(config);
+
+  let scopes: string[] | null = null;
+  let label = 'all';
+  if (rawScope && rawScope !== 'all') {
+    if (Object.prototype.hasOwnProperty.call(views, rawScope)) {
+      scopes = views[rawScope]!.members;
+      for (const m of scopes) if (!requireScope(ctx, m, '/rules/export', res)) return;
+      label = rawScope;
+    } else {
+      if (!requireScope(ctx, rawScope, '/rules/export', res)) return;
+      scopes = [rawScope];
+      label = rawScope;
+    }
+  } else if (ctx.authScopes !== null && !ctx.authScopes.includes(ALL_SCOPES)) {
+    throw new ChatApiError(403, 'FORBIDDEN', 'Forbidden: 只有全库权限可以导出全部规则');
+  }
+
+  const pkg = buildExportPackage(config, { scopes, includeAi });
+  const safe = label.replace(/[^a-zA-Z0-9_-]/g, '_') || 'all';
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Disposition': `attachment; filename="ai-rules-${safe}-${day}.json"`,
+  });
+  res.end(`${JSON.stringify(pkg, null, 2)}\n`);
+}
+
+async function handleRulesImport(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: ChatRouteContext,
+): Promise<void> {
+  if (!requireGlobalConfigWrite(res, ctx)) return;
+
+  let body: Record<string, unknown>;
+  try {
+    const raw = await readJsonBody(req, 1024 * 1024 + 64 * 1024);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('body 必须是 JSON 对象');
+    body = raw as Record<string, unknown>;
+  } catch (err) {
+    const message = (err as Error).message;
+    const tooLarge = /超过|上限|maxBytes|too large/i.test(message);
+    throw new ChatApiError(
+      tooLarge ? 413 : 400,
+      tooLarge ? 'RULES_IMPORT_TOO_LARGE' : 'RULES_IMPORT_INVALID',
+      `导入包不合法：${message}`,
+    );
+  }
+
+  const modeRaw = body.mode === undefined ? 'merge' : body.mode;
+  if (modeRaw !== 'merge' && modeRaw !== 'replace') {
+    throw new ChatApiError(400, 'RULES_IMPORT_INVALID', 'mode 只能是 merge 或 replace');
+  }
+  if (body.package === undefined) {
+    throw new ChatApiError(400, 'RULE_BODY_INVALID', '缺少 package');
+  }
+
+  const mode = modeRaw as ImportMode;
+  const dryRun = body.dryRun === true;
+  const config = snapshotConfig(ctx);
+  try {
+    const result = dryRun
+      ? planImport(config, body.package, mode).result
+      : applyImport(config, body.package, mode);
+    sendOk(res, 200, { ...result });
+  } catch (err) {
+    mapRuleError(err);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
  *
  * 覆盖：
  *   - TokenRecord.readOnly 的创建 / 兼容 / 严格布尔兜底 / 局部更新
- *   - READ_ONLY_TOOL_NAMES 名单内容与全部工具的关系（读 11 / 写见 WRITE_TOOLS + 1 个模型消耗型 ki_ask）
+ *   - READ_ONLY_TOOL_NAMES 名单内容与全部工具的关系（读 12 / 写见 WRITE_TOOLS + 1 个模型消耗型 ki_ask）
  *   - findReadOnlyViolation：单条、batch、未知工具名（fail-safe）、非 tools/call
  *   - 拒绝文案四要素且不含会误关库级只读的 `ki scope readonly`
  *
@@ -36,7 +36,7 @@ import { findReadOnlyViolation } from '../src/lib/mcp-http.js';
 import { buildKiMcpServer } from '../src/lib/mcp-server-factory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-/** 8 个写工具（与 mcp-server.ts 的写工具注册块一致） */
+/** 13 个写工具（11 个知识库写入 + 2 个 AI 规则写入，与 mcp-server.ts 写块一致） */
 const WRITE_TOOLS = [
   'ki_store',
   'ki_bulk_store',
@@ -49,6 +49,8 @@ const WRITE_TOOLS = [
   'ki_group_create',
   'ki_group_delete_empty',
   'ki_delete_relation',
+  'ki_rule_add',
+  'ki_rule_delete',
 ];
 
 let tmpDir: string;
@@ -167,13 +169,13 @@ describe('updateToken：scope 与访问模式可独立修改', () => {
 // ─────────────────────────────────────────────
 
 describe('READ_ONLY_TOOL_NAMES：名单内容', () => {
-  it('恰好 11 个读工具，与写工具互不重叠', () => {
+  it('恰好 12 个读工具，与写工具互不重叠', () => {
     assert.deepEqual(
       [...READ_ONLY_TOOL_NAMES].sort(),
       [
         // `ki_get_image` 已于 2026-11-25 从 `/mcp` 移除（取件改走 ki-client），不再计入本清单
         'ki_event_get', 'ki_event_list', 'ki_event_type_list', 'ki_get_module_info', 'ki_group_list',
-        'ki_lifecycle_list', 'ki_recall', 'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list',
+        'ki_lifecycle_list', 'ki_recall', 'ki_rule_list', 'ki_scope_list', 'ki_search', 'ki_tag_list', 'ki_view_list',
       ],
     );
     for (const writeTool of WRITE_TOOLS) {

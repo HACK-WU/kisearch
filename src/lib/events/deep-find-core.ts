@@ -17,6 +17,7 @@ import type { ChatTurn, LlmStreamPart } from '../chat/llm-client.js';
 import { streamChat } from '../chat/llm-client.js';
 import { GROUNDED_OUTPUT_SPEC, runGroundedRecall } from '../recall/run-recall.js';
 import { buildScopeNote, toolCallBudgetNote } from '../recall/recall-prompt.js';
+import { buildRulesBlock, loadRulesForScopes, maybeGcRules } from '../rules/index.js';
 import { makeRecallToolRunner, makeScopeResolver } from '../recall/tool-runner.js';
 import { readAllGroupCaches } from '../group-cache.js';
 import { loadConfig, type KiConfig } from '../config.js';
@@ -138,17 +139,31 @@ export async function runDeepFindCore(args: DeepFindCoreArgs): Promise<DeepFindR
   // 用 !== undefined 而不是 hasOwnProperty：（对象展开常见）
   // 不等于调用方要求开启，否则会把测试/旧调用的越界候选一并放行。
   const switchable = args.tokenScopes !== undefined;
+  const config = args.kiConfig ?? loadConfig();
   const resolver = switchable
     ? makeScopeResolver({
-      config: args.kiConfig ?? loadConfig(),
+      config,
       tokenScopes: args.tokenScopes ?? null,
       defaultTargets: args.targets,
     })
     : null;
 
+  /*
+   * S-02：页面「AI 查找」与 ki_recall 同一份规则段。
+   * 页面调用没有只读 Token 语义，读后可直接触发异步 GC。
+   */
+  let rulesBlock = '';
+  try {
+    rulesBlock = buildRulesBlock(loadRulesForScopes(config, args.targets));
+    maybeGcRules(config, args.targets);
+  } catch {
+    rulesBlock = '';
+  }
+
   const systemPrompt = [
     args.prompt.trim(),
     ...args.skills.filter((s) => s.enabled).map((s) => `### ${s.name}\n${s.content.trim()}`),
+    ...(rulesBlock ? [rulesBlock] : []),
     ...(resolver
       ? [buildScopeNote({
         defaultTargets: args.targets,

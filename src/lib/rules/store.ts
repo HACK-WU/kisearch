@@ -26,6 +26,9 @@ const LOCK_STALE_MS = 30_000;
 /** 进程内读缓存：`path:mtimeMs:size` → 解析结果；本进程写成功后直接替换 */
 let cache: { key: string; file: RulesFile } | null = null;
 
+/** 最近一次读到的损坏文件路径：写路径据此拒绝覆盖（S-01 §6） */
+let corruptPath: string | null = null;
+
 /** 本进程持有的锁路径；同进程重入直接拒绝，避免自己等自己 */
 const heldLocks = new Set<string>();
 
@@ -100,8 +103,9 @@ export function readRules(config: KiConfig): RulesFile {
   let stat: fs.Stats;
   try {
     stat = fs.statSync(filePath);
-  } catch {
-    // 不存在 / 不可读：都按空规则处理，读取方不需要区分
+  } catch (err) {
+    // 不存在 / 不可读：都按空规则处理；只有确认不存在才清掉损坏标记
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT' && corruptPath === filePath) corruptPath = null;
     return emptyFile();
   }
 
@@ -122,9 +126,11 @@ export function readRules(config: KiConfig): RulesFile {
     }
     const file: RulesFile = { version: RULES_FILE_VERSION, rules };
     cache = { key, file };
+    corruptPath = null;
     return cloneFile(file);
   } catch {
     rulesLog('error', { code: 'RULES_CORRUPT' });
+    corruptPath = filePath;
     const file = emptyFile();
     cache = { key, file };
     return cloneFile(file);
@@ -149,6 +155,9 @@ export function writeRules(config: KiConfig, file: RulesFile): void {
     throw new RulesError('RULES_CORRUPT', '规则文件结构非法：version 必须为 1 且 rules 必须是数组');
   }
   const filePath = rulesFilePath(config);
+  if (corruptPath === filePath) {
+    throw new RulesError('RULES_CORRUPT', '规则文件已损坏：拒绝覆盖；请先修复或删除该文件');
+  }
   if (!heldLocks.has(`${filePath}.lock`)) {
     throw new RulesError('RULES_BUSY', 'writeRules 必须在 withRulesLock() 内调用，否则会丢失并发更新');
   }

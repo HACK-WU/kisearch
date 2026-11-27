@@ -63,13 +63,17 @@ describe('rules/store', () => {
     assert.equal(got.rules[0]!.text, '查部署问题优先「部署运维」组');
   });
 
-  it('损坏文件降级为空', () => {
+  it('损坏文件降级为空，且写路径拒绝覆盖', () => {
     const config = makeConfig();
     const filePath = rulesFilePath(config);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, '{ not json', 'utf8');
 
     assert.deepEqual(readRules(config), { version: 1, rules: [] });
+    assert.throws(
+      () => withRulesLock(config, () => writeRules(config, { version: 1, rules: [] })),
+      (err: unknown) => err instanceof RulesError && err.code === 'RULES_CORRUPT',
+    );
   });
 
   it('外部写后缓存失效', () => {

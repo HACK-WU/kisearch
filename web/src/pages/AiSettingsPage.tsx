@@ -18,6 +18,7 @@ import { useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 
 import { PromptConfigLayer, type CapabilitySection } from '@/chat/PromptConfigLayer';
+import { RulesPanel } from '@/chat/RulesPanel';
 import { Icon } from '@/components/icons';
 import { resolveAiSettingsBack } from '@/lib/aiSettingsUrl';
 import { useAuth } from '@/lib/authContext';
@@ -33,6 +34,7 @@ const CAPABILITIES: ReadonlyArray<{ key: CapabilitySection; label: string; state
   // 2026-11-25（A 方案）：本域同时是 MCP 工具 ki_recall 的配置（同一链路）。
   // 标注放在标题括号里而非副标题：副标题会被省略号截断（216px 卡宽），标题不会。
   { key: 'find', label: 'AI 查找（ki_recall）', state: '范围 · 提示词 · Skill · 工具', icon: 'search' },
+  { key: 'rules', label: 'AI 规则', state: '按库 · 人工 / AI', icon: 'edit' },
 ];
 
 /**
@@ -77,8 +79,17 @@ export function AiSettingsPage(): JSX.Element {
   return (
     <div className="ai-set">
       <p className="ai-set__note">
-        <b>全局一份配置</b>，不随顶部 scope 变化；改动即时落盘。
-        提示词与 Skill 对之后新建的会话 / 调用生效，工具开关下一次提问即生效。
+        {section === 'rules' ? (
+          <>
+            <b>按库生效</b>：每个知识库的规则独立，不做全局通用；视图调用取成员并集（只读）。
+            <b>人写</b>默认永久；<b>AI 写</b>默认临时，每库上限 20 条，超出后满 1 天才按最早优先淘汰。
+          </>
+        ) : (
+          <>
+            <b>全局一份配置</b>，不随顶部 scope 变化；改动即时落盘。
+            提示词与 Skill 对之后新建的会话 / 调用生效，工具开关下一次提问即生效。
+          </>
+        )}
       </p>
 
       {isViewer && (
@@ -119,14 +130,18 @@ export function AiSettingsPage(): JSX.Element {
             不需要重建实例。加 key 会在每次切分组时重新 GET 配置、闪一下「读取配置…」，
             并且把"保存中"状态一并清空（用户会以为刚才那次没保存）。
           */}
-          <PromptConfigLayer
-            capability={section}
-            hideHeader
-            readOnly={controlsLocked}
-            onClose={goBack}
-            // 通知常驻的对话面板重拉配置：否则改完「上下文窗口」后，面板占比分母仍是旧值
-            onSaved={emitChatConfigSaved}
-          />
+          {section === 'rules' ? (
+            <RulesPanel readOnly={isViewer} locked={controlsLocked} />
+          ) : (
+            <PromptConfigLayer
+              capability={section}
+              hideHeader
+              readOnly={controlsLocked}
+              onClose={goBack}
+              // 通知常驻的对话面板重拉配置：否则改完「上下文窗口」后，面板占比分母仍是旧值
+              onSaved={emitChatConfigSaved}
+            />
+          )}
         </div>
       </div>
     </div>

@@ -110,6 +110,8 @@ const READ_MCP_TOOLS = new Set<string>([
   'ki_event_get',
   'ki_group_list',
   'ki_search',
+  /** AI 规则只读列表（S-04）：只读规则文件，不碰 KB 引擎，可与其他读并行 */
+  'ki_rule_list',
   /**
    * `ki_ask`（REQ-20261113-001 · S-02 §3.2 决策「调度车道」）：
    * 对库只做**只读检索**（与 ki_search 同性质），LLM 调用不经过 coordinator。

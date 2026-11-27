@@ -3,11 +3,44 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { executeSearch } from '../../search.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
 import { timeoutSecondsToMs } from '../query-timeout.js';
+import { loadConfig, type KiConfig } from '../config.js';
+import { buildRulesBlock, loadRulesForScopes, maybeGcRules } from '../rules/index.js';
 
-export function registerSearchTool(server: McpServer): void {
+/** `ki_search` 随结果返回的规则段（S-02） */
+export interface SearchRulesPayload {
+  /** 已渲染的规则文本（audience='external'） */
+  text: string;
+  /** 实际返回条数 */
+  count: number;
+  /** 因 2000 字上限被截掉的条数 */
+  truncated: number;
+}
+
+/**
+ * 构造 `ki_search` 的 rules 字段；无规则/被关闭/加载失败时返回 undefined。
+ * 抽成纯函数便于单测，也避免 handler 里堆 rules 逻辑。
+ */
+export function buildSearchRulesPayload(
+  config: KiConfig,
+  scopes: string[],
+  includeRules: boolean,
+): SearchRulesPayload | undefined {
+  if (!includeRules || scopes.length === 0) return undefined;
+  try {
+    const loaded = loadRulesForScopes(config, scopes);
+    const text = buildRulesBlock(loaded, { audience: 'external' });
+    if (!text) return undefined;
+    return { text, count: loaded.total - loaded.truncated, truncated: loaded.truncated };
+  } catch {
+    return undefined;
+  }
+}
+
+export function registerSearchTool(server: McpServer, opts?: { readOnly?: boolean }): void {
   server.tool(
     'ki_search',
     '语义检索知识库内容（按意思找相似片段，适合不知落在哪一篇时）；'
+    + '默认随结果返回该库的项目规则（include_rules=false 可关闭）；'
     + '已知确切 Group / Relation 名、要读完整原文时改用 ki_group_list + ki_get_module_info；'
     + '若还不知道该搜什么词、需要先确定「该读哪些文档」，改用 ki_recall',
     {
@@ -22,6 +55,7 @@ export function registerSearchTool(server: McpServer): void {
       tags: z.string().optional().describe('过滤标签（不传则搜索全部 tag：内部按 tag 取候选，最终仍按 limit 截断，ki-search 内容优先；多个用逗号分隔，OR 组合）'),
       timeout: z.number().positive().max(60).optional().describe('查询 embedding 超时（秒，最大 60；未传则使用配置值）'),
       include_original: z.boolean().optional().default(false).describe('是否返回 local KB 文件级完整原文（默认 false）；fulltext 模式即使关闭也会返回最多 3 个原文命中片段、行号区间、matchCount、matchCountComplete 和 totalLines。chunk fallback 无法可靠映射，或候选池饱和且仍可能有额外 fallback 区域时，matchCount 是已确认下界，matchCountComplete=false'),
+      include_rules: z.boolean().optional().default(true).describe('是否随结果返回当前 scope 的规则（默认 true）；AI 连续检索时可置 false 避免重复返回'),
       mode: z.enum(['hybrid', 'fulltext']).optional().default('hybrid').describe('检索模式：hybrid=语义+全文（默认，可能调用 embedding）；fulltext=仅全文，不调用 embedding'),
       semantic_bonus: z.number().min(0).max(1).optional().describe('语义补充系数（仅 calibrated-semantic 生效，默认 0.1）。越大语义越主导'),
       ranking: z.enum(['semantic-similarity', 'semantic-fts-dominant', 'semantic-fts-boost', 'weighted', 'dynamic-ratio', 'semantic-first', 'calibrated-semantic', 'calibrated-adaptive']).optional().describe('多库（视图）排序算法，默认 semantic-similarity（绝对相似度 + 字面加成）。semantic-fts-dominant=字面线性主导、semantic-fts-boost=字面强命中跳级，均为对比用，验证后会收敛为一个'),
@@ -50,8 +84,26 @@ export function registerSearchTool(server: McpServer): void {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           };
         }
+
+        /*
+         * S-02：规则随结果返回（include_rules 默认 true）。
+         * 只读 Token 只做过滤、不触发 GC；规则加载失败不影响检索结果。
+         */
+        const scopes = Array.isArray((result as { scopes?: unknown }).scopes)
+          ? (result as { scopes: string[] }).scopes
+          : [];
+        let payload: unknown = result;
+        try {
+          const config = loadConfig();
+          if (opts?.readOnly !== true && scopes.length > 0) maybeGcRules(config, scopes);
+          const rules = buildSearchRulesPayload(config, scopes, args.include_rules !== false);
+          if (rules) payload = { ...result, rules };
+        } catch {
+          /* 规则加载失败不影响检索结果 */
+        }
+
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
         };
       } catch (err) {
         return {

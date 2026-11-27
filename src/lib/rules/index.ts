@@ -42,5 +42,14 @@ export {
 
 export { buildRulesBlock } from './block.js';
 
+export { applyImport, buildExportPackage, planImport } from './import-export.js';
+export type {
+  ExportPackage,
+  ExportRule,
+  ImportMode,
+  ImportPlan,
+  ImportResult,
+} from './import-export.js';
+
 export { rulesLog } from './log.js';
 export type { RulesLogEvent, RulesLogFields } from './log.js';
