@@ -841,7 +841,9 @@ async function executeQueryGroupLocal(params: QueryGroupParams): Promise<QueryGr
       return {
         ok: false,
         error: `知识库 "${scope}" 尚未导入（KB 目录不存在）`,
-        hint: `确认 scope 名是否正确；需要新建请执行 ki import --scope ${scope} …`,
+        // 视图名走不到这里（解析阶段已展开成成员库），能到这里说明「以为是视图但没建/名字写错」——
+        // 只提示 import 会把用户推向「新建一个同名库」这条错路（2026-11-26 · 事件 #110 现场）。
+        hint: `确认 scope 名是否正确；若它其实是知识视图，请用 ki view list 核对（视图未创建时会按普通库名处理）；需要新建请执行 ki import --scope ${scope} …`,
       };
     }
 

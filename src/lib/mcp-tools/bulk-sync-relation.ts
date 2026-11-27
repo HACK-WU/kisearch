@@ -9,6 +9,7 @@ export function registerBulkSyncRelationTool(server: McpServer): void {
     'ki_bulk_sync_relation',
     '批量写入/更新 Relation + 本地 KB + 向量层（一次 embedding + 一次向量写入，比多次并发调用 ki_sync_relation 快 N 倍）。自动补建 Group 树。当需要同时写入多条 Relation 时优先使用此工具。'
     + '成功时**每条成功结果**各带 url（该文档在 Web 端的地址）；请把它们原样告知用户。'
+    + '**配图与正文长度口径同 ki_sync_relation**：链路 / 数据流 / 状态机 / 时序优先配 mermaid 图且图必配文字结论（图块不进检索），手写正文别引用真图片；'
     + '单条正文超过 4000 字符时该条结果**仍为成功**但带 warning 字段，按提示拆条（其余条目不受影响）。',
     {
       scope: z.string().optional().default('default').describe('项目隔离标识（省略则用 default；strict 模式下必须传且须在白名单内）'),

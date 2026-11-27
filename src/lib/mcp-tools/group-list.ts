@@ -1,9 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { executeQueryGroup } from '../../query-group.js';
-import { loadConfig } from '../config.js';
-import { isViewRequest, resolveScopeTargets } from '../scope-view.js';
-import { withTimeout, TOOL_TIMEOUT } from './util.js';
+import { queryGroupByScope, VIEW_TOTAL_TIMEOUT } from '../group-list-view.js';
+import { TOOL_TIMEOUT } from './util.js';
 
 export function registerGroupListTool(server: McpServer): void {
   server.tool(
@@ -23,87 +21,60 @@ export function registerGroupListTool(server: McpServer): void {
     },
     async (args) => {
       try {
-        const queryOpts = {
+        /**
+         * 视图展开统一交给 `queryGroupByScope`（CLI / 对话侧共用同一实现）：
+         * 两个库都有 `projects` 时各自一棵树 —— 合并后 Agent 无法判断文档属于哪个库。
+         */
+        const outcome = await queryGroupByScope(args.scope, {
           groupsParam: args.groups ?? args.group,
           subtreeParam: args.subtree,
           hotCount: args.hot_count ?? 5,
           depth: args.depth ?? 4,
           modes: (args.mode ?? 'hot').split(',').map(m => m.trim()),
           autoFallback: args.auto_fallback,
-        };
+          // 单成员 30s + 整体 50s：MCP 客户端 tools/call 硬超时 60s，超过后客户端先失败
+          timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_group_list', totalMs: VIEW_TOTAL_TIMEOUT.MCP },
+        });
 
-        /**
-         * 视图：**按成员库分桶**，不合并同名 Group。
-         * 两个库都有 `projects` 时各自一棵树 —— 合并后 Agent 无法判断文档属于哪个库。
-         *
-         * ★ 判据是「名字命中视图」（`isViewRequest`），不能叠加成员数：
-         *   单成员视图落到单库分支会拿视图名当 scope，报「尚未导入 / 元数据不存在」。
-         */
-        const targets = resolveScopeTargets(loadConfig(), args.scope);
-        if (isViewRequest(targets)) {
-          if (targets.scopes.length === 0) {
+        if (outcome.kind === 'single') {
+          if (outcome.result.ok) {
             return {
-              isError: true,
-              content: [{
-                type: 'text',
-                text: JSON.stringify({
-                  ok: false,
-                  view: targets.views[0],
-                  error: `视图 ${targets.views[0]} 没有可用的成员库`,
-                  skipped: targets.skipped,
-                }, null, 2),
-              }],
+              content: [{ type: 'text', text: outcome.result.output }],
             };
           }
-          const buckets: { scope: string; output?: string; error?: string }[] = [];
-          for (const member of targets.scopes) {
-            try {
-              const r = await withTimeout(
-                executeQueryGroup({ scope: member, ...queryOpts }),
-                TOOL_TIMEOUT.READ,
-                'ki_group_list',
-              );
-              buckets.push(r.ok ? { scope: member, output: r.output } : { scope: member, error: r.error });
-            } catch (err) {
-              // 单成员失败不拖垮整个视图
-              buckets.push({ scope: member, error: (err as Error).message });
-            }
-          }
           return {
+            isError: true,
+            content: [{ type: 'text', text: outcome.result.error }],
+          };
+        }
+
+        if (outcome.kind === 'view-empty') {
+          return {
+            isError: true,
             content: [{
               type: 'text',
               text: JSON.stringify({
-                ok: true,
-                view: targets.views[0],
-                members: targets.scopes,
-                buckets,
-                ...(targets.skipped.length > 0 ? { skipped: targets.skipped } : {}),
+                ok: false,
+                view: outcome.view,
+                error: `视图 ${outcome.view} 没有可用的成员库`,
+                skipped: outcome.skipped,
               }, null, 2),
             }],
           };
         }
 
-        const result = await withTimeout(
-          executeQueryGroup({
-            scope: args.scope,
-            groupsParam: args.groups ?? args.group,
-            subtreeParam: args.subtree,
-            hotCount: args.hot_count ?? 5,
-            depth: args.depth ?? 4,
-            modes: (args.mode ?? 'hot').split(',').map(m => m.trim()),
-            autoFallback: args.auto_fallback,
-          }),
-          TOOL_TIMEOUT.READ,
-          'ki_group_list',
-        );
-        if (result.ok) {
-          return {
-            content: [{ type: 'text', text: result.output }],
-          };
-        }
         return {
-          isError: true,
-          content: [{ type: 'text', text: result.error }],
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ok: true,
+              view: outcome.view,
+              members: outcome.members,
+              memberTotal: outcome.memberTotal,
+              buckets: outcome.buckets,
+              ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+            }, null, 2),
+          }],
         };
       } catch (err) {
         return {

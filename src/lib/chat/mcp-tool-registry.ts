@@ -30,7 +30,7 @@ import { getSharedOperationCoordinator } from '../operation-coordinator.js';
 import { runWithConfigSnapshot, loadConfig } from '../config.js';
 import { withTimeout, TOOL_TIMEOUT } from '../mcp-tools/util.js';
 import { executeSearch } from '../../search.js';
-import { executeQueryGroup } from '../../query-group.js';
+import { queryGroupByScope, VIEW_TOTAL_TIMEOUT } from '../group-list-view.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch, PAGE_MIN_CHARS, PAGE_MAX_CHARS } from '../../get-module-info.js';
 import { executeTagList } from '../../tag.js';
 import { executeScopeList } from '../../scope.js';
@@ -436,20 +436,42 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
       { key: 'mode', type: 'string', default: 'hot' },
       { key: 'depth', type: 'int', min: 1, max: 10, default: 4 },
     ],
-    run: (scope, a) => submitScoped('ki_group_list', scope, () =>
-      withTimeout(
-        executeQueryGroup({
-          scope,
-          groupsParam: a.groups as string | undefined,
-          subtreeParam: a.subtree as string | undefined,
-          hotCount: 5,
-          depth: a.depth as number | undefined ?? 4,
-          modes: String(a.mode ?? 'hot').split(',').map((m) => m.trim()).filter(Boolean),
-          autoFallback: true,
-        }),
-        TOOL_TIMEOUT.READ,
-        'ki_group_list',
-      )),
+    /**
+     * 视图展开必须走 `queryGroupByScope`：会话 scope 由前端选定，用户完全可以把**视图**选成
+     * 会话 scope；直接调 `executeQueryGroup` 会拿视图名当物理库名，报「知识库尚未导入」（#110）。
+     */
+    run: (scope, a) => submitScoped('ki_group_list', scope, async () => {
+      const outcome = await queryGroupByScope(scope, {
+        groupsParam: a.groups as string | undefined,
+        subtreeParam: a.subtree as string | undefined,
+        hotCount: 5,
+        depth: a.depth as number | undefined ?? 4,
+        modes: String(a.mode ?? 'hot').split(',').map((m) => m.trim()).filter(Boolean),
+        autoFallback: true,
+        // 单成员 30s + 视图整体 90s：视图是串行查成员，只设单成员上限会让 N 成员最坏 N×30s
+        timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_group_list', totalMs: VIEW_TOTAL_TIMEOUT.CHAT },
+      });
+      // 单库：保持既有返回形状（{ok,scope,output} / {ok:false,error,hint}）零变化
+      if (outcome.kind === 'single') return outcome.result;
+      if (outcome.kind === 'view-empty') {
+        return {
+          ok: false,
+          view: outcome.view,
+          error: `视图 ${outcome.view} 没有可用的成员库`,
+          skipped: outcome.skipped,
+        };
+      }
+      // 视图：与 CLI / MCP 同形（view + members + memberTotal + buckets），单成员失败只在桶内呈现
+      return {
+        ok: true,
+        view: outcome.view,
+        members: outcome.members,
+        // 标量、先于数组保留：buckets 被序列化层截断时，用它对比才发现少了成员
+        memberTotal: outcome.memberTotal,
+        buckets: outcome.buckets,
+        ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+      };
+    }),
   }),
   makeEntry({
     name: 'ki_get_module_info',
