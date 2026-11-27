@@ -48,6 +48,11 @@ export interface AtlasMeta {
   uploadedAt: string;
   /** 上传方标识：`cli:<用户名>` 或 `http:<登录用户>` */
   uploadedBy?: string;
+  /**
+   * 归属主库（2026-11-27）。图集库 `<主库>-atlas` 装包时写入，便于改名后反查。
+   * 可选：旧包没有该字段，读取侧必须按缺失兜底。
+   */
+  mainScope?: string;
 }
 
 /** GET /api/atlas/status 的 data 形状 */
@@ -62,7 +67,7 @@ export interface InstallOptions {
    * 调用方提供的 meta 兜底：包内 meta.json 缺失时用它。
    * 只取 title/branch/baseline/generatedAt/viewCount，其余字段由服务端计算。
    */
-  meta?: Partial<Pick<AtlasMeta, 'title' | 'branch' | 'baseline' | 'generatedAt' | 'viewCount'>>;
+  meta?: Partial<Pick<AtlasMeta, 'title' | 'branch' | 'baseline' | 'generatedAt' | 'viewCount' | 'mainScope'>>;
   /** 上传方标识 */
   uploadedBy?: string;
 }

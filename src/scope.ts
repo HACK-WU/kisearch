@@ -38,6 +38,7 @@ import {
   type ScopeUsage,
 } from './lib/scope-heat.js';
 import { readViewDimensionState } from './lib/view-dimension-state.js';
+import { resolveAtlasMap, type AtlasScopeMap } from './lib/atlas/scope-map.js';
 import { isFtsOnlyIndexedRelation, type Relation } from './lib/scoring.js';
 import {
   vectorListScopes,
@@ -327,6 +328,15 @@ export type ScopeListResult = {
    *   有该字段 = **没读成**，此时 `views` 缺省不代表"一个都没建"。
    */
   viewsWarning?: string;
+  /**
+   * 图集库映射（2026-11-27）：主库 → 图集库的唯一解析结果。
+   *
+   * ★ CLI（`ki atlas upload/link`）、Web（`useAtlasTargets`）、AI（recall）都读它，
+   *   不在各自推导 —— 各写一份会在命名不合约定时静默失配。
+   * ★ 语义错误（scope 名非法 / 环）时**降级为不带该字段**，由消费方按 `-atlas` 兜底：
+   *   scope 列表不该因为一段图集配置打不开；写操作路径（`ki atlas`）另行 fail-loud。
+   */
+  atlas?: AtlasScopeMap;
 };
 
 /**
@@ -583,6 +593,17 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
   // 视图：只在存在定义时带上该字段（无视图的用户响应与改造前完全一致）
   const { views, warning: viewsWarning } = buildViews(config, kbScopes, vectorScopes);
 
+  /*
+   * 图集库映射（2026-11-27）：解析失败**降级为不带该字段**（消费方按 `-atlas` 兜底），
+   * 不让一段图集配置把整个 scope 列表打不开。写操作路径（`ki atlas`）会另做 fail-loud。
+   */
+  let atlas: AtlasScopeMap | undefined;
+  try {
+    atlas = resolveAtlasMap(config);
+  } catch (err) {
+    console.warn(`⚠️ atlas 映射配置无效，本次按纯后缀推导：${(err as Error).message}`);
+  }
+
   return {
     ok: true,
     scopeMode: config.scopeMode,
@@ -592,6 +613,7 @@ export async function executeScopeListLocal(): Promise<ScopeListResult> {
     scopes,
     ...(views ? { views } : {}),
     ...(viewsWarning ? { viewsWarning } : {}),
+    ...(atlas ? { atlas } : {}),
   };
 }
 

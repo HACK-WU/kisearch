@@ -19,6 +19,7 @@ import { isLoopbackHost } from './resourcesPage';
 import { hasSearchTerm } from './browseSearchGroups';
 import { EMPTY_FILTERS, filterKey, toDocListParams, type BrowseFilters } from './browseFilters';
 import { resolveVectorAvailability, type VectorAvailability } from './vectorAvailability';
+import { atlasScopeOf, mainScopeOf, DEFAULT_ATLAS_MAP } from './atlasTargets';
 
 export type { ScopeListResponse, DocListResponse, HealthResponse };
 export type ScopeEntry = ScopeListResponse['scopes'][number];
@@ -220,6 +221,10 @@ function atlasStatusOptions(scope: string) {
 /** `useAtlasTargets` 的一项 */
 export interface AtlasTarget {
   scope: string;
+  /** 该目标是主库还是图集库（图集库由映射追加，2026-11-27） */
+  kind: 'main' | 'atlas';
+  /** 归一后的主库名：图集库取其主库，主库取自身 */
+  mainScope: string;
   status?: AtlasStatusResponse;
   exists: boolean;
   uploadedAt?: string;
@@ -266,19 +271,34 @@ export function useAtlasTargets(scope: string): AtlasTargets {
    * 不去重会让 `useQueries` 对同一 scope 建两条 query（key 相同 → 只发一个请求，
    * 但 `targets` 会出现两个同名项、切换器里也重复一行）。
    */
-  const names = list.isPending
+  const baseNames = list.isPending
     ? []
     : isView
       ? [...new Set(view?.members ?? [])].filter((name) => !missing.has(name))
       : [scope];
+
+  /*
+   * 追加图集库目标（2026-11-27）：主库 `kisearch` 的图集在 `kisearch-atlas`。
+   * 映射数据来自 `ki_scope_list.atlas`（旧 daemon 缺省时按 `-atlas` 兜底）；
+   * 已是图集库的成员不会二次追加。视图 13 成员 → 26 个 status 请求，
+   * 服务端只是读本机 meta.json，沿用现有并发调度。
+   */
+  const atlas = list.data?.atlas ?? DEFAULT_ATLAS_MAP;
+  const extra = baseNames
+    .map((name) => atlasScopeOf(name, atlas))
+    .filter((name) => !baseNames.includes(name));
+  const names = [...baseNames, ...extra];
 
   const results = useQueries({
     queries: names.map((name) => atlasStatusOptions(name)),
   });
   const targets = names.map((name, index): AtlasTarget => {
     const result = results[index];
+    const mainScope = mainScopeOf(name, atlas) ?? name;
     return {
       scope: name,
+      kind: mainScope === name ? 'main' : 'atlas',
+      mainScope,
       status: result?.data,
       exists: result?.data?.exists === true,
       uploadedAt: result?.data?.uploadedAt,

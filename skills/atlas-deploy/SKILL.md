@@ -10,41 +10,58 @@ description: 把 project-atlas 生成的图集包部署进 kisearch：校验压�
 ## 概述（AI 说明层）
 
 - **目的**：补上「图集画完了怎么装进 kisearch」这一步，避免 agent 自己拼命令、漏校验、装完不验。
-- **功能**：包形状校验（唯一 html / baked / 无外链 / 体积）→ `ki atlas upload` 装机 → `export_markdown.py` 导出 md 并导入「知识地图」group（让 AI 也读得到）→ 四步验证 → 按错误码排障 → 红线清单。
+- **功能**：包形状校验（唯一 html / baked / 无外链 / 体积）→ `ki atlas upload` 装机到**图集库** → `export_markdown.py` 导出 md 导入图集库的「知识地图」group → `ki atlas link` 把图集库加入主库所在视图并补授权 → 四步验证 → 按错误码排障 → 红线清单。
 - **使用场景**：本地或远端 agent 拿到 `project-atlas` 产物后要上架；**要让 AI 也能检索图集内容**；图集装不上要定位；回滚上一版。
 - **不适用**：普通文档上传（用 `ki-upload`）、图集怎么画（用 `project-atlas`）。
+
+## 核心约定：主库 ↔ 图集库（2026-11-27）
+
+一个主库对应一个图集库，**图集包与 md 副本都只落图集库**：
+
+| 主库（`--scope`） | 图集库（实际落点） |
+|---|---|
+| `kisearch` | `kisearch-atlas` |
+| `monitor` | `monitor-atlas` |
+
+- 默认按 `<主库>-atlas` 推导；`config.yaml` 的 `atlas.mappings` 可显式覆盖（`ki_scope_list` 会返回 `atlas` 字段）
+- `--atlas-scope <库>` 跳过推导，直接指定落点
+- 过渡期 `--legacy-scope` 保留旧语义（`--scope` 即落点库），下一大版本移除
+- 主库页 `/atlas` 自动回落到图集库；图集库加入主库视图后 AI 才能检索到
 
 ## 0. 速览
 
 ```
-有 atlas.zip 吗？
+有 atlas.zip 与 atlas-md/ 吗？
 ├─ 没有 → 先用 project-atlas 生成并打包（见 §2）
 └─ 有
    ├─ ① 校验包形状（§2.2：根目录唯一 html、baked、无外链、体积）
-   ├─ ② 选目标库（§1：存在、可写、非只读）
-   ├─ ③ ki atlas upload --scope <库> --file <zip>   （§3.1）
-   ├─ ④ export_markdown.py 导出 md 目录              （§2.3，需图集目录在手）
-   ├─ ⑤ 导进同库的「知识地图」group（带 --prune）       （§3.2）
-   ├─ ⑥ ki atlas status --json 核对 sha/基线          （§4.1）
-   ├─ ⑦ 打开 /atlas 点一个节点，抽屉里有代码          （§4.2）
-   ├─ ⑧ AI 检索命中一页 + 取回一张图                  （§4.4）
+   ├─ ② 定主库（--scope kisearch），图集库自动推导为 kisearch-atlas
+   ├─ ③ ki atlas upload --scope <主库> --file dist/atlas.zip   （§3.1）
+   ├─ ④ ki import --scope <图集库> --source dist/atlas-md --group 知识地图 --prune（§3.2）
+   ├─ ⑤ ki atlas link --scope <主库>（自动发现视图 + 补授权）（§3.3）
+   ├─ ⑥ ki atlas status --scope <图集库> --json 核对 sha/基线（§4.1）
+   ├─ ⑦ 主库页 /atlas 直接出图；顶栏显示写入的是哪个库（§4.2）
+   ├─ ⑧ AI 按视图检索命中一页 + 取回一张图（§4.4）
    └─ ⑨ 失败 → §5 排障表按错误码查
 ```
 
 **只做四件事**：包形状、装哪、装完怎么验、**图集怎么让 AI 也读得到**。**不做**：策划视图、画图、判断图集内容对不对。
 
-> **为什么多出 ④⑤**：图集在服务端是 `<库>/.atlas/atlas.html` 一个烘焙 HTML，点号目录被扫描跳过、不进索引，MCP 工具面也没有 atlas 工具 —— AI 只看得见人、看不见图。把 `export_markdown.py` 的产物导入同库的「知识地图」group，AI 才能用 `ki_recall` / `ki_search` 命中它。④⑤ 是**可选但推荐**：不做不影响人看图集，做了 AI 才能引用。
+> **为什么 md 也要进图集库**：图集在服务端是 `<图集库>/.atlas/atlas.html` 一个烘焙 HTML，点号目录被扫描跳过、不进索引，MCP 工具面也没有 atlas 工具 —— AI 只看得见人、看不见图。把 `export_markdown.py` 的产物导入**同一个图集库**的「知识地图」group，AI 才能用 `ki_recall` / `ki_search` 命中它；再把图集库加入主库所在视图，检索才覆盖得到。④⑤ 是**可选但推荐**：不做不影响人看图集，做了 AI 才能引用。
 
 ## 1. 前置检查（缺一项就先补，别硬上）
 
 | 项 | 怎么查 | 缺了怎么办 |
 |---|---|---|
 | `ki` 可用 | `ki --version` | 装 CLI 或走项目 README |
-| 目标库存在 | `ki scope list` | 先建库；**不要**随手用 `default` 顶替 |
-| 目标库可写 | `ki scope list --json` 里该库的 `readonly` 字段（`false` = 可写） | 解除只读：`ki scope readonly <库> --off`（需用户拍板）。⚠️ 只读**只拦 §3.1**（`/api/atlas/package` 有显式只读拦截），而 `ki import` 是放行的 —— 在只读库上跑完 §3.2，会出现「md 已入库、图集没装成」，两边不一致 |
+| **主库存在** | `ki scope list` | 主库必须先存在（`ki atlas upload` 不会为写错的名字建库） |
+| 图集库 | `ki scope list` 里看 `<主库>-atlas` | **可以不存在**，upload 会自动初始化；strict 模式需先在配置注册该 scope |
+| 主库/图集库可写 | `ki scope list --json` 的 `readonly` 字段 | 解除只读：`ki scope readonly <库> --off`（需用户拍板）。⚠️ 只读**只拦 §3.1**，`ki import` 放行 —— 在只读库上跑完 §3.2 会出现「md 已入库、图集没装成」 |
+| 映射已确认 | `ki scope list --json` 的 `atlas` 字段 | 非 `<主库>-atlas` 命名时，在 `config.yaml` 的 `atlas.mappings` 登记，或上传时给 `--atlas-scope` |
 | 图集已打包 | 有 `dist/atlas.zip` | 走 §2 |
 | 图集目录在手 | 有 `site.json` + `nav/` + `views/` | 想同步 AI 可读层（§2.3）就必须在生成侧做；部署机只有 zip 时，让生成侧把 `dist/atlas-md/` 一起带过来 |
 | 有权限看结果 | 浏览器已登录该库 | 请求登录态；`/atlas` 页需要 `knowledge.read` |
+| 视图授权可改 | `ki view audit-grants` | 不改授权就只能 `atlas link --no-grant`，并在结果里说明「AI 检索可能看不到」 |
 
 ## 2. 生成与打包（转 project-atlas，这里只强调形状）
 
@@ -97,19 +114,31 @@ python3 <project-atlas>/scripts/export_markdown.py <图集目录> dist/atlas-md/
 ### 3.1 上传图集包
 
 ```bash
-ki atlas upload --scope <库> --file dist/atlas.zip
+# --scope 是主库；图集库默认 <主库>-atlas（不存在会自动初始化）
+ki atlas upload --scope kisearch --file dist/atlas.zip
+
+# 显式指定图集库（跳过映射）
+ki atlas upload --scope kisearch --atlas-scope kisearch-atlas --file dist/atlas.zip
+
+# 过渡：按旧语义把 --scope 本身当落点库（下一大版本移除）
+ki atlas upload --scope kisearch --legacy-scope --file dist/atlas.zip
 ```
 
 成功输出（人读）：
 
 ```
 校验通过：2 个条目 · entry atlas.html 249 KB
-已安装到 <库>/.atlas/
+已安装到 kisearch-atlas/.atlas/
+  归属主库 kisearch（图集库独立存放，主库页会自动回落）
+  下一步   ki import --scope kisearch-atlas --source dist/atlas-md --group 知识地图 --prune
+  再关联   ki atlas link --scope kisearch
   基线   master@1c3dabf（生成 2026-11-24）
   体积   249 KB（zip 108 KB）
   sha    9bad814a
 上一版已归档到 archive/
 ```
+
+⚠️ **主库本身已有旧图集**时（`<主库>/.atlas/` 存在），upload 会拒绝并提示：要么先 `ki atlas remove --scope <主库> --yes` 再搬，要么加 `--legacy-scope` 继续按旧方式更新 —— 防止「以为在更新，其实另建了一份」。
 
 给脚本 / agent 判定用 `--json`（与 `GET /api/atlas/status` 同构）：
 
@@ -125,18 +154,20 @@ ki atlas upload --scope <库> --file dist/atlas.zip --json
 
 ```bash
 # 远端（ki-client，自动分批 + 文件级增量）
-ki-client upload-dir dist/atlas-md/ --scope <库> --group 知识地图 --remote <源名> --wait --prune
+ki-client upload-dir dist/atlas-md/ --scope <图集库> --group 知识地图 --remote <源名> --wait --prune
 
 # 同机（ki CLI，语义等价）
-ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune
+ki import --scope <图集库> --source dist/atlas-md --group 知识地图 --prune
 ```
+
+例：`ki import --scope kisearch-atlas --source dist/atlas-md --group 知识地图 --prune`
 
 `--prune` 上传完再算「库中存在、本次目录已没有」的候选并打印，**不删除**；只对 `upload-dir` 有效（单文件 `upload` 没有「本次目录全量」，算不出差集）。减页/改名后的清理见 §3.3。
 
-落库形状（2026-11-26 实测）：
+落库形状（2026-11-26 实测，落点是图集库）：
 
 ```
-<库>/知识地图/
+<图集库>/知识地图/
 ├── index.json
 ├── 01-架构总览/{index.json, assets/images/runtime.svg}
 ├── 02-核心链路/{index.json, assets/images/search.svg, …}
@@ -153,11 +184,24 @@ ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune
 
 | # | 纪律 | 理由 |
 |---|---|---|
-| 1 | **落点 = 图集所在 scope** | `ki import --scope` 必须与 `ki atlas upload --scope` **同值**（2026-11-26 拍板）。图集和它的文字层分居两库，卸载、权限、检索会各管一份，没有一处能回答「这份图集现在是什么版本」 |
+| 1 | **落点 = 主库对应的图集库** | `ki import --scope` 必须是图集库（`<主库>-atlas`），与 upload 的实际落点同值。图集与文字层分居两库时，卸载、权限、检索会各管一份，没有一处能回答「这份图集现在是什么版本」 |
 | 2 | group 名**固定 `知识地图`** | 「本库图集的 AI 可读副本」唯一落点。跟着图集标题改名字，换一次标题就多一份副本，AI 会命中两份 |
 | 3 | **不用先建 group** | 导入时自动建（含父路径） |
 | 4 | **保留分类子目录** | 子目录变成子 group（`知识地图/02-核心链路`），图片才落在该子 group 自己的 `assets/` 下，正文 `./images/x.svg` 才对得上。拍平反而要改 md |
 | 5 | **幂等，可重复跑** | 同内容重导 `created=0 / modified=0`，不产生重复文档 |
+
+#### 关联视图与补授权（让 AI 检索覆盖图集库）
+
+```bash
+ki atlas link --scope kisearch                         # 自动发现包含 kisearch 的视图 + 补授权
+ki atlas link --scope kisearch --views kisearch-docs   # 显式限定视图
+ki atlas link --scope kisearch --no-grant              # 只加成员，不补授权
+```
+
+- 自动发现只纳入**成员 ≤ 5** 的视图；更大的视图默认跳过，需 `--views` 显式指定 —— 避免把图集库授权扩散到大杂烩视图
+- 默认补授权：给「已授权该视图」的 Token 追加图集库 scope。不补时 `filterAuthorizedViews` 会让**整个视图从列表消失**
+- 两阶段提交：先只读校验 token 可读，再写成员与授权；补授权失败会回滚该视图的成员
+- `--views` 指定了不含主库的视图会被显式拒绝，不静默忽略
 
 ⚠️ 两个会写错地方的坑（都会静默成功）：
 
@@ -167,8 +211,8 @@ ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune
 落点一致性自查（做完 §3.1 + §3.2 各跑一次）：
 
 ```bash
-ki atlas status --scope <库> --json | grep -o '"exists":[a-z]*'   # 图集在不在这个库
-ls /root/.ki-data/<库>/知识地图/                                   # md 在不在同一个库（KB 根以 config 的 kbDir 为准）
+ki atlas status --scope <图集库> --json | grep -o '"exists":[a-z]*'   # 图集在不在图集库
+ls /root/.ki-data/<图集库>/知识地图/                                   # md 在不在同一个库（KB 根以 config 的 kbDir 为准）
 ```
 
 > **视图（view）不是落点**：`/open/v1/atlas/*` 与 `/api/atlas/package` 显式拒绝视图名——视图下看图集是「从成员库里挑一份」（`web/src/lib/atlasTargets.ts:9-12`）。`--scope` 一律用真实库名。
@@ -193,8 +237,8 @@ ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune --ye
 |---|---|
 | 图集内容变了（页数不变） | 重导 + `--prune`，候选应为 **0**；不为 0 说明页名变过 |
 | 图集**少了页面** | 重导 + `--prune` 看候选 → 同机 `--prune --yes`，或页面勾选删除 |
-| **卸载图集** | ① 页面顶栏「卸载图集」（或 `DELETE /api/atlas/package?scope=<库>`）；② group 默认**保留**（占位无副作用）。确实要清空痕迹再执行 `ki group delete "知识地图" -s <库> --yes`（级联子组 + KB + assets + 向量，进回收站） |
-| **换库（迁移）** | 新库按 §3.1 + §3.2 重做，再回旧库按上两行清理。只做前一半 = 两库各一份，版本迟早不一致 |
+| **卸载图集** | ① 页面顶栏「卸载图集」（或 `ki atlas remove --scope <主库> --yes`；HTTP 走 `DELETE /api/atlas/package?scope=<图集库>`）；② group 默认**保留**（占位无副作用）。确实要清空痕迹再执行 `ki group delete "知识地图" -s <图集库> --yes`（级联子组 + KB + assets + 向量，进回收站） |
+| **换库（迁移）** | 改 `config.yaml` 的 `atlas.mappings` 或下次上传给 `--atlas-scope`，再按 §3.1 + §3.2 重做；旧图集库按上两行清理。只做前一半 = 两库各一份，版本迟早不一致。**存量 `default/知识地图` 暂不迁**（2026-11-27 拍板），需要时单独处理 |
 
 `--prune` 的六条口径（2026-11-26 实测 + 服务端 `import-prune.ts` / `open-api/routes/prune.ts` 实证）：
 
@@ -217,14 +261,14 @@ ki import --scope <库> --source dist/atlas-md --group 知识地图 --prune --ye
 ### 4.1 状态对得上
 
 ```bash
-ki atlas status --scope <库> --json
+ki atlas status --scope <图集库> --json
 ```
 
 核对：`exists: true`、`size` 与本地 entry 一致、`baseline` 是这次生成的 commit。
 
 ### 4.2 页面真能看
 
-1. 打开 `http://127.0.0.1:<port>/atlas`，切到该库；
+1. 打开 `http://127.0.0.1:<port>/atlas`，**从主库视角看**（会自动回落到图集库）；
 2. 状态栏显示基线/生成时间/体积（**必须与 §4.1 一致**）；
 3. 点一个带代码的节点 → 右侧抽屉出现 `路径:行号` 与代码。
 
@@ -242,7 +286,7 @@ ki atlas upload --scope <库> --file /root/.ki-data/<库>/.atlas/archive/<ts>.zi
 
 ```bash
 # ① 语义检索能命中某一页
-ki search --scope <库> --query "<某页摘要里的一句话>" --limit 3
+ki search --scope <视图> --query "<某页摘要里的一句话>" --limit 3
 
 # ② 图能按 group 取回（端口按 daemon 实际值，默认 7423）
 curl -sG 'http://127.0.0.1:7423/api/asset' \
@@ -260,6 +304,21 @@ curl -sG 'http://127.0.0.1:7423/api/asset' \
 
 ⚠️ **检索片段与正文不一样，这不是失败**：`ki_search` 返回的 chunk 过了数据清洗——`file:line` 会被 `codePath` 规则抹掉、图片引用只剩 `!标题`；而 `ki_get_module_info` 读到的 KB 原文是完整的（位置列、图片引用都在）。所以 AI 的正确姿势是**先 search 定位、再 get 读全文拿行号**。
 
+### 4.5 落点与视图关联（新约定必查）
+
+```bash
+# ① 图集与 md 落在同一个图集库
+ki atlas status --scope <图集库> --json | grep -o '"exists":[a-z]*'
+ls /root/.ki-data/<图集库>/知识地图/
+
+# ② 视图仍对原 Token 可见（缺成员授权会让整个视图从列表消失）
+ki view audit-grants
+
+# ③ 主库视角打开 /atlas 直接出图（不是「都还没有知识地图」）
+```
+
+三条任一不成立 → 按 §5 排查。
+
 ## 5. 排障表
 
 | 现象 | 错误码 / 退出码 | 原因 | 下一步 |
@@ -274,7 +333,10 @@ curl -sG 'http://127.0.0.1:7423/api/asset' \
 | 页面空白无图 | — | 浏览器没登录，或 `view` 被拒 | 看状态栏是否显示错误态；直接访问 `/api/atlas/view?scope=<库>` 看返回 JSON |
 | 有图但节点点不开 | — | 快照没抽（`collect_snippets.py` 没跑） | 回到生成侧补快照并重打 |
 | 图与代码不符 | — | 图集过期 | 顶栏基线 commit 与当前 HEAD 比对，重跑生成 |
-| AI 检索命中不到图集内容 | — | 没做 §3.2，或 group 名不是 `知识地图` | 按 §3.2 重导；`ki search --scope <库>` 确认命中 |
+| 加入视图后该视图从列表消失 | — | 图集库未补授权，`filterAuthorizedViews` 整视图隐藏 | `ki view audit-grants` → 按提示 `ki mcp token update`，或重跑 `ki atlas link --scope <主库>` |
+| 主库页仍显示「都还没有知识地图」 | — | 图集还在主库旧路径，或前端未拿到 `atlas` 映射 | `ki atlas status --scope <主库>-atlas --json`；旧部署用 `--legacy-scope` 或按 §3.3 搬迁 |
+| 切到图集库后浏览页没有正文 | — | 图集库只存图集 md，不是业务知识 | 正常。浏览正文回主库；图集库只供图集与 AI 引用 |
+| AI 检索命中不到图集内容 | — | 没做 §3.2 / 没做 §3.3 关联，或 group 名不是 `知识地图` | 按 §3.2 重导 + §3.3 link；`ki search --scope <视图>` 确认命中 |
 | 文档里图裂 | — | 图片没随包上传，或 group 路径对不上 | 查 `{group}/assets/images/` 是否有文件；远端上传时看缺图 fail-loud 报错（退出码 1） |
 | 检索片段里没有 `file:line` | — | 正常现象：chunk 被 `codePath` 清洗 | 用 `ki_get_module_info` 读全文，位置列在 |
 | 图集改版后 AI 仍引旧页 | — | 导入不删除，下线页残留 | 重导带 `--prune` 看候选，再 `--prune --yes` 或页面勾选删除（§3.3）；不必删 group |
@@ -285,11 +347,13 @@ curl -sG 'http://127.0.0.1:7423/api/asset' \
 |---|---|
 | 🔴 1 | **不手改 `.atlas/` 下的文件**（不是配置文件，是产物；改完与 meta 的 sha 不一致，页面会判损坏） |
 | 🔴 2 | **不绕过 `ki atlas upload` 直接写盘**（校验链在 CLI 里，绕过等于装一个未校验的包） |
-| 🔴 3 | **图集包本体不进 group**：`atlas.html` / `package.zip` 留在 scope 根的 `.atlas/`，不许搬进 group。**唯一允许进 group 的是 §2.3 导出的 md 目录**，且只能落 `知识地图`（§3.2）——它本就是给人读的文本，进索引是目的、不是副作用 |
+| 🔴 3 | **图集包本体不进 group**：`atlas.html` / `package.zip` 留在**图集库**根的 `.atlas/`，不许搬进 group。**唯一允许进 group 的是 §2.3 导出的 md 目录**，且只能落图集库的 `知识地图`（§3.2）——它本就是给人读的文本，进索引是目的、不是副作用 |
 | 🔴 4 | **不上传未变更的包**（先比 sha；重复上传会无意义地刷掉 archive） |
 | 🔴 5 | **不在图集里放外链**（部署包必须离线自包含，这是它能装进容器的前提） |
 | 🔴 5.1 | **只装你自己生成的包**：图集 HTML 在页面里是 `sandbox="allow-scripts allow-same-origin"`，等同「可执行代码」，能读同源 Cookie 调本机 API。它不是数据文件，别接收来源不明的 zip |
 | 🔴 6 | **不宣称"已部署"却没做 §4**（状态对得上 + 页面点得开，两条缺一不可） |
+| 🔴 7 | **主库不落图集产物**：图集与 md 只进 `<主库>-atlas`。主库里出现 `.atlas/` 或 `知识地图/` 说明落点走错 |
+| 🔴 8 | **不跳过 `atlas link` 就宣称「AI 能查到」**：图集库未入视图，检索覆盖不到 |
 
 ## 7. 与相邻 skill 的分工
 

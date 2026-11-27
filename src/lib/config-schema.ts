@@ -342,6 +342,15 @@ const CONFIG_SCHEMA: ConfigNode = {
     // REQ-20261029-001：只读 scope 名单。**顶层节点**（不进 scopes）——
     // 写进 scopes 条目会让 registered=true，strict 模式下等于把只读库加进检索白名单。
     scopeReadonly: { type: 'stringArray' },
+    // 2026-11-27：图集库映射（主库 → 图集库）。键值语义（scope 名合法性 / 环）由
+    // `atlas/scope-map.ts::resolveAtlasMap` 判定 —— schema 没有 map 键校验钩子。
+    atlas: {
+      type: 'object',
+      fields: {
+        suffix: { type: 'string' },
+        mappings: { type: 'object', value: { type: 'string' } },
+      },
+    },
     scopes: {
       type: 'object',
       value: SCOPE_ENTRY,

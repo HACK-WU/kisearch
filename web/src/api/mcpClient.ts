@@ -259,6 +259,16 @@ export interface ScopeListResponse {
    *   但契约必须收录，否则将来要用时无从察觉。
    */
   viewsWarning?: string;
+  /**
+   * 图集库映射（2026-11-27）：主库 → 图集库。
+   *
+   * ★ 缺省 = 旧版 daemon 不返回（前端按 `-atlas` 后缀兜底），或映射配置无效被降级。
+   *   前端**不自己推导**：有该字段时必须用它，否则配置里的显式映射会失效。
+   */
+  atlas?: {
+    suffix: string;
+    mappings: Record<string, string>;
+  };
   /** 向量层是否可用；false 表示已降级为仅 KB 层枚举（如向量库被导入进程持锁） */
   vectorAvailable?: boolean;
   /** 向量层不可用原因（降级时用于悬停提示） */

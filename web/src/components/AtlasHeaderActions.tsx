@@ -20,12 +20,15 @@ import { createPortal } from 'react-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import '@/styles/atlas.css';
-import { useAtlasTargets } from '@/lib/hooks';
+import { useAtlasTargets, useScopeList } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAuth } from '@/lib/authContext';
 import { deleteAtlasPackage, uploadAtlasPackage } from '@/api/httpApi';
 import { Icon } from '@/components/icons';
-import { atlasMemberNote, resolveAtlasView, toAtlasProbes } from '@/lib/atlasTargets';
+import {
+  atlasMemberNote, atlasScopeOf, collapseAtlasTargets, DEFAULT_ATLAS_MAP, displayNameOf,
+  pickSingleTarget, resolveAtlasView, toAtlasProbes,
+} from '@/lib/atlasTargets';
 
 /** 上传弹窗状态：同一时刻只有一个动作，用单对象表达比多个 useState 更好守 */
 interface UploadState {
@@ -162,10 +165,12 @@ function AtlasDialog({
  *
  * ★ 只读账号也要能切（读操作）：本组件**不判** `knowledge.write`，上传/卸载才判。
  */
-function AtlasMemberSwitch({ members, selected, note, onPick }: {
+function AtlasMemberSwitch({ members, selected, note, displayName, onPick }: {
   members: string[];
   selected: string;
   note: string | null;
+  /** 显示名：图集库显示其主库名（2026-11-27），真实库名只进 title */
+  displayName: (member: string) => string;
   onPick: (member: string) => void;
 }): JSX.Element {
   const [open, setOpen] = useState(false);
@@ -202,13 +207,13 @@ function AtlasMemberSwitch({ members, selected, note, onPick }: {
         className="ki-topbar__chat-toggle atlas-switch__button"
         aria-haspopup="listbox"
         aria-expanded={open}
-        title={`当前查看「${selected}」的知识地图；本视图共 ${members.length} 个成员库已配置`}
+        title={`当前查看「${displayName(selected)}」的知识地图；本视图共 ${members.length} 个成员库已配置`}
         onClick={() => setOpen((value) => !value)}
       >
         <Icon name="map" />
-        <span className="ki-topbar__chat-label atlas-switch__name">{selected}</span>
+        <span className="ki-topbar__chat-label atlas-switch__name">{displayName(selected)}</span>
         {/* 窄屏只留首字母：≤1100px 时全名会挤掉「AI 对话」等动作（见 atlas.css 断点） */}
-        <span className="atlas-switch__initial" aria-hidden="true">{selected.slice(0, 1).toUpperCase()}</span>
+        <span className="atlas-switch__initial" aria-hidden="true">{displayName(selected).slice(0, 1).toUpperCase()}</span>
         <span className="atlas-switch__caret" aria-hidden="true">▾</span>
       </button>
       {open ? (
@@ -222,7 +227,7 @@ function AtlasMemberSwitch({ members, selected, note, onPick }: {
               className={`atlas-switch__item${member === selected ? ' atlas-switch__item--active' : ''}`}
               onClick={() => { onPick(member); setOpen(false); }}
             >
-              <span className="atlas-switch__item-name">{member}</span>
+              <span className="atlas-switch__item-name">{displayName(member)}</span>
               {member === selected ? <Icon name="check" className="ki-icon ki-icon--sm" /> : null}
             </button>
           ))}
@@ -238,6 +243,7 @@ export function AtlasHeaderActions(): JSX.Element {
   const { can } = useAuth();
   const queryClient = useQueryClient();
   const targets = useAtlasTargets(scope);
+  const scopeList = useScopeList();
   const [params, setParams] = useSearchParams();
   const [upload, setUpload] = useState<UploadState | null>(null);
   /**
@@ -273,7 +279,9 @@ export function AtlasHeaderActions(): JSX.Element {
    */
   if (targets.isView) {
     if (!targets.ready || targets.isPending) return <></>;
-    const shape = resolveAtlasView(toAtlasProbes(targets.targets), params.get('member'));
+    // 先按主库折叠（图集库优先），再交给选中逻辑 —— 否则同一主库会出现两项
+    const probes = collapseAtlasTargets(toAtlasProbes(targets.targets));
+    const shape = resolveAtlasView(probes, params.get('member'));
     /**
      * 0 份不摆；1 份且无读取失败也不摆（页面直出，摆一个只有一项的下拉是纯噪音，用户拍板）。
      *
@@ -289,6 +297,10 @@ export function AtlasHeaderActions(): JSX.Element {
         members={shape.members}
         selected={selected}
         note={atlasMemberNote(shape)}
+        displayName={(member) => {
+          const probe = probes.find((item) => item.scope === member);
+          return probe ? displayNameOf(probe) : member;
+        }}
         onPick={(member) => {
           setParams((prev) => {
             const next = new URLSearchParams(prev);
@@ -304,13 +316,29 @@ export function AtlasHeaderActions(): JSX.Element {
    * 状态读不出来时不摆动作：此时页面显示的是「无法读取图集状态」错误卡片，
    * 顶栏却顶着一个「上传图集包」，会被读成「这个库没有图集」。
    */
-  const single = targets.targets[0];
+  /*
+   * 单库：图集在 `<主库>-atlas`，上传/卸载必须写**真实落点库**（2026-11-27）。
+   * 折叠后图集库优先，所以 writeScope 可能就是当前 scope 本身（旧部署）。
+   */
+  const singleProbe = pickSingleTarget(toAtlasProbes(targets.targets));
+  const single = singleProbe
+    ? targets.targets.find((item) => item.scope === singleProbe.scope)
+    : targets.targets[0];
+  /*
+   * 写入落点必须是**图集库**，而不是「当前库」：
+   * 图集库还没装时 pickSingleTarget 会回落到主库，若直接拿它上传，就绕过了
+   * 「主库不落图集产物」的红线（2026-11-27 质疑环节抓到的缺口）。
+   */
+  const writeScope = single?.kind === 'atlas'
+    ? single.scope
+    : atlasScopeOf(scope, scopeList.data?.atlas ?? DEFAULT_ATLAS_MAP);
   const exists = single?.exists === true;
   const statusUnavailable = single?.isError === true;
   if (!canWrite || statusUnavailable) return <></>;
 
   const refresh = (): void => {
-    void queryClient.invalidateQueries({ queryKey: ['atlasStatus', scope] });
+    // 前缀失效：主库与图集库两个 key 一起刷新
+    void queryClient.invalidateQueries({ queryKey: ['atlasStatus'] });
   };
 
   /** 选文件：只接 zip，且立刻给出体积（服务端还会再校验一次包内形状） */
@@ -333,6 +361,11 @@ export function AtlasHeaderActions(): JSX.Element {
     if (!upload || upload.busy) return;
     setUpload({ ...upload, busy: true, sent: 0, total: 0, error: undefined, code: undefined });
     try {
+      /*
+       * 上传传**当前库**（主库或图集库均可）：服务端按映射推导真实落点，
+       * 图集库不存在时会自动初始化。传 writeScope 反而会让服务端把图集库
+       * 当成「待校验的主库」而 404（首次上传时图集库还不存在）。
+       */
       await uploadAtlasPackage(scope, upload.file, (sent, total) => {
         setUpload((cur) => (cur ? { ...cur, sent, total } : cur));
       });
@@ -446,8 +479,8 @@ export function AtlasHeaderActions(): JSX.Element {
         type="button"
         className="ki-topbar__chat-toggle"
         onClick={() => fileRef.current?.click()}
-        title={exists ? '上传新的图集包（覆盖当前版本）' : '上传图集包（.zip）'}
-        aria-label={exists ? '重新上传图集包' : '上传图集包'}
+        title={exists ? `上传新的图集包到 ${writeScope}（覆盖当前版本）` : `上传图集包到 ${writeScope}（.zip）`}
+        aria-label={exists ? `重新上传图集包到 ${writeScope}` : `上传图集包到 ${writeScope}`}
       >
         <Icon name="upload" />
         <span className="ki-topbar__chat-label">{exists ? '重新上传' : '上传图集包'}</span>
@@ -456,9 +489,9 @@ export function AtlasHeaderActions(): JSX.Element {
         <button
           type="button"
           className="ki-topbar__chat-toggle"
-          onClick={() => setConfirming(scope)}
-          title="卸载当前图集（旧版本保留在 archive/，可重新上传回滚）"
-          aria-label="卸载图集"
+          onClick={() => setConfirming(writeScope)}
+          title={`卸载 ${writeScope} 的图集（旧版本保留在 archive/，可重新上传回滚）`}
+          aria-label={`卸载 ${writeScope} 的图集`}
         >
           <Icon name="x" />
           <span className="ki-topbar__chat-label">卸载</span>

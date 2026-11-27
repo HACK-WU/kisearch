@@ -177,6 +177,8 @@ export function installPackage(scope: string, zipBuf: Buffer, opts: InstallOptio
     packageSha256: createHash('sha256').update(zipBuf).digest('hex'),
     uploadedAt: new Date().toISOString(),
     uploadedBy: opts.uploadedBy,
+    // 归属主库（可选）：由 CLI 传入，用于图集库改名后反查；旧包没有该字段
+    ...(opts.meta?.mainScope ? { mainScope: opts.meta.mainScope } : {}),
   };
 
   // ── 2. 落盘（全部在 try 里，失败清 tmp） ──

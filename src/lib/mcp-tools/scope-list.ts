@@ -3,6 +3,22 @@ import { executeScopeList } from '../../scope.js';
 import { isScopeAuthorized } from '../mcp-token.js';
 import { filterAuthorizedViews } from './view-auth.js';
 import { withTimeout, TOOL_TIMEOUT } from './util.js';
+import type { AtlasScopeMap } from '../atlas/scope-map.js';
+
+/**
+ * 图集映射的 RBAC 过滤：主库与图集库**都**可授权才保留该条。
+ *
+ * 与 scopes / views 同一口径：受限 Token 不能借 `atlas.mappings` 枚举未授权库名。
+ */
+function filterAtlasMap(atlas: AtlasScopeMap, authScopes: string[]): AtlasScopeMap {
+  const mappings: Record<string, string> = {};
+  for (const [main, target] of Object.entries(atlas.mappings)) {
+    if (isScopeAuthorized(authScopes, main) && isScopeAuthorized(authScopes, target)) {
+      mappings[main] = target;
+    }
+  }
+  return { suffix: atlas.suffix, mappings };
+}
 
 /**
  * 注册 ki_scope_list 工具。
@@ -36,6 +52,7 @@ export function registerScopeListTool(server: McpServer, authScopes: string[] | 
             count: visible.length,
             scopes: visible,
             ...(visibleViews === undefined ? { views: undefined } : { views: visibleViews }),
+            ...(result.atlas ? { atlas: filterAtlasMap(result.atlas, authScopes) } : {}),
           };
         return {
           content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],

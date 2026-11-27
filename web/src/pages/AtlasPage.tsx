@@ -25,7 +25,7 @@ import { useSearchParams } from 'react-router-dom';
 import '@/styles/atlas.css';
 import { useScopeValue } from '@/lib/scopeContext';
 import { useAtlasTargets } from '@/lib/hooks';
-import { resolveAtlasView, toAtlasProbes } from '@/lib/atlasTargets';
+import { collapseAtlasTargets, pickSingleTarget, resolveAtlasView, toAtlasProbes } from '@/lib/atlasTargets';
 
 export function AtlasPage(): JSX.Element {
   const scope = useScopeValue();
@@ -61,7 +61,10 @@ export function AtlasPage(): JSX.Element {
 
   // ─── 视图分支 ───────────────────────────────────────
   if (targets.isView) {
-    const shape = resolveAtlasView(toAtlasProbes(targets.targets), params.get('member'));
+    // 与顶栏同一份折叠结果：不折叠会出现「页面渲染 A、顶栏说选中 B」（同一主库的
+    // 主库图集与图集库图集被当成两个成员）
+    const probes = collapseAtlasTargets(toAtlasProbes(targets.targets));
+    const shape = resolveAtlasView(probes, params.get('member'));
 
     // ① 视图定义的成员库全都不在了（目录被删 / 移走）：这不是"没装图集"，得说清区别
     if (targets.targets.length === 0) {
@@ -152,7 +155,19 @@ export function AtlasPage(): JSX.Element {
 
   // ─── 单库分支（渲染逻辑与改造前一致；取数改由 useAtlasTargets 统一装配，
   //     因此多了一层「等 scopeList 就绪」的前置等待 —— 它同时也是判断"是不是视图"的唯一来源）
-  const single = targets.targets[0];
+  const single = (() => {
+    /**
+     * 主库回落（2026-11-27）：图集在 `<主库>-atlas`，主库自身通常没有。
+     * 折叠保证同一主库只留一份且图集库优先；图集库 403 静默剔除 ——
+     * 未授权是预期状态（补授权是部署侧职责），不能让整页变错误卡。
+     */
+    const probes = toAtlasProbes(targets.targets);
+    const visible = probes.filter((p) => !(p.failed && p.kind === 'atlas'));
+    const picked = pickSingleTarget(visible);
+    return picked ? targets.targets.find((item) => item.scope === picked.scope) : undefined;
+  })();
+  /** 图集库读不到（多为 403）：用于把「没权限」与「都没有」分开说 */
+  const atlasDenied = targets.targets.some((item) => item.kind === 'atlas' && item.isError);
   /** `req()` 抛出的错误带 `status`（见 api/httpApi 的 req），三态文案按它分流 */
   const err = single?.error ?? null;
   const code = err?.status;
@@ -181,10 +196,18 @@ export function AtlasPage(): JSX.Element {
   }
 
   if (!single.status.exists) {
+    const atlasScope = targets.targets.find((item) => item.kind === 'atlas')?.scope ?? `${scope}-atlas`;
     return (
       <div className="atlas-page">
         <div className="atlas-hint">
-          <strong>这个库还没有知识地图</strong>
+          <strong>
+            {atlasDenied ? '图集库没有访问权限' : '这个库及其图集库都还没有知识地图'}
+          </strong>
+          {atlasDenied ? (
+            <span className="atlas-hint__sub">
+              当前账号无权读取 {atlasScope}。请联系管理员补授权（它不是「没装图集」）。
+            </span>
+          ) : null}
           <ol className="atlas-steps">
             <li><code>pack_atlas.py &lt;图集目录&gt; dist/ --zip</code></li>
             <li>
@@ -207,10 +230,10 @@ export function AtlasPage(): JSX.Element {
   return (
     <div className="atlas-page">
       <iframe
-        key={`${scope}-${single.status.sha256 ?? ''}`}
+        key={`${single.scope}-${single.status.sha256 ?? ''}`}
         className="atlas-frame"
         title={`${scope} 知识地图`}
-        src={`/api/atlas/view?scope=${encodeURIComponent(scope)}`}
+        src={`/api/atlas/view?scope=${encodeURIComponent(single.scope)}`}
         sandbox="allow-scripts allow-same-origin allow-downloads allow-popups"
       />
     </div>

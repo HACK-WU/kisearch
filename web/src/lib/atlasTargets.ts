@@ -14,6 +14,13 @@
 /** 一个成员库的图集探针（pending 由调用方先挡掉，这里只处理「已有结果」） */
 export interface AtlasProbe {
   scope: string;
+  /**
+   * 该目标是主库还是图集库（2026-11-27）。
+   * 缺省按 `main` 处理：旧调用方 / 测试不必改。
+   */
+  kind?: 'main' | 'atlas';
+  /** 归一后的主库名（图集库取其主库；主库取自身） */
+  mainScope?: string;
   /** 状态读取失败：**不等于**没装图集，不能并进 absent（否则用户以为图集丢了） */
   failed: boolean;
   /** failed=false 时有效 */
@@ -31,16 +38,95 @@ export interface AtlasTargetLike {
   isError: boolean;
   exists: boolean;
   uploadedAt?: string;
+  kind?: 'main' | 'atlas';
+  mainScope?: string;
 }
 
 /** 页面与顶栏都调它得出同一份判定输入（各写一份容易漏字段、慢慢漂移） */
 export function toAtlasProbes(targets: AtlasTargetLike[]): AtlasProbe[] {
   return targets.map((item) => ({
     scope: item.scope,
+    kind: item.kind ?? 'main',
+    mainScope: item.mainScope ?? item.scope,
     failed: item.isError,
     exists: item.exists,
     uploadedAt: item.uploadedAt,
   }));
+}
+
+// ─── 图集库映射（数据来自 ki_scope_list.atlas，不在前端读 config） ───
+
+/** 与后端 `AtlasScopeMap` 同构；旧 daemon 不返回时用默认值兜底 */
+export interface AtlasMapLike {
+  suffix: string;
+  mappings: Record<string, string>;
+}
+
+export const DEFAULT_ATLAS_MAP: AtlasMapLike = { suffix: '-atlas', mappings: {} };
+
+/**
+ * 主库 → 图集库。与 `src/lib/atlas/scope-map.ts::atlasScopeFor` **必须同规则**：
+ * 已有映射值（本身是图集库）与后缀自指都不二次追加。
+ */
+export function atlasScopeOf(scope: string, map: AtlasMapLike): string {
+  const isMappedAtlas = !Object.prototype.hasOwnProperty.call(map.mappings, scope)
+    && Object.values(map.mappings).includes(scope);
+  if (isMappedAtlas) return scope;
+  const explicit = map.mappings[scope];
+  if (explicit) return explicit;
+  if (scope.endsWith(map.suffix) && scope.length > map.suffix.length) return scope;
+  return `${scope}${map.suffix}`;
+}
+
+/** 图集库 → 主库；不是图集库返回 null */
+export function mainScopeOf(scope: string, map: AtlasMapLike): string | null {
+  for (const [main, atlas] of Object.entries(map.mappings)) {
+    if (atlas === scope) return main;
+  }
+  if (scope.endsWith(map.suffix) && scope.length > map.suffix.length) {
+    return scope.slice(0, -map.suffix.length);
+  }
+  return null;
+}
+
+/**
+ * 按主库折叠：同一主库与其图集库只留一个，**图集库优先**。
+ *
+ * 为什么必须折叠：存量 `default` 未迁期间，主库与图集库可能同时有图集，
+ * 不折叠则切换器里出现同一图集两项，且 `uploadedAt` 谁新选谁 → 可能选中旧副本。
+ */
+export function collapseAtlasTargets(probes: AtlasProbe[]): AtlasProbe[] {
+  const groups = new Map<string, AtlasProbe[]>();
+  const order: string[] = [];
+  for (const probe of probes) {
+    const key = probe.mainScope ?? probe.scope;
+    if (!groups.has(key)) { groups.set(key, []); order.push(key); }
+    groups.get(key)!.push(probe);
+  }
+  const out: AtlasProbe[] = [];
+  for (const key of order) {
+    const group = groups.get(key)!;
+    const atlasWithData = group.find((p) => p.kind === 'atlas' && !p.failed && p.exists);
+    const mainWithData = group.find((p) => p.kind !== 'atlas' && !p.failed && p.exists);
+    const fallback = group.find((p) => p.kind !== 'atlas') ?? group[0];
+    out.push(atlasWithData ?? mainWithData ?? fallback);
+  }
+  return out;
+}
+
+/** 切换器展示名：不暴露 `-atlas` 后缀 */
+export function displayNameOf(probe: AtlasProbe): string {
+  return probe.mainScope ?? probe.scope;
+}
+
+/**
+ * 单库回落：图集库有图集 → 用它；否则主库有 → 用主库（兼容旧部署）；都没有 → 主库（空态）。
+ * 图集库 403 已被调用方剔除（见 hooks），这里不重复判。
+ */
+export function pickSingleTarget(probes: AtlasProbe[]): AtlasProbe | null {
+  if (probes.length === 0) return null;
+  const collapsed = collapseAtlasTargets(probes);
+  return collapsed[0] ?? null;
 }
 
 export interface AtlasViewShape {

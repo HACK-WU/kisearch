@@ -11,4 +11,6 @@ export { AtlasError, ATLAS_CODES, atlasCodeName, atlasHttpStatus, describeAtlasE
 export type { AtlasCodeKey } from './errors.js';
 export { entryPath, packageZipPath, metaPath, archiveDir, atlasDir } from './paths.js';
 export { MAX_ENTRY_BYTES, MAX_ENTRIES, MAX_UNZIPPED_TOTAL, MAX_ZIP_BYTES } from './zip-read.js';
+export { resolveAtlasMap, atlasScopeFor, mainScopeFor, isAtlasScope, AtlasScopeMapError, DEFAULT_ATLAS_SUFFIX } from './scope-map.js';
+export type { AtlasScopeMap } from './scope-map.js';
 export type { AtlasMeta, AtlasStatus, AtlasZipEntry, InstallOptions, InstallResult } from './types.js';

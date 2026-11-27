@@ -181,9 +181,9 @@ import { withTimeoutFallback } from './timeout.js';
 // 上传逐条校验的单一实现（与事件参考文档上传共用；放独立模块避免 governance 反向依赖成环）
 import { sanitizeFileName, validateUploadFile, type UploadFilePolicy } from './import-upload-policy.js';
 // 图集（REQ-20261120-003）：HTTP 层只做鉴权与转发，校验/落盘全在 src/lib/atlas/ 内核
-import { AtlasError, atlasCodeName, atlasHttpStatus, readEntry, readStatus, receiveChunk, removePackage } from './atlas/index.js';
+import { AtlasError, atlasCodeName, atlasHttpStatus, readEntry, readStatus, receiveChunk, removePackage, resolveAtlasMap, atlasScopeFor } from './atlas/index.js';
 // 图集写接口要判「库存在」，与 CLI 同一判据（store 是底层模块，不会反向依赖本文件）
-import { scopeDirExists } from './store.js';
+import { scopeDirExists, ensureScopeDir } from './store.js';
 
 // ─── 常量 ─────────────────────────────────────────────
 
@@ -2338,7 +2338,7 @@ async function handleAtlasPackagePost(
   authScopes: string[] | null,
   requestConfig: ReturnType<typeof loadConfig>,
 ): Promise<void> {
-  let body: { scope?: unknown; uploadId?: unknown; batchIndex?: unknown; batchCount?: unknown; meta?: unknown; files?: unknown };
+  let body: { scope?: unknown; atlasScope?: unknown; uploadId?: unknown; batchIndex?: unknown; batchCount?: unknown; meta?: unknown; files?: unknown };
   try {
     body = (await readJsonBody(req)) ?? {};
   } catch {
@@ -2351,19 +2351,45 @@ async function handleAtlasPackagePost(
     rejectScopeViolation(res, rawScope, '/atlas/package');
     return;
   }
-  const scope = resolveScope(requestConfig, rawScope);
-  // 库必须已存在：否则 mkdirSync(recursive) 会为拼错的 scope 名凭空建出
-  // `<kb>/<scope>/.atlas/.upload/`（实测：HTTP 202 表示接片成功，但库是刚被创建的空壳）。
-  // 与 CLI `requireWritableScope` 用同一判据（scopeDirExists），两端口径一致。
-  if (!scopeDirExists(scope)) {
-    sendJson(res, 404, { ok: false, code: 'SCOPE_NOT_FOUND', error: `库 ${scope} 不存在（尚未初始化）`, hint: '先建库，或改用已存在的 --scope' });
+  const mainScope = resolveScope(requestConfig, rawScope);
+  // 主库必须已存在：否则 mkdirSync(recursive) 会为拼错的 scope 名凭空建出空壳。
+  // 与 CLI `requireInstallTargets` 同一判据；图集库则允许自动创建（见下）。
+  if (!scopeDirExists(mainScope)) {
+    sendJson(res, 404, { ok: false, code: 'SCOPE_NOT_FOUND', error: `主库 ${mainScope} 不存在（尚未初始化）`, hint: '先建库，或用 ki scope list 核对库名' });
     return;
   }
-  if (rejectIfScopeReadonly(res, scope, 'http:/api/atlas/package')) return;
+
+  /*
+   * 2026-11-27：落点是图集库（`<主库>-atlas`），不是主库本身。
+   * 客户端可显式给 `atlasScope`，否则按配置映射推导；图集库不存在时自动初始化
+   * （部署产物，不该要求先手工建库）。旧版页面不传该字段时同样走推导。
+   */
+  let atlasScope: string;
+  try {
+    atlasScope = typeof body.atlasScope === 'string' && body.atlasScope.trim()
+      ? body.atlasScope.trim()
+      : atlasScopeFor(mainScope, resolveAtlasMap(requestConfig));
+  } catch (err) {
+    sendJson(res, 400, { ok: false, code: 'ATLAS_MAP_INVALID', error: (err as Error).message });
+    return;
+  }
+  if (authScopes !== null && !scopeAllowed(authScopes, atlasScope)) {
+    rejectScopeViolation(res, atlasScope, '/atlas/package');
+    return;
+  }
+  if (!scopeDirExists(atlasScope)) {
+    try {
+      ensureScopeDir(atlasScope);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, code: 'SCOPE_CREATE_FAILED', error: `无法创建图集库 ${atlasScope}：${(err as Error).message}` });
+      return;
+    }
+  }
+  if (rejectIfScopeReadonly(res, atlasScope, 'http:/api/atlas/package')) return;
 
   try {
-    const result = await withScopeWriteLock(scope, 'atlas-upload', async () => receiveChunk({
-      scope,
+    const result = await withScopeWriteLock(atlasScope, 'atlas-upload', async () => receiveChunk({
+      scope: atlasScope,
       uploadId: String(body.uploadId ?? ''),
       batchIndex: Number(body.batchIndex ?? 0),
       batchCount: Number(body.batchCount ?? 1),

@@ -292,6 +292,17 @@ export interface RecallConfig {
   hardTimeoutMs?: number;
 }
 
+/**
+ * 图集库映射配置（2026-11-27）。
+ *
+ * `mappings` 显式登记主库 → 图集库；未登记的走 `suffix` 兜底（`<主库>-atlas`）。
+ * 解析逻辑唯一实现在 `src/lib/atlas/scope-map.ts`，这里只承载原始值。
+ */
+export interface AtlasConfig {
+  suffix?: string;
+  mappings?: Record<string, string>;
+}
+
 export interface KiConfig {
   dataDir: string;                       // KB 源数据目录
   backupDir: string;                     // 备份目录
@@ -309,6 +320,7 @@ export interface KiConfig {
    * strict 模式下 `resolveScope` 以 scopes 存在性做白名单 ⇒ 锁一个库等于给它开检索权限。
    */
   scopeReadonly: string[];
+  atlas?: AtlasConfig;                   // 图集库映射（主库 → 图集库；缺省走 -atlas 后缀）
   vector?: VectorResourceConfig;         // Collection handle/worker 资源治理
   mcp?: McpConfig;                       // 【新增】MCP 传输配置（仅 http 默认值；token 不入配置）
   llm?: LlmConfig;                       // 【新增】模型配置段（REQ-20260924-001）；缺失 = 未配置（fail-loud）
@@ -869,6 +881,26 @@ function parseAndExpand(configFile: string): KiConfig {
   const scopeReadonly = normalizeScopeReadonly(raw.scopeReadonly);
 
   /*
+   * 2026-11-27：图集库映射段。
+   * ★ 与 `localAdmin` / `recall` 同一条纪律：schema 有字段、这里不赋值 = 运行时永远 undefined。
+   *   本块只搬运原始值，合法性（scope 名 / 环）由 `scope-map.ts::resolveAtlasMap` 判定。
+   */
+  const rawAtlas = (raw.atlas && typeof raw.atlas === 'object' && !Array.isArray(raw.atlas))
+    ? raw.atlas as Record<string, unknown>
+    : undefined;
+  const atlas: AtlasConfig | undefined = rawAtlas
+    ? {
+        suffix: rawAtlas.suffix !== undefined ? String(rawAtlas.suffix) : undefined,
+        mappings: (rawAtlas.mappings && typeof rawAtlas.mappings === 'object' && !Array.isArray(rawAtlas.mappings))
+          ? Object.fromEntries(
+              Object.entries(rawAtlas.mappings as Record<string, unknown>)
+                .filter(([, v]) => typeof v === 'string'),
+            ) as Record<string, string>
+          : undefined,
+      }
+    : undefined;
+
+  /*
    * REQ-20261118-003：`ki_recall` 预算段。
    * ⚠️ 与 `llm` 段同样易踩的坑：这里必须**逐字段白名单拷贝**，类型上有而这里漏了 = 运行时永远 undefined
    *    （2026-11-13 在 `askMaxRounds` 上实测踩过一次）。
@@ -884,7 +916,7 @@ function parseAndExpand(configFile: string): KiConfig {
     : undefined;
 
   return {
-    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, scopeReadonly, vector, mcp, llm, chatDir, recall,
+    dataDir, backupDir, vectorDir, embedding, scopeMode, scopes, scopeReadonly, atlas, vector, mcp, llm, chatDir, recall,
     _fieldWarnings: fieldWarns,
     _configPath: configFile,
   };

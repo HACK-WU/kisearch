@@ -55,7 +55,12 @@ function render({ view = VIEW, statuses = {}, missing = [] } = {}) {
   client.setQueryData(['scopeList'], {
     scopes: MEMBERS.map((scope) => ({ scope, kb: true, vector: false, registered: true, wikiCount: 3 })),
     views: [{ view, members: MEMBERS, memberMeta: [], availableCount: MEMBERS.length, missing }],
+    atlas: { suffix: '-atlas', mappings: {} },
   });
+  // 每个成员的图集库默认「未装」：不预置会 isPending，整页停在「正在读取图集…」
+  for (const member of MEMBERS) {
+    client.setQueryData(['atlasStatus', `${member}-atlas`], noAtlas);
+  }
   for (const [scope, data] of Object.entries(statuses)) {
     client.setQueryData(['atlasStatus', scope], data);
   }
@@ -82,7 +87,10 @@ function renderSingle(scope, statuses = {}) {
   client.setQueryData(['scopeList'], {
     scopes: [{ scope, kb: true, vector: false, registered: true, wikiCount: 3 }],
     views: [],
+    atlas: { suffix: '-atlas', mappings: {} },
   });
+  // 图集库默认未装；statuses 可覆盖（用 `${scope}-atlas` 作 key）
+  client.setQueryData(['atlasStatus', `${scope}-atlas`], noAtlas);
   for (const [key, data] of Object.entries(statuses)) {
     client.setQueryData(['atlasStatus', key], data);
   }
@@ -106,11 +114,20 @@ describe('单库路径（取数改由 useAtlasTargets 装配后行为不变）',
     assert.ok(!html.includes('这个视图'));
   });
 
-  it('未装图集：仍是原文案「这个库还没有知识地图」+ 该库命令', () => {
+  it('未装图集：空态文案覆盖「主库 + 图集库」，命令仍用主库', () => {
     const html = renderSingle('default', { default: noAtlas });
-    assert.ok(html.includes('这个库还没有知识地图'));
+    assert.ok(html.includes('这个库及其图集库都还没有知识地图'));
     assert.ok(html.includes('ki atlas upload --scope default'));
     assert.ok(!html.includes('这个视图'));
+  });
+
+  it('图集库有图集：主库自动回落到图集库', () => {
+    const html = renderSingle('kisearch', {
+      kisearch: noAtlas,
+      'kisearch-atlas': withAtlas({ sha256: 'sha-atlas' }),
+    });
+    assert.ok(html.includes('/api/atlas/view?scope=kisearch-atlas'));
+    assert.ok(!html.includes('都还没有知识地图'));
   });
 });
 
@@ -162,7 +179,12 @@ function renderHeader({ statuses = {} } = {}) {
   client.setQueryData(['scopeList'], {
     scopes: MEMBERS.map((scope) => ({ scope, kb: true, vector: false, registered: true, wikiCount: 3 })),
     views: [{ view: VIEW, members: MEMBERS, memberMeta: [], availableCount: MEMBERS.length, missing: [] }],
+    atlas: { suffix: '-atlas', mappings: {} },
   });
+  // 图集库默认未装：不预置会 isPending，视图分支直接返回空
+  for (const member of MEMBERS) {
+    client.setQueryData(['atlasStatus', `${member}-atlas`], noAtlas);
+  }
   for (const [scope, data] of Object.entries(statuses)) {
     client.setQueryData(['atlasStatus', scope], data);
   }

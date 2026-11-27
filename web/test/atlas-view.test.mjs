@@ -109,8 +109,8 @@ describe('视图下知识地图的取数判定', () => {
       { scope: 'b', isError: false, exists: true, uploadedAt: '2026-11-25T00:00:00Z', isPending: false, error: null },
     ]);
     assert.deepEqual(probes, [
-      { scope: 'a', failed: true, exists: false, uploadedAt: undefined },
-      { scope: 'b', failed: false, exists: true, uploadedAt: '2026-11-25T00:00:00Z' },
+      { scope: 'a', kind: 'main', mainScope: 'a', failed: true, exists: false, uploadedAt: undefined },
+      { scope: 'b', kind: 'main', mainScope: 'b', failed: false, exists: true, uploadedAt: '2026-11-25T00:00:00Z' },
     ]);
   });
 });
