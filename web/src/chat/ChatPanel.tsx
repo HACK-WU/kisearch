@@ -78,6 +78,7 @@ import {
   shouldShowContextWarn,
 } from '@/lib/contextUsage';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useScopeList } from '@/lib/hooks';
 import {
   CHAT_PANEL_DEFAULT_WIDTH,
   CHAT_PANEL_MIN_WIDTH,
@@ -185,9 +186,25 @@ const SLASH_QUERY_MAX = 40;
 const RING_RADIUS = 8;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
+/**
+ * 深链被拒的提示时长。
+ *
+ * 这类提示只解释"为什么没打开那条链接"，用户读完即失去意义；而它渲染在会话列表槽里，
+ * 回落 /chat 后若一直挂着，看起来像列表本身坏了（用户报的"红字不会消失"）。
+ * 与列表读取失败区分：后者常驻到下次成功刷新。
+ */
+const CONV_REJECT_NOTICE_MS = 6000;
+
 export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelProps): JSX.Element | null {
   const isPage = variant === 'page';
   const scope = useScopeValue();
+  /**
+   * scope 列表（顶栏 `ScopeSelect` 常驻预热、`staleTime` 30s → 这里通常命中缓存，不额外发请求）。
+   *
+   * ★ 只用于把提示文案里的名字标成「视图」/「知识库」：视图与知识库共用同一套 scope
+   *   命名空间，写死「知识库」会把视图名说错（用户报的文案 Bug）。
+   */
+  const scopeList = useScopeList();
   const stream = useChatStream(store);
   // ── 会话深链（page 专属，URL 契约见 REQ-20261008-001 design/ui-design.md §2.4）──
   // agent 问答详情走独立路由 `/chat/ask/:askId`（不复用 `/chat/:convId`：
@@ -221,6 +238,37 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const [convLoading, setConvLoading] = useState(true);
   /** 会话区错误（列表读取 / 切换 / 新建 / 删除失败）——渲染在浮层内，不再与发送失败混用 */
   const [convError, setConvError] = useState<string | null>(null);
+  /**
+   * 会话区错误的两个"生命周期"（见 `showConvError`）：
+   * - **常驻**：列表读取 / 重命名 / 删除等失败 —— 留到下次成功刷新，否则用户不知道列表是坏的；
+   * - **短时**：深链被拒这类"一次性说明" —— 到点自动收起，避免回落成功后红字长期占据列表槽。
+   */
+  const convErrorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** 清空 + 取消待执行的自动收起（有新错误时也必须取消，否则旧定时器会清掉新错误） */
+  const clearConvError = useCallback((): void => {
+    if (convErrorTimerRef.current !== null) {
+      clearTimeout(convErrorTimerRef.current);
+      convErrorTimerRef.current = null;
+    }
+    setConvError(null);
+  }, []);
+  /**
+   * @param autoClearMs 传了就是短时提示（到时自动收起），不传为常驻
+   */
+  const showConvError = useCallback((message: string, autoClearMs?: number): void => {
+    clearConvError();
+    setConvError(message);
+    if (autoClearMs !== undefined) {
+      convErrorTimerRef.current = setTimeout(() => {
+        convErrorTimerRef.current = null;
+        setConvError(null);
+      }, autoClearMs);
+    }
+  }, [clearConvError]);
+  // page 变体每次进路由都会卸载：不留悬挂定时器（dock 不卸载，此清理等于空转）
+  useEffect(() => () => {
+    if (convErrorTimerRef.current !== null) clearTimeout(convErrorTimerRef.current);
+  }, []);
   /** 发送 / 生成失败的错误提示（N4）：与 convError 分开，避免串到会话列表槽 */
   const [sendError, setSendError] = useState<string | null>(null);
   /**
@@ -443,6 +491,23 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
    *   "消费即清零"的写法第二次执行时会把旧 URL 又当深链，问题照旧。
    */
   const staleUrlConvRef = useRef<string | null>(null);
+  /** scope 列表的实时值（同上，供守卫在异步回调里判「视图 / 知识库」） */
+  const scopeListRef = useRef(scopeList.data);
+  scopeListRef.current = scopeList.data;
+  /**
+   * 名字 → 「视图 x」/「知识库 x」/「x」。
+   *
+   * 视图与知识库共用 scope 命名空间，提示里不能一概写成"知识库"；列表未就绪、
+   * 或名字不在列表里（已删除 / 旧版 daemon）时不猜类型，只给名字。
+   */
+  const scopeLabel = useCallback((name: string): string => {
+    const data = scopeListRef.current;
+    if (data) {
+      if ((data.views ?? []).some((v) => v.view === name)) return `视图「${name}」`;
+      if (data.scopes.some((s) => s.scope === name)) return `知识库「${name}」`;
+    }
+    return `「${name}」`;
+  }, []);
   /**
    * 「scope 是否变化」的判定锚点（`null` = 本实例尚未挂载过）。
    *
@@ -489,9 +554,9 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     // 引用随 scope 清空（REQ-20261009-002 R10：绝不把 A scope 的文档名带入 B scope）
     store.dispatch({ type: 'setRefs', refs: [] });
     setSendError(null);
-    setConvError(null);
+    clearConvError();
     setAtBottom(true);
-  }, [scope, store, stream]);
+  }, [scope, store, stream, clearConvError]);
 
   /** 列表 + 已归档合并（浮层分组与当前会话名都从这份取） */
   const allConvs = useMemo(() => [...convs, ...archivedConvs], [convs, archivedConvs]);
@@ -554,18 +619,20 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
    * page 深链守卫（challenger 质疑修复，REQ-20261008-001）：会话必须属于**当前 scope**。
    * 深链 /chat/:convId 绕过了"从当前 scope 列表选"的天然约束，直接按 id 打开会把
    * 其他 scope 的会话载入——随后提问写进旧 scope 的会话文件、检索也按旧 scope 执行
-   * （S03 §5 明确要防的事故）。守卫失败抛错，由调用方落 convError 并提示。
+   * （S03 §5 明确要防的事故）。守卫失败抛错，由调用方落短时提示并回落到列表态
+   * （提示到点自动收起：回落成功后列表已经正常，红字常驻会让人以为列表坏了）。
    * （多一次 getConversation：深链是低频路径，换取判定准确性）
    */
   const openConversationGuarded = useCallback(
     async (id: string): Promise<void> => {
       const d = await getConversation(id);
       if (d.conv.scope !== scopeRef.current) {
-        throw new Error(`该会话属于 ${d.conv.scope}，与当前知识库（${scopeRef.current}）不同，已拒绝打开`);
+        // 视图与知识库共用 scope 命名空间 → 按名字归类，不把「视图 demo-view」说成知识库
+        throw new Error(`该会话属于${scopeLabel(d.conv.scope)}，当前处于${scopeLabel(scopeRef.current)}，已拒绝打开`);
       }
       await openConversation(id);
     },
-    [openConversation]
+    [openConversation, scopeLabel]
   );
 
   /** 新建会话并切过去（首次发送时若当前无会话会调用）。**并发调用复用同一次创建**。 */
@@ -617,14 +684,14 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
       const r = await listConversations(reqScope, { limit: 50 });
       if (scopeRef.current !== reqScope) return;   // 迟到响应属于旧 scope，丢弃
       setConvs(r.items);
-      setConvError(null);
+      clearConvError();
     } catch (err) {
       if (scopeRef.current !== reqScope) return;
-      setConvError(err instanceof Error ? err.message : '会话列表读取失败');
+      showConvError(err instanceof Error ? err.message : '会话列表读取失败');
     } finally {
       if (scopeRef.current === reqScope) setConvLoading(false);
     }
-  }, [scope]);
+  }, [scope, clearConvError, showConvError]);
 
   /**
    * dock 重新打开时刷新会话列表（challenger 质疑#3 修复，REQ-20261008-001）：
@@ -879,7 +946,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         if (!alive || scopeRef.current !== scope || selectionSeqRef.current !== selection) return;
         setReadyScope(scope);
         setConvs(r.items);
-        setConvError(null);
+        clearConvError();
         const pick = r.items.find((c) => !c.corrupted) ?? null;
         if (isPage) {
           // page（/chat）选中口径：**URL 深链 > 现状保留 > 最近一条**（URL 契约 §2.4）。
@@ -900,7 +967,10 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
               if (urlConvId) navigate('/chat', { replace: true });
               // ★ 必须在此就地落错误：守卫在 openConversation 之前 throw 时 selectionSeqRef
               //   未递增，外层 catch 的序号校验会把 setConvError 丢弃（用户看不到拒绝原因）
-              if (scopeRef.current === scope) setConvError(openErr instanceof Error ? openErr.message : '打开会话失败');
+              // ★ 短时提示：回落 /chat 后列表已经正常，红字常驻会让人以为列表坏了
+              if (scopeRef.current === scope) {
+                showConvError(openErr instanceof Error ? openErr.message : '打开会话失败', CONV_REJECT_NOTICE_MS);
+              }
               return;
             }
           } else if (!target) {
@@ -919,7 +989,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
       } catch (err) {
         if (!alive || scopeRef.current !== scope || selectionSeqRef.current !== selection) return;
         setReadyScope(scope);
-        setConvError(err instanceof Error ? err.message : '会话列表读取失败');
+        showConvError(err instanceof Error ? err.message : '会话列表读取失败');
         // ★ 拉取失败同样必须归零 activeConvId：否则它停留在**上一个 scope** 的会话上，
         //   下一次提问被写进旧 scope 的会话文件（落盘不可逆），检索也按旧 scope 执行。
         stream.abort();
@@ -939,7 +1009,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     //   setConvs([]) 清空列表 → 异步完成时序号已变被丢弃 → 列表永远为空」。
     //   本 effect 的 navigate 调用以执行期闭包为准即可。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, openConversation, openConversationGuarded, store, stream, isPage]);
+  }, [scope, openConversation, openConversationGuarded, store, stream, isPage, clearConvError, showConvError]);
 
   // Keep the user's sticky-bottom intent separate from programmatic growth/scroll events.
   const stickyBottomRef = useRef(true);
@@ -1088,14 +1158,15 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     if (readyScope !== scope) return;
     if (urlConvId === store.getState().activeConvId) return;
     // 深链入口必须过 scope 守卫（质疑#2）；守卫拒绝（跨 scope/已删除）→ 提示并回落列表态，
-    // store→URL effect 随后会把地址栏归位到当前真实会话
+    // store→URL effect 随后会把地址栏归位到当前真实会话。
+    // 短时提示：与初始选中同一口径，回落成功后红字不再常驻。
     void openConversationGuarded(urlConvId).catch((err: unknown) => {
-      setConvError(err instanceof Error ? err.message : '切换会话失败');
+      showConvError(err instanceof Error ? err.message : '切换会话失败', CONV_REJECT_NOTICE_MS);
       navigate('/chat', { replace: true });
     });
     // openConversationGuarded 是同文件回调（执行期解析，闭包无 TDZ）；此处只对 urlConvId 就绪态响应
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPage, urlConvId, readyScope, scope]);
+  }, [isPage, urlConvId, readyScope, scope, showConvError]);
 
   // ── 发送可用性：enabled / 隐私确认 / 生成中 / 空白输入 ──
   const blocked = useMemo(() => {
@@ -1742,7 +1813,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
       // 归档项存在于 archivedConvs，只改 convs 会让归档会话的改名毫无反应
       .then(() => setConvs((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c))))
       .then(() => { if (archivedConvs.some((c) => c.id === id)) void loadArchived(); })
-      .catch((err: unknown) => setConvError(err instanceof Error ? err.message : '重命名失败'));
+      .catch((err: unknown) => showConvError(err instanceof Error ? err.message : '重命名失败'));
   };
   const handleArchive = (id: string, archived: boolean): void => {
     void archiveConversation(id, archived)
@@ -1761,7 +1832,7 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
           void loadArchived();
         }
       })
-      .catch((err: unknown) => setConvError(err instanceof Error ? err.message : '归档操作失败'));
+      .catch((err: unknown) => showConvError(err instanceof Error ? err.message : '归档操作失败'));
   };
   const handleDelete = (id: string): void => {
     // ★ 先 abort 再删：后端删除路由不判 generating，生成中删除会与"落 assistant 尾写"竞态
@@ -1777,28 +1848,28 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         await refreshConversations();
         void loadArchived();
       })
-      .catch((err: unknown) => setConvError(err instanceof Error ? err.message : '删除会话失败'));
+      .catch((err: unknown) => showConvError(err instanceof Error ? err.message : '删除会话失败'));
   };
 
   const handleSelectConversation = (id: string): void => {
     setConvPopOpen(false);
-    setConvError(null);
+    clearConvError();
     const reqScope = scope;
     const pending = openConversation(id);
     const selection = selectionSeqRef.current;
     void pending.catch((err: unknown) => {
-      if (scopeRef.current === reqScope && selectionSeqRef.current === selection) setConvError(err instanceof Error ? err.message : '切换会话失败');
+      if (scopeRef.current === reqScope && selectionSeqRef.current === selection) showConvError(err instanceof Error ? err.message : '切换会话失败');
     });
   };
 
   const handleCreateConversation = (): void => {
     setConvPopOpen(false);
-    setConvError(null);
+    clearConvError();
     const reqScope = scope;
     const pending = createNewConversation();
     const selection = selectionSeqRef.current;
     void pending.catch((err: unknown) => {
-      if (scopeRef.current === reqScope && selectionSeqRef.current === selection) setConvError(err instanceof Error ? err.message : '新建会话失败');
+      if (scopeRef.current === reqScope && selectionSeqRef.current === selection) showConvError(err instanceof Error ? err.message : '新建会话失败');
     });
   };
 
