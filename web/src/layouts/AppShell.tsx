@@ -18,6 +18,7 @@ import { DocumentEditorProvider, type DocumentEditorRequest } from '@/lib/docume
 import { ImportPage } from '@/pages/ImportPage';
 import { WritePage } from '@/pages/WritePage';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useDismissOnOutside } from '@/lib/useDismissOnOutside';
 import { govFailedMembers } from '@/lib/governanceView';
 import { listRunningAnalyses } from '@/api/governanceApi';
 import {
@@ -202,22 +203,17 @@ function ServiceBadge(): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
 
+  useDismissOnOutside(rootRef, open, () => setOpen(false));
+
   useEffect(() => {
     if (!open) return;
-    const onOutside = (event: MouseEvent): void => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) setOpen(false);
-    };
     const onKey = (event: KeyboardEvent): void => {
       if (event.key !== 'Escape') return;
       setOpen(false);
       buttonRef.current?.focus(); // 键盘用户关掉浮层后不应丢失焦点
     };
-    document.addEventListener('mousedown', onOutside);
     document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onOutside);
-      document.removeEventListener('keydown', onKey);
-    };
+    return () => document.removeEventListener('keydown', onKey);
   }, [open]);
 
   const closeAndReturnFocus = useCallback((): void => {
@@ -402,20 +398,15 @@ export function AppShell(): JSX.Element {
   const roleLabel = formatRole(user?.role);
   const initial = displayName.trim().slice(0, 1).toUpperCase() || 'U';
 
+  useDismissOnOutside(userMenuRef, userMenuOpen, () => setUserMenuOpen(false));
+
   useEffect(() => {
     if (!userMenuOpen) return undefined;
-    const onPointerDown = (event: MouseEvent): void => {
-      if (!userMenuRef.current?.contains(event.target as Node)) setUserMenuOpen(false);
-    };
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') setUserMenuOpen(false);
     };
-    document.addEventListener('mousedown', onPointerDown);
     window.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('mousedown', onPointerDown);
-      window.removeEventListener('keydown', onKey);
-    };
+    return () => window.removeEventListener('keydown', onKey);
   }, [userMenuOpen]);
 
   const handleLogout = async (): Promise<void> => {

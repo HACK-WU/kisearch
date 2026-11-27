@@ -22,6 +22,7 @@ import { useSearchParams } from 'react-router-dom';
 import '@/styles/atlas.css';
 import { useAtlasTargets, useScopeList } from '@/lib/hooks';
 import { useScopeValue } from '@/lib/scopeContext';
+import { useDismissOnOutside } from '@/lib/useDismissOnOutside';
 import { useAuth } from '@/lib/authContext';
 import { deleteAtlasPackage, uploadAtlasPackage } from '@/api/httpApi';
 import { Icon } from '@/components/icons';
@@ -177,19 +178,9 @@ function AtlasMemberSwitch({ members, selected, note, displayName, onPick }: {
   const rootRef = useRef<HTMLDivElement>(null);
 
   /**
-   * 点外部收起：必须用 `mousedown`（与 ScopeSelect 同一坑）——用 `click` 时
-   * 面板内的按钮会先触发重渲染，原节点脱离 DOM，`contains` 判 false 导致"刚点就关"。
+   * 点外部收起（含图集 iframe 内部的点击，靠 `window` blur 兜住，见 lib/useDismissOnOutside）。
    */
-  useEffect(() => {
-    if (!open) return undefined;
-    const onDown = (event: MouseEvent): void => {
-      const target = event.target as Node | null;
-      if (!target || !target.isConnected) return;
-      if (rootRef.current && !rootRef.current.contains(target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
+  useDismissOnOutside(rootRef, open, () => setOpen(false));
 
   useEffect(() => {
     if (!open) return undefined;

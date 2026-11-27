@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useScope } from '@/lib/scopeContext';
 import { useScopeList, useIsViewName, type ScopeEntry } from '@/lib/hooks';
 import { getLastView } from '@/lib/lastView';
+import { useDismissOnOutside } from '@/lib/useDismissOnOutside';
 
 export function ScopeSelect(): JSX.Element {
   const { scope, setScope } = useScope();
@@ -42,24 +43,10 @@ export function ScopeSelect(): JSX.Element {
   }, [open]);
 
   /**
-   * 点击外部收起。
-   *
-   * ★ 必须用 `mousedown` 而不是 `click`：
-   *   收起态是展示层 `<div>`，点它会 `setOpen(true)` → React 立刻把它换成 `<input>`，
-   *   原节点脱离 DOM。同一个 click 事件随后冒泡到 document 时，
-   *   `contains(已脱离的 target)` 返回 false → 误判为「点了外部」→ 刚打开就被关掉，
-   *   表现为**根本选不了**。mousedown 早于任何重渲染，target 一定还在文档里。
-   *   同时加 `isConnected` 兜底，防止其它重建场景复现同类问题。
+   * 点击外部收起（含 `/atlas` 图集 iframe 内部的点击 —— 那条只有 window blur 能观测到）。
+   * mousedown / 捕获阶段 / isConnected 兜底的原因见 `lib/useDismissOnOutside.ts` 文件头。
    */
-  useEffect(() => {
-    const onDocumentPointerDown = (event: MouseEvent): void => {
-      const target = event.target as Node | null;
-      if (!target || !target.isConnected) return;
-      if (rootRef.current && !rootRef.current.contains(target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', onDocumentPointerDown);
-    return () => document.removeEventListener('mousedown', onDocumentPointerDown);
-  }, []);
+  useDismissOnOutside(rootRef, open, () => setOpen(false));
 
   const pick = (nextScope: string): void => {
     setScope(nextScope);
