@@ -139,7 +139,8 @@ export const MCP_TOOLS: McpToolGroup[] = [
       },
       {
         name: 'ki_ask',
-        purpose: '让 ki 用配置的模型回答（内部多轮检索再合成，可用 context_id 追问）；'
+        purpose: '用户提问时优先用：让 ki 用配置的模型检索并合成答案（可用 context_id 追问）；'
+          + '与 ki_recall 分工 —— 它管「要做的任务 / 该读哪几篇」，本工具管「用户的问题 / 要现成结论」；'
           + '消耗模型额度且内容外发上游模型，只读 Token 不可用',
       },
     ],
