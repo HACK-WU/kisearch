@@ -325,6 +325,15 @@ describe('⑦ scope 自选：默认范围 + 逐次校验 + 视图展开', () => 
             ? { ok: true, scope: 'kb-b', group: 'g', relation: 'r', content: 'x' }
             : { ok: false, error: 'not found' };
         }) as never,
+        // 聚合语义工具的执行层：记录收到的 scope 与 depth（降级断言用）
+        queryGroup: (async (args: { scope: string; depth?: number }) => {
+          calls.push(`tree:${args.scope}`);
+          return { ok: true, scope: args.scope, output: `TREE(${args.scope},depth=${args.depth ?? '-'})` };
+        }) as never,
+        tagList: (async (args: { scope: string }) => {
+          calls.push(`tag:${args.scope}`);
+          return { ok: true, tags: [{ tag: `t-${args.scope}`, count: 1 }] };
+        }) as never,
       },
     });
   }
@@ -366,6 +375,41 @@ describe('⑦ scope 自选：默认范围 + 逐次校验 + 视图展开', () => 
     const r = await runner('ki_get_module_info', { group: 'g', relation: 'r', scope: 'team-view' });
     assert.deepEqual(calls, ['kb-b'], 'kb-b 命中即停，不再试 kb-c');
     assert.equal(r.read?.scope, 'kb-b');
+  });
+
+  /**
+   * 事件 #112：`ki_group_list` / `ki_tag_list` 是**聚合语义**（全貌），
+   * 此前复用 `tryEachPhysical`（命中即止）只查首个成员库，且把 `scopeUsed`
+   * 记成命中库名 —— 调用方看不出漏了成员。以下两例锁死修复后的口径。
+   */
+  it('列树在视图下逐成员收集（聚合语义，不得命中即止）', async () => {
+    const calls: string[] = [];
+    const runner = makeRunner(calls);
+    const r = await runner('ki_group_list', { scope: 'team-view' });
+    assert.deepEqual(calls, ['tree:kb-b', 'tree:kb-c'], '两个成员都要查');
+    assert.deepEqual(r.scopeUsed, ['team-view'], '审计记视图名，不记命中库');
+    const payload = JSON.parse(r.text) as {
+      view: string;
+      members: string[];
+      degraded?: string[];
+      buckets: { scope: string; output?: string; degraded?: boolean }[];
+    };
+    assert.equal(payload.view, 'team-view');
+    assert.deepEqual(payload.members, ['kb-b', 'kb-c']);
+    assert.deepEqual(payload.degraded, ['kb-c'], '第二成员降级：只给顶层 Group 名');
+    assert.match(String(payload.buckets[1]?.output), /depth=1/, '降级成员按 depth=1 查询');
+    assert.equal(payload.buckets[0]?.degraded, undefined, '首成员仍是完整树');
+  });
+
+  it('列标签在视图下合并累加（不分桶，标来源库）', async () => {
+    const calls: string[] = [];
+    const runner = makeRunner(calls);
+    const r = await runner('ki_tag_list', { scope: 'team-view' });
+    assert.deepEqual(calls, ['tag:kb-b', 'tag:kb-c'], '两个成员都要读');
+    assert.deepEqual(r.scopeUsed, ['team-view'], '审计记视图名');
+    const payload = JSON.parse(r.text) as { count: number; tags: { tag: string; scopes: string[] }[] };
+    assert.equal(payload.count, 2, '两个库的 tag 合并成 2 条');
+    assert.deepEqual(payload.tags.map(t => t.scopes), [['kb-b'], ['kb-c']], '每条标明来源库');
   });
 
   it('未传 scope 时 scopesUsed 用入参原名（视图不被记成成员库）', async () => {

@@ -8,7 +8,7 @@ export function registerTagListTool(server: McpServer): void {
     'ki_tag_list',
     '列出指定 scope 下用过的 tag（含文档数，按数量降序，只读）；用于在 ki_search / doc 过滤前发现可用 tag',
     {
-      scope: z.string().optional().default('default').describe('知识库名或视图名（视图会合并各成员库的 tag 并累加计数；省略则用 default）'),
+      scope: z.string().optional().default('default').describe('知识库名或视图名（视图 / 逗号分隔的多库都会合并各成员库的 tag 并累加计数；省略则用 default）'),
     },
     async (args) => {
       try {

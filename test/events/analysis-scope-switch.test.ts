@@ -36,13 +36,14 @@ function makeDeps(calls: string[], readable: Record<string, string[]> = {}) {
           ? { ok: true, scope: a.scope, group: a.group, relation: a.relation, content: `${a.scope}/${a.relation}` }
           : { ok: false, error: `文档不存在于 ${a.scope}` };
       },
-      groupList: async (a: { scope: string }) => {
+      groupList: async (a: { scope: string; depth?: number }) => {
         calls.push(`tree:${a.scope}`);
-        return { groups: [] };
+        // 带 scope / depth，让「逐成员 + 降级」可断言（不是只有 group 名清单）
+        return { ok: true, scope: a.scope, output: `TREE(${a.scope},depth=${a.depth ?? '-'})` };
       },
       tagList: async (a: { scope: string }) => {
         calls.push(`tag:${a.scope}`);
-        return [];
+        return { ok: true, tags: [{ tag: `t-${a.scope}`, count: 1 }] };
       },
     },
   } as never;
@@ -53,6 +54,9 @@ const SCOPE_DEPS = {
   listScopes: () => ['kb-a', 'kb-b', 'kb-c'],
   listViews: () => ({ 'team-view': { members: ['kb-b', 'kb-c'] } }),
 };
+
+/** 全量授权（生产 `authScopes` 已把 viewGrants 合并进来；视图名本身也要在名单里） */
+const AUTH_ALL = ['kb-a', 'kb-b', 'kb-c', 'team-view'];
 
 function makeEntry(
   name: string,
@@ -104,6 +108,34 @@ describe('② 模型自选：传了就按它查，视图展开为成员库', () 
     const search = makeEntry('ki_search', calls, { authScopes: ['kb-a', 'kb-b', 'kb-c', 'team-view'], scopeDeps: SCOPE_DEPS });
     await search.run({ query: 'q', scope: 'team-view' });
     assert.deepEqual(calls, ['search:kb-b,kb-c']);
+  });
+
+  /**
+   * 事件 #112：`ki_group_list` / `ki_tag_list` 是聚合语义工具，必须逐成员收集。
+   * 修复前它们取 `picked.physical[0]` —— 视图下其余成员的树 / 标签**静默消失**。
+   */
+  it('列树：视图下逐成员分桶，首成员完整、其余降级只给顶层', async () => {
+    const calls: string[] = [];
+    const tree = makeEntry('ki_group_list', calls, { authScopes: AUTH_ALL, scopeDeps: SCOPE_DEPS });
+    const payload = (await tree.run({ scope: 'team-view', depth: 2 }) as {
+      groups?: { view?: string; members?: string[]; degraded?: string[]; buckets?: { scope: string; output?: string }[] };
+    }).groups;
+    assert.deepEqual(calls, ['tree:kb-b', 'tree:kb-c'], '两个成员都要查（聚合语义不得命中即止）');
+    assert.equal(payload?.view, 'team-view');
+    assert.deepEqual(payload?.members, ['kb-b', 'kb-c']);
+    assert.deepEqual(payload?.degraded, ['kb-c'], '第二成员降级');
+    assert.match(String(payload?.buckets?.[1]?.output), /depth=1/, '降级成员按 depth=1 查询');
+  });
+
+  it('列标签：视图下合并累加并标来源库', async () => {
+    const calls: string[] = [];
+    const tag = makeEntry('ki_tag_list', calls, { authScopes: AUTH_ALL, scopeDeps: SCOPE_DEPS });
+    const payload = (await tag.run({ scope: 'team-view' }) as {
+      tags?: { count?: number; members?: string[]; tags?: { tag: string; scopes: string[] }[] };
+    }).tags;
+    assert.deepEqual(calls, ['tag:kb-b', 'tag:kb-c'], '两个成员都要读');
+    assert.equal(payload?.count, 2);
+    assert.deepEqual(payload?.tags?.map(t => t.scopes), [['kb-b'], ['kb-c']], '每条标明来源库');
   });
 
   it('读正文：视图展开后逐个试，命中即止并回填真实库', async () => {

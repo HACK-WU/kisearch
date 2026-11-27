@@ -187,7 +187,9 @@ const TOOL_DEFS: Record<string, ToolDef> = {
     type: 'function',
     function: {
       name: 'ki_group_list',
-      description: '列出某库的 Group 树与其中的文档名，用于发现同主题的其他文档。',
+      description: '列出某库的 Group 树与其中的文档名，用于发现同主题的其他文档。'
+        + 'scope 传视图或逗号多库时按成员库分桶（buckets，不会漏成员）；首个成员给完整树，'
+        + '其余成员只列顶层 Group（标 degraded）—— 要看某个成员的完整树，把 scope 换成那个库名再调一次。',
       parameters: {
         type: 'object',
         properties: {
@@ -210,7 +212,7 @@ const TOOL_DEFS: Record<string, ToolDef> = {
     type: 'function',
     function: {
       name: 'ki_tag_list',
-      description: '列出知识库里出现过的标签。',
+      description: '列出知识库里出现过的标签。scope 传视图或逗号多库时合并各成员库的标签并累加计数（每条带 scopes 标明来源库）。',
       parameters: {
         type: 'object',
         properties: { scope: SCOPE_PARAM },

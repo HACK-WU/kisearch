@@ -158,6 +158,39 @@ describe('对话 ki_group_list 视图展开', () => {
     assert.ok(Array.isArray(out.tags));
   });
 
+  /**
+   * 2026-11-27 · 事件 #112 残留面：逗号多库不是视图（`views` 为空），
+   * 但请求形态本来就是多个库 —— 此前只认 `isViewRequest`，落到 single 分支
+   * 取 `targets.scopes[0]`，其余库静默丢失。两例锁死 group / tag 都走多成员分支。
+   */
+  it('逗号多库（非视图）也逐库分桶', async () => {
+    const { queryGroupByScope } = await import('../src/lib/group-list-view.js');
+    const out = await queryGroupByScope('kisearch,kisearch-memory', {
+      hotCount: 2,
+      depth: 2,
+      modes: ['hot'],
+      runOne: async (target: string) => ({ ok: true as const, scope: target, output: `TREE(${target})` }),
+    });
+    assert.equal(out.kind, 'view', '不得退回 single 只查第一个库');
+    if (out.kind !== 'view') return;
+    assert.equal(out.view, 'kisearch,kisearch-memory', '回显原始入参，不能是空串');
+    assert.deepEqual(out.members, ['kisearch', 'kisearch-memory']);
+    assert.deepEqual(out.buckets.map(b => b.output), ['TREE(kisearch)', 'TREE(kisearch-memory)']);
+  });
+
+  it('逗号多库（非视图）的 tag 也合并各成员', async () => {
+    const { tagListByScope } = await import('../src/lib/tag-list-view.js');
+    const out = await tagListByScope('kisearch,kisearch-memory', {
+      timeout: { ms: 5000, label: 'ki_tag_list' },
+      listOne: async (target: string) => ({ ok: true as const, tags: [{ tag: `t-${target}`, count: 1 }] }),
+    });
+    assert.equal(out.kind, 'view', '不得退回 single 只查第一个库');
+    if (out.kind !== 'view') return;
+    assert.equal(out.view, 'kisearch,kisearch-memory');
+    assert.deepEqual(out.members, ['kisearch', 'kisearch-memory']);
+    assert.deepEqual(out.tags.map(t => t.tag), ['t-kisearch', 't-kisearch-memory']);
+  });
+
   it('视图整体超时：剩余成员进 skipped，不整体失败', async () => {
     const { queryGroupByScope } = await import('../src/lib/group-list-view.js');
     const out = await queryGroupByScope('team', {

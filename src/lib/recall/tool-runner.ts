@@ -18,6 +18,15 @@ import { executeQueryGroup } from '../../query-group.js';
 import { executeSearch } from '../../search.js';
 import { executeTagList } from '../../tag.js';
 import type { KiConfig } from '../config.js';
+/*
+ * 视图展开统一入口（2026-11-27 · 事件 #112）。
+ * group / tag 是**聚合语义**工具，必须逐成员收集；此前复用 `tryEachPhysical`
+ * 「首个 ok 即返回」，视图 / 逗号多库下只回首个成员的内容，且把 `scopeUsed`
+ * 记成该库名 —— 调用方看不出漏了成员（静默丢失，比报错更难发现）。
+ */
+import { queryGroupByScope, VIEW_TOTAL_TIMEOUT } from '../group-list-view.js';
+import { tagListByScope } from '../tag-list-view.js';
+import { withTimeout, TOOL_TIMEOUT } from '../mcp-tools/util.js';
 import { ALL_SCOPES } from '../mcp-token.js';
 import { isScopeAccessAllowed } from '../scope-access.js';
 import { readViews } from '../scope-view.js';
@@ -191,7 +200,12 @@ export function makeRecallToolRunner(opts: ToolRunnerOptions): GroundedToolRunne
     return { ok: true, sc: res };
   };
 
-  /** 读正文 / 列树 / 列标签：单库工具，视图展开后逐个试，命中即止 */
+  /**
+   * 读正文：视图展开后逐个试，命中即止（同一篇只需从某一个库读到）。
+   *
+   * ⚠️ 只给 `ki_get_module_info` 用。`ki_group_list` / `ki_tag_list` 是**聚合语义**
+   * （全貌），必须逐成员收集 —— 2026-11-27 事件 #112 就是它们误用了这个捷径。
+   */
   const tryEachPhysical = async <T>(
     physical: string[],
     fn: (scope: string) => Promise<{ ok: boolean; value?: T; error?: string }>,
@@ -258,18 +272,46 @@ export function makeRecallToolRunner(opts: ToolRunnerOptions): GroundedToolRunne
       const picked = pickScopes(args.scope);
       if (!picked.ok) return { text: JSON.stringify({ error: picked.error }) };
       // 参数形状必须与 QueryGroupParams 一致（2026-11-19 真机踩过：传 groups 导致运行时抛错）
-      const got = await tryEachPhysical(picked.sc.physical, async (scope) => {
-        const res = await doQueryGroup({
-          scope,
-          ...(groups ? { groupsParam: groups } : {}),
-          hotCount: 2,
-          depth,
-          modes: ['hot', 'full'],
-        });
-        return { ok: true as const, value: res };
+      const outcome = await queryGroupByScope(undefined, {
+        ...(groups ? { groupsParam: groups } : {}),
+        hotCount: 2,
+        depth,
+        modes: ['hot', 'full'],
+        resolved: { physical: picked.sc.physical, display: picked.sc.display },
+        // 首成员完整树、其余只给顶层 Group 名：查找输出同样受 toolChars 预算约束
+        maxFullMembers: 1,
+        timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_group_list', totalMs: VIEW_TOTAL_TIMEOUT.MCP },
+        runOne: (target, capMs, p) =>
+          withTimeout(doQueryGroup({ scope: target, ...p }), capMs ?? TOOL_TIMEOUT.READ, 'ki_group_list'),
       });
-      if (!got.ok) return { text: clip(JSON.stringify({ error: got.error })), scopeUsed: picked.sc.display };
-      return { text: clip(JSON.stringify(got.value)), scopeUsed: [got.scope] };
+      const scopeUsed = picked.sc.display;
+      if (outcome.kind === 'single') {
+        return { text: clip(JSON.stringify(outcome.result)), scopeUsed };
+      }
+      if (outcome.kind === 'view-empty') {
+        return {
+          text: clip(JSON.stringify({
+            ok: false,
+            view: outcome.view,
+            error: `视图 ${outcome.view} 没有可用的成员库`,
+            skipped: outcome.skipped,
+          })),
+          scopeUsed,
+        };
+      }
+      return {
+        text: clip(JSON.stringify({
+          ok: true,
+          view: outcome.view,
+          members: outcome.members,
+          // 标量先于数组保留：buckets 被截断时靠它对照才发现少了成员
+          memberTotal: outcome.memberTotal,
+          buckets: outcome.buckets,
+          ...(outcome.degraded.length > 0 ? { degraded: outcome.degraded } : {}),
+          ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+        })),
+        scopeUsed,
+      };
     }
 
     if (name === 'ki_scope_list') {
@@ -291,12 +333,40 @@ export function makeRecallToolRunner(opts: ToolRunnerOptions): GroundedToolRunne
     if (name === 'ki_tag_list') {
       const picked = pickScopes(args.scope);
       if (!picked.ok) return { text: JSON.stringify({ error: picked.error }) };
-      const got = await tryEachPhysical(picked.sc.physical, async (scope) => {
-        const res = await doTagList({ scope });
-        return { ok: true as const, value: res };
+      // tag 跨库合并 + 计数累加（与 MCP / 对话 / 分析链路同口径；事件 #112）
+      const outcome = await tagListByScope(undefined, {
+        resolved: { physical: picked.sc.physical, display: picked.sc.display },
+        timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_tag_list' },
+        totalMs: VIEW_TOTAL_TIMEOUT.MCP,
+        listOne: (target, capMs) =>
+          withTimeout(doTagList({ scope: target }), capMs ?? TOOL_TIMEOUT.READ, 'ki_tag_list'),
       });
-      if (!got.ok) return { text: clip(JSON.stringify({ error: got.error })), scopeUsed: picked.sc.display };
-      return { text: clip(JSON.stringify(got.value)), scopeUsed: [got.scope] };
+      const scopeUsed = picked.sc.display;
+      if (outcome.kind === 'single') {
+        return { text: clip(JSON.stringify(outcome.result)), scopeUsed };
+      }
+      if (outcome.kind === 'view-empty') {
+        return {
+          text: clip(JSON.stringify({
+            ok: false,
+            view: outcome.view,
+            error: `视图 ${outcome.view} 没有可用的成员库`,
+            skipped: outcome.skipped,
+          })),
+          scopeUsed,
+        };
+      }
+      return {
+        text: clip(JSON.stringify({
+          ok: true,
+          view: outcome.view,
+          members: outcome.members,
+          count: outcome.tags.length,
+          tags: outcome.tags,
+          ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+        })),
+        scopeUsed,
+      };
     }
 
     return { text: JSON.stringify({ error: `未实现的工具：${name}` }) };

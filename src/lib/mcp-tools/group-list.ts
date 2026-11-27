@@ -8,7 +8,7 @@ export function registerGroupListTool(server: McpServer): void {
     'ki_group_list',
     '列出 Group 树 + Relations，支持 hot/warm/cold/emerging/full 分区与向量语义兜底',
     {
-      scope: z.string().optional().default('default').describe('知识库名或视图名（视图会自动展开为成员库并按库分桶；省略则用 default；strict 模式下必须传且须在白名单内）'),
+      scope: z.string().optional().default('default').describe('知识库名或视图名（视图 / 逗号分隔的多库都会展开为成员库并按库分桶；省略则用 default；strict 模式下必须传且须在白名单内）'),
       groups: z.string().optional().describe('逗号分隔的 Group 路径列表（支持模糊匹配），展示各 Group 的 Relations（与 subtree 互斥）'),
       group: z.string().optional().describe('groups 的单数别名（两者同时传时以 groups 为准）'),
       subtree: z.string().optional().describe('以指定 Group 路径为根输出子树结构（结构导航视角，支持模糊匹配；与 groups 互斥）'),

@@ -51,9 +51,20 @@ import { isScopeReadonlySafe } from '../scope-policy.js';
 import { GovernanceError } from '../governance-errors.js';
 import { executeGetModuleInfo, executeGetModuleInfoBatch, PAGE_MIN_CHARS } from '../../get-module-info.js';
 import { executeSearch } from '../../search.js';
-import { executeQueryGroup } from '../../query-group.js';
-import { executeTagList } from '../../tag.js';
+import { executeQueryGroup, type QueryGroupParams, type QueryGroupResult } from '../../query-group.js';
+import { executeTagList, type TagListResult } from '../../tag.js';
 import { withTimeout, TOOL_TIMEOUT } from '../mcp-tools/util.js';
+/*
+ * 视图展开统一入口（2026-11-27 · 事件 #112）。
+ * group / tag 两类工具**必须**走它们：分析链路此前取 `picked.physical[0]`，
+ * 视图下只查首个成员库、其余成员静默消失（与 #110 同根因）。
+ */
+import {
+  queryGroupByScope,
+  VIEW_TOTAL_TIMEOUT,
+  type GroupListOutcome,
+} from '../group-list-view.js';
+import { tagListByScope, type TagItem, type TagListOutcome } from '../tag-list-view.js';
 import { collectMembers } from './event-service.js';
 import {
   inferAnalysisView,
@@ -743,6 +754,15 @@ export function buildLightEventContext(args: {
 /** 模型一次调用里最多试几个物理库（视图可能展开出多个成员；防一次调用打满 IO） */
 const MAX_SCOPE_ATTEMPTS = 5;
 
+/**
+ * 分析链路允许「完整树」的成员数（2026-11-27 · 事件 #112）。
+ *
+ * 为什么是 1：分桶结果直接进模型上下文，多成员全量树会成倍放大输出长度与 token 预算。
+ * 模型需要的只是「还有哪些成员、各自有哪些顶层 Group」，要看细节时它自己会把 scope
+ * 换成单库（`depth` / `scope` 都是它可传的参数）—— 所以降级不损失能力，只省预算。
+ */
+const ANALYSIS_FULL_TREE_MEMBERS = 1;
+
 /** 只读工具的 `scope` 参数（五件套共用；2026-11-25 批 3-C） */
 const KB_SCOPE_PARAM = {
   type: 'string' as const,
@@ -849,6 +869,104 @@ export function buildKbReadToolEntries(
     return picked.ok && picked.display.length > 0 && picked.display[0] !== scope
       ? `[${picked.display.join('+')}] `
       : '';
+  };
+
+  /*
+   * ═══ group / tag 的逐成员执行（2026-11-27 · 事件 #112）═══
+   * 这两个工具是**聚合语义**（树 / 标签全貌），必须逐成员收集；
+   * 只有 `ki_get_module_info` 那种「定位一篇」才允许命中即止。
+   *
+   * 执行仍走 `runScopedRead`（config 快照 + OperationCoordinator 互斥），
+   * 统一入口只负责「分桶 / 降级 / 超时 / skipped」的编排，不接管执行细节。
+   */
+  const runGroupMember = async (
+    target: string,
+    capMs: number | undefined,
+    p: Omit<QueryGroupParams, 'scope'>,
+  ): Promise<QueryGroupResult> => {
+    const injected = deps?.kbExecutor?.groupList;
+    if (injected) {
+      const raw = await injected({
+        scope: target,
+        groupsParam: p.groupsParam,
+        subtreeParam: p.subtreeParam,
+        depth: p.depth,
+      });
+      // 注入实现（测试 / 外部 executor）返回形状不固定：显式 ok:false 才算失败，其余包成渲染文本
+      const rec = raw as { ok?: boolean; error?: string; output?: string } | null;
+      if (rec?.ok === false) return { ok: false, error: rec.error ?? `group_list 失败（${target}）` };
+      return {
+        ok: true,
+        scope: target,
+        output: typeof rec?.output === 'string' ? rec.output : JSON.stringify(raw),
+      };
+    }
+    return runScopedRead('ki_group_list', target, () =>
+      withTimeout(
+        executeQueryGroup({ scope: target, ...p }),
+        capMs ?? TOOL_TIMEOUT.READ,
+        'ki_group_list',
+      ));
+  };
+
+  const runTagMember = async (target: string, capMs: number | undefined): Promise<TagListResult> => {
+    const injected = deps?.kbExecutor?.tagList;
+    if (injected) {
+      const raw = await injected({ scope: target });
+      if (Array.isArray(raw)) return { ok: true, tags: raw as TagItem[] };
+      const rec = raw as { ok?: boolean; error?: string; tags?: TagItem[] } | null;
+      if (rec?.ok === false) return { ok: false, error: rec.error ?? `tag_list 失败（${target}）` };
+      return { ok: true, tags: rec?.tags ?? [] };
+    }
+    /*
+     * 直读、不进 OperationCoordinator（与本文件头「`ki_tag_list` 直读」的约束一致）：
+     * tag 只读向量库元数据，不参与 group 写入互斥；套进互斥车道会改变既有排队行为。
+     */
+    return withTimeout(executeTagList({ scope: target }), capMs ?? TOOL_TIMEOUT.READ, 'ki_tag_list');
+  };
+
+  /** 统一入口的分桶结果 → 工具返回体（与对话侧同形；single 保持原有 `{ok,scope,output}`） */
+  const toGroupListPayload = (outcome: GroupListOutcome): Record<string, unknown> => {
+    if (outcome.kind === 'single') return outcome.result as unknown as Record<string, unknown>;
+    if (outcome.kind === 'view-empty') {
+      return {
+        ok: false,
+        view: outcome.view,
+        error: `视图 ${outcome.view} 没有可用的成员库`,
+        skipped: outcome.skipped,
+      };
+    }
+    return {
+      ok: true,
+      view: outcome.view,
+      members: outcome.members,
+      // 标量先于数组：buckets 被序列化层裁掉时，靠它对照才发现少了成员
+      memberTotal: outcome.memberTotal,
+      buckets: outcome.buckets,
+      ...(outcome.degraded.length > 0 ? { degraded: outcome.degraded } : {}),
+      ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+    };
+  };
+
+  /** tag 合并结果 → 工具返回体（与 MCP `ki_tag_list` 的 view 形状一致） */
+  const toTagListPayload = (outcome: TagListOutcome): Record<string, unknown> => {
+    if (outcome.kind === 'single') return outcome.result as unknown as Record<string, unknown>;
+    if (outcome.kind === 'view-empty') {
+      return {
+        ok: false,
+        view: outcome.view,
+        error: `视图 ${outcome.view} 没有可用的成员库`,
+        skipped: outcome.skipped,
+      };
+    }
+    return {
+      ok: true,
+      view: outcome.view,
+      members: outcome.members,
+      count: outcome.tags.length,
+      tags: outcome.tags,
+      ...(outcome.skipped.length > 0 ? { skipped: outcome.skipped } : {}),
+    };
   };
 
   return [
@@ -1010,7 +1128,9 @@ export function buildKbReadToolEntries(
         type: 'function',
         function: {
           name: 'ki_group_list',
-          description: '查看当前知识库的 Group 树结构与文档清单（只读）。',
+          description: '查看当前知识库的 Group 树结构与文档清单（只读）。scope 传视图或逗号多库时'
+            + '按成员库分桶（buckets，不漏成员）：首个成员给完整树，其余成员只列顶层 Group（标 degraded），'
+            + '要看某个成员的完整树就把 scope 换成那个库名再调一次。',
           parameters: {
             type: 'object',
             properties: {
@@ -1032,24 +1152,24 @@ export function buildKbReadToolEntries(
         const depth = typeof a.depth === 'number' ? a.depth : 4;
         const picked = resolveReadScope(a.scope);
         if (!picked.ok) return { error: picked.error };
-        const effScope = picked.physical[0]!;
-        const res = deps?.kbExecutor?.groupList
-          ? await deps.kbExecutor.groupList({ scope: effScope, groupsParam, subtreeParam, depth })
-          : await runScopedRead('ki_group_list', effScope, () =>
-              withTimeout(
-                executeQueryGroup({
-                  scope: effScope,
-                  groupsParam,
-                  subtreeParam,
-                  hotCount: 5,
-                  depth,
-                  modes: ['hot'],
-                  autoFallback: true,
-                }),
-                TOOL_TIMEOUT.READ,
-                'ki_group_list',
-              ));
-        return { groups: res };
+        /*
+         * 逐成员分桶（2026-11-27 · 事件 #112）：此前取 `picked.physical[0]`，
+         * 视图下其余成员的 Group 树**静默消失**（模型只看到 1/N 的结构，
+         * 却以为已看全）。降级与超时由统一入口处理，见 ANALYSIS_FULL_TREE_MEMBERS。
+         */
+        const outcome = await queryGroupByScope(undefined, {
+          groupsParam,
+          subtreeParam,
+          hotCount: 5,
+          depth,
+          modes: ['hot'],
+          autoFallback: true,
+          resolved: { physical: picked.physical, display: picked.display },
+          maxFullMembers: ANALYSIS_FULL_TREE_MEMBERS,
+          timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_group_list', totalMs: VIEW_TOTAL_TIMEOUT.CHAT },
+          runOne: runGroupMember,
+        });
+        return { groups: toGroupListPayload(outcome) };
       },
     },
     {
@@ -1058,7 +1178,8 @@ export function buildKbReadToolEntries(
         type: 'function',
         function: {
           name: 'ki_tag_list',
-          description: '列出知识库使用的标签（只读）。',
+          description: '列出知识库使用的标签（只读）。scope 传视图或逗号多库时合并各成员库的标签'
+            + '并累加计数（每条带 scopes 标明来源库）。',
           parameters: { type: 'object', properties: { scope: KB_SCOPE_PARAM } },
         },
       },
@@ -1066,11 +1187,17 @@ export function buildKbReadToolEntries(
       run: async (a) => {
         const picked = resolveReadScope(a.scope);
         if (!picked.ok) return { error: picked.error };
-        const effScope = picked.physical[0]!;
-        const res = deps?.kbExecutor?.tagList
-          ? await deps.kbExecutor.tagList({ scope: effScope })
-          : await withTimeout(executeTagList({ scope: effScope }), TOOL_TIMEOUT.READ, 'ki_tag_list');
-        return { tags: res };
+        /*
+         * tag 是跨库筛选维度，语义是**合并 + 计数累加**（不分桶，与 MCP / 对话一致）；
+         * 此前只取 `picked.physical[0]`，视图下其余成员的标签静默消失（事件 #112）。
+         */
+        const outcome = await tagListByScope(undefined, {
+          resolved: { physical: picked.physical, display: picked.display },
+          timeout: { ms: TOOL_TIMEOUT.READ, label: 'ki_tag_list' },
+          totalMs: VIEW_TOTAL_TIMEOUT.CHAT,
+          listOne: runTagMember,
+        });
+        return { tags: toTagListPayload(outcome) };
       },
     },
   ];
