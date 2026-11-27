@@ -17,6 +17,14 @@ import type { ToolDef } from '../chat/llm-client.js';
 export const FS_READ_MAX_LINES = 200;
 export const FS_READ_DEFAULT_LINES = 120;
 export const FS_READ_MAX_BYTES = 64 * 1024;
+/**
+ * `fs_read` 允许读取的单文件上限（REQ-20261127-001）。
+ *
+ * 旧实现直接 `readFile` 整个文件再切行：对话侧面向普通用户后，一个 GB 级日志
+ * 就能把进程内存打满（超时也救不了，因为读文件是异步但整块缓冲）。
+ * 8MB 足够覆盖正常源码文件；更大的文件应改用 `fs_grep` 定位后按行读取。
+ */
+export const FS_READ_MAX_FILE_BYTES = 8 * 1024 * 1024;
 export const FS_GREP_MAX_HITS = 60;
 export const FS_GREP_MAX_LINE_DISPLAY = 200;
 export const FS_GREP_MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -48,6 +56,17 @@ export interface FsSandboxContext {
   /** 已读文件集合：去重计数用（2026-11-18 起不再作为上限闸门） */
   filesRead: Set<string>;
   signal?: AbortSignal;
+  /**
+   * 可选：敏感路径拒绝谓词（REQ-20261127-001）。
+   * 传 relPath（相对根、POSIX），返回 true = 拒绝读取 / 跳过命中 / 不列出。
+   * 分析侧不传（行为不变）；对话侧传敏感文件名单。
+   */
+  denyPath?: (relPath: string) => boolean;
+  /**
+   * 可选：单文件读取上限（字节）。不传 = 不限制（分析侧保持原行为）；
+   * 对话侧传 `FS_READ_MAX_FILE_BYTES`，避免普通用户让模型整读 GB 级文件。
+   */
+  maxFileBytes?: number;
 }
 
 export type FsToolErrorCode =
@@ -56,6 +75,7 @@ export type FsToolErrorCode =
   | 'NOT_A_FILE'
   | 'NOT_A_DIR'
   | 'INVALID_ARG'
+  | 'FORBIDDEN_PATH'
   | 'ABORTED';
 
 export type FsToolResult =
@@ -261,8 +281,9 @@ export async function runFsLs(ctx: FsSandboxContext, rawPath = '.'): Promise<FsT
     const stat = await fs.promises.stat(resolved.realPath);
     if (!stat.isDirectory()) return { ok: false, code: 'NOT_A_DIR', error: `不是目录：${resolved.relPath}` };
     const dirents = await fs.promises.readdir(resolved.realPath, { withFileTypes: true });
+    const baseRel = resolved.relPath === '.' ? '' : `${resolved.relPath}/`;
     const filtered = dirents
-      .filter((d) => !IGNORED_DIRS.has(d.name))
+      .filter((d) => !IGNORED_DIRS.has(d.name) && !ctx.denyPath?.(`${baseRel}${d.name}`))
       .map((d) => ({
         name: d.name,
         type: d.isDirectory() ? 'dir' : d.isFile() ? 'file' : 'other',
@@ -328,6 +349,7 @@ export async function runFsFind(
           visited++;
           if (visited % YIELD_EVERY_FILES === 0) await yieldEventLoop();
           const rel = toPosixRel(ctx.realRoot, full);
+          if (ctx.denyPath?.(rel)) continue;
           const hit = matcher ? matcher.test(rel) : rel.toLowerCase().includes(lowerNeedle);
           if (hit) {
             if (matches.length >= FS_FIND_MAX_RESULTS) {
@@ -381,6 +403,7 @@ export async function runFsGrep(
 
   const scanOneFile = async (realFile: string): Promise<void> => {
     const rel = toPosixRel(ctx.realRoot, realFile);
+    if (ctx.denyPath?.(rel)) return;
     if (globRe && !globRe.test(rel)) return;
     const st = await fs.promises.stat(realFile);
     if (!st.isFile() || st.size > FS_GREP_MAX_FILE_BYTES) return;
@@ -466,10 +489,20 @@ export async function runFsRead(
 
   const resolved = await resolveSafePath(ctx.realRoot, relArg);
   if (!resolved.ok) return resolved;
+  if (ctx.denyPath?.(resolved.relPath)) {
+    return { ok: false, code: 'FORBIDDEN_PATH', error: '该路径被安全策略禁止读取' };
+  }
 
   try {
     const stat = await fs.promises.stat(resolved.realPath);
     if (!stat.isFile()) return { ok: false, code: 'NOT_A_FILE', error: `不是文件：${resolved.relPath}` };
+    if (ctx.maxFileBytes !== undefined && stat.size > ctx.maxFileBytes) {
+      return {
+        ok: false,
+        code: 'INVALID_ARG',
+        error: `文件过大（${stat.size} 字节，上限 ${ctx.maxFileBytes}）：请用 fs_grep 定位片段后按行读取`,
+      };
+    }
     // 2026-11-18：文件数上限取消，不再因读得多而拒绝（总超时也取消，能终止的只有用户「停止」与单轮请求超时）
     if (await isBinaryFile(resolved.realPath)) {
       return { ok: false, code: 'INVALID_ARG', error: `目标为二进制文件，跳过读取：${resolved.relPath}` };

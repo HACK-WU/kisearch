@@ -1,7 +1,8 @@
 /**
  * Chat MCP 工具注册表（批次 2 · REQ-20260930-001）
  *
- * 定位：把本服务真实注册的 14 个 MCP 工具**进程内**暴露给 AI 对话模型。
+ * 定位：把本服务真实注册的 14 个 MCP 工具**进程内**暴露给 AI 对话模型，
+ * 并追加 4 个对话侧源码只读工具（`fs_*`，仅页面对话可见，不注册 `/mcp`）。
  *   · `def`：OpenAI function-calling 格式的工具定义（**剥离 scope 参数**，N23/§5.1：
  *     scope 由 daemon 从会话注入，模型不可指定；schema 不暴露 + 解析白名单双重保证）
  *   · `run`：进程内直调底层 `executeXxx`（与 MCP 工具同一批函数，S07 已否决 MCP 自连接）
@@ -45,6 +46,9 @@ import { executeEditRelation } from '../../edit-relation.js';
 import { executeDeleteRelation } from '../../delete-relation.js';
 // 取图（REQ-20261123-008 B2）：返回 { kind:'images' } 判别形状，由 tool-loop 分流
 import { executeGetImage, MAX_IMAGES_PER_CALL } from '../asset-image.js';
+// 源码只读（REQ-20261127-001）：条目静态定义、根在运行时由 tool-loop 注入
+import { createChatCodeToolEntries } from './code-tools.js';
+import type { ChatToolRunContext } from './code-tools-types.js';
 
 /** 模型给的原始参数（JSON 解析 + 白名单取键 + 钳制后的结果） */
 export type ChatToolArgs = Record<string, unknown>;
@@ -75,7 +79,7 @@ export interface ChatMcpToolEntry {
   /** 解析模型 arguments JSON（白名单 + 钳制 + 必填校验）；失败抛 Error（不静默） */
   parse(raw: string): ChatToolArgs;
   /** 进程内执行（scope 由 daemon 注入；含排队 + 配置快照 + 超时） */
-  run(scope: string, args: ChatToolArgs): Promise<unknown>;
+  run(scope: string, args: ChatToolArgs, ctx?: ChatToolRunContext): Promise<unknown>;
   /** 从解析后参数提取展示摘要（大字段如 module_info / edits 不进摘要） */
   describe(args: ChatToolArgs): ChatToolDescribe;
 }
@@ -316,7 +320,7 @@ export function applyReadWindowDefault(name: string, args: ChatToolArgs, respons
   return { ...args, max_chars: Math.max(PAGE_MIN_CHARS, Math.floor(responseChars * 0.75)) };
 }
 
-// ─── 14 个工具注册 ────────────────────────────────────────────────────
+// ─── 18 个工具注册（14 ki + 4 fs）─────────────────────────────────────
 
 /** 工具入口工厂（specs → parse/describe 的公共装配） */
 function makeEntry(config: {
@@ -327,7 +331,7 @@ function makeEntry(config: {
   specs: readonly ArgSpec[];
   /** 覆盖默认展示摘要（默认：小字段收成扁平对象；module_info/edits/text/items 等大字段排除） */
   describe?: (args: ChatToolArgs) => ChatToolDescribe;
-  run: (scope: string, args: ChatToolArgs) => Promise<unknown>;
+  run: (scope: string, args: ChatToolArgs, ctx?: ChatToolRunContext) => Promise<unknown>;
 }): ChatMcpToolEntry {
   const defaultDescribe = (args: ChatToolArgs): ChatToolDescribe => {
     const keys = config.specs
@@ -1022,11 +1026,13 @@ export const CHAT_MCP_TOOLS: readonly ChatMcpToolEntry[] = [
         'ki_group_delete_empty',
       )),
   }),
+  // ── 源码只读 4（REQ-20261127-001）：静态定义，根由 tool-loop 按会话 scope 注入 ──
+  ...createChatCodeToolEntries(),
 ];
 
 // ── 查询接口 ────────────────────────────────────────────────────────
 
-/** 按名查工具（tool-loop 解析模型 tool_calls 用） */
+/** 按名查工具（分析侧装配写工具用；对话执行已改走过滤后的工具面 Map） */
 export function getChatTool(name: string): ChatMcpToolEntry | undefined {
   return CHAT_MCP_TOOLS.find((t) => t.name === name);
 }

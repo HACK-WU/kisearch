@@ -80,7 +80,7 @@ describe('S-05 · AiAnalyzeModal 辅助逻辑与前端守卫', () => {
 
   it('AiSettingsPage & PromptConfigLayer：对齐 ops.write 与 AI 分析 5 卡配置', () => {
     assert.match(aiSettingsSrc, /can\('ops\.write'\)/, '设置页写权限应与 route-permissions 的 ops.write 对齐');
-    assert.match(layerSrc, /分析目标目录/, 'AI 分析设置栏需展示分析目标目录卡片');
+    assert.match(layerSrc, /代码目录（分析/, 'AI 分析设置栏需展示代码目录卡片（分析 / 对话共用）');
     assert.match(layerSrc, /analysisToolGroups/, 'AI 分析设置栏需渲染服务端下发只读工具分组');
     // 2026-11-18：分析预算 / 检索预算整体取消（用户拍板），设置页不得再出现输入框
     assert.doesNotMatch(layerSrc, /分析预算/, '分析预算卡片已取消');
@@ -141,7 +141,7 @@ describe('S-01 · 分析目标目录：块级草稿 + 显式保存（2026-11-16�
     // 回填只在本地无脏改动时进行（否则「点保存 → 响应在途 → 又改了」会被服务端旧值冲掉）
     assert.match(layerSrc, /analysisDirtyRef\.current/, '回填 effect 需读脏状态');
     // 关闭配置层时拦截未保存草稿（草稿不进 draftRef，flushPending 兜不住）
-    assert.match(layerSrc, /分析目标目录有未保存的改动/);
+    assert.match(layerSrc, /代码目录有未保存的改动/);
     assert.match(layerSrc, /保存并关闭/);
     // 乐观更新 + PUT 失败时不能显示「已配置」
     assert.match(layerSrc, /保存失败/, '落盘失败时角标要能反映');

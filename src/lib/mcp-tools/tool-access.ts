@@ -58,18 +58,23 @@ export const READ_ONLY_TOOL_NAMES: readonly string[] = [
 /**
  * 登记在能力表（`auth/tool-permissions.ts`）但**不在对外 `/mcp` 注册**的工具。
  *
- * 目前只有 `ki_get_image`：2026-11-24 起该工具已降级为「只回清单 + 取件链接」
- * （MCP 客户端不渲染 image content），取件由 `ki-client asset get` 承担，
- * 故 2026-11-25 整体从 `/mcp` 移除。
+ * `ki_get_image`：2026-11-24 起降级为「只回清单 + 取件链接」（MCP 客户端不渲染 image content），
+ * 取件由 `ki-client asset get` 承担，故 2026-11-25 整体从 `/mcp` 移除；
+ * 内部对话面与事件分析面仍保留真图片能力，能力登记必须保留。
  *
- * **但内部对话面（`chat/mcp-tool-registry.ts`）与事件分析面
- * （`events/analysis-runner.ts`）的同名工具仍然存在且返回真图片** ——
- * 它们直接调 `asset-image.ts::executeGetImage`，不经 MCP 工厂，
- * 服务端进程内的模型循环也用不了本地 CLI。因此能力登记必须保留。
+ * `fs_*`（REQ-20261127-001）：只在页面对话工具面装配（复用分析侧沙箱），
+ * 按拍板不开放 `/mcp` 与 `ki_ask`，故登记为本清单。
  *
  * 用途：`test/capability-coverage.test.ts` 用它对齐「能力表 = /mcp 已注册 + 本清单」。
  */
-export const INTERNAL_ONLY_TOOL_NAMES: readonly string[] = ['ki_get_image'];
+export const INTERNAL_ONLY_TOOL_NAMES: readonly string[] = [
+  'ki_get_image',
+  // 源码只读（REQ-20261127-001）：只在页面对话工具面存在，不进 /mcp
+  'fs_read',
+  'fs_grep',
+  'fs_find',
+  'fs_ls',
+];
 
 /**
  * 无 `scope` 参数、纯本地枚举的只读工具。

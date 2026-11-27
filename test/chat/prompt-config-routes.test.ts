@@ -104,6 +104,22 @@ describe('GET /api/chat/prompt-config', () => {
     assert.ok(!fs.existsSync(configFile()), '读接口不得创建配置文件');
   });
 
+  it('codeRoots：无 scope → 空壳；带 scope → 形状正确；非法 scope → 400', async () => {
+    const noScope = await api('GET', '/api/chat/prompt-config');
+    assert.deepEqual(noScope.json?.codeRoots, { scope: null, isView: false, roots: [], skipped: [] });
+
+    const withScope = await api('GET', '/api/chat/prompt-config?scope=default');
+    const cr = withScope.json?.codeRoots as Record<string, unknown>;
+    assert.equal(cr.scope, 'default');
+    assert.equal(typeof cr.isView, 'boolean');
+    assert.ok(Array.isArray(cr.roots));
+    assert.ok(Array.isArray(cr.skipped));
+
+    const bad = await api('GET', '/api/chat/prompt-config?scope=bad%2Fscope');
+    assert.equal(bad.status, 400);
+    assert.equal(bad.json?.code, 'INVALID_SCOPE');
+  });
+
   it('limits 与 toolGroups 由服务端下发（前端不必硬编码上限，更不该硬编码工具名）', async () => {
     const r = await api('GET', '/api/chat/prompt-config');
     const limits = r.json?.limits as Record<string, number>;
@@ -114,8 +130,8 @@ describe('GET /api/chat/prompt-config', () => {
 
     // 工具分组（工作项 4 落地时补下发）：顺序固定 + 总数 = 代码里真实注册的工具数
     const groups = r.json?.toolGroups as Array<{ key: string; danger: boolean; names: string[]; descs: Record<string, string> }>;
-    assert.deepEqual(groups.map((g) => g.key), ['read', 'write', 'delete']);
-    assert.deepEqual(groups.map((g) => g.danger), [false, true, true], '只有只读组不是危险组');
+    assert.deepEqual(groups.map((g) => g.key), ['read', 'code', 'write', 'delete']);
+    assert.deepEqual(groups.map((g) => g.danger), [false, false, true, true], '只读与源码只读不是危险组');
     /*
      * 不硬编码总数（2026-11-19）：工具增减过一次，硬编码 14 让这条用例常红，
      * 与真实契约（"下发必须与代码里注册的一致"）也无关。改为与源码常量对照。

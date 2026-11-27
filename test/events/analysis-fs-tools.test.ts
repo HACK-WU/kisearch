@@ -23,6 +23,8 @@ import {
   type FsSandboxContext,
 } from '../../src/lib/events/analysis-fs-tools.js';
 import { CHAT_MCP_TOOLS } from '../../src/lib/chat/mcp-tool-registry.js';
+import { selectToolEntries } from '../../src/lib/chat/retrieval/tool-loop.js';
+import { INTERNAL_ONLY_TOOL_NAMES } from '../../src/lib/mcp-tools/tool-access.js';
 import { buildKiMcpServer } from '../../src/lib/mcp-server-factory.js';
 
 let tmpRoot = '';
@@ -144,7 +146,7 @@ describe('S-02 专属只读文件沙箱', () => {
     assert.equal(badFile.ok, false);
   });
 
-  it('⑥ 物理隔离：CHAT_MCP_TOOLS 与 /mcp server 均不包含任何 fs_* 工具', () => {
+  it('⑥ 通道隔离：fs_* 进对话工具面、不进 /mcp 与 ki_ask', () => {
     const fsNames = createFsToolEntries(makeCtx()).map((t) => t.name);
     assert.deepEqual(fsNames.sort(), ['fs_find', 'fs_grep', 'fs_ls', 'fs_read']);
 
@@ -152,8 +154,14 @@ describe('S-02 专属只读文件沙箱', () => {
     const mcpServer = buildKiMcpServer(null) as unknown as { _registeredTools?: Record<string, unknown> };
     const mcpNames = Object.keys(mcpServer._registeredTools ?? {});
     for (const name of fsNames) {
-      assert.equal(chatNames.includes(name), false, `CHAT_MCP_TOOLS 不得暴露 ${name}`);
+      // REQ-20261127-001：对话面可见；对外 /mcp 与 ki_ask 通道不可见
+      assert.equal(chatNames.includes(name), true, `CHAT_MCP_TOOLS 应含 ${name}`);
       assert.equal(mcpNames.includes(name), false, `/mcp 不得暴露 ${name}`);
+      assert.ok(INTERNAL_ONLY_TOOL_NAMES.includes(name), `${name} 应在 INTERNAL_ONLY_TOOL_NAMES`);
     }
+
+    const roots = { roots: [{ label: 'r', realRoot: fs.realpathSync(repoDir), aliases: [] }], skipped: [] };
+    const askNames = selectToolEntries(CHAT_MCP_TOOLS, { toolFace: 'ask', codeRoots: roots }).map((t) => t.name);
+    for (const name of fsNames) assert.equal(askNames.includes(name), false, `ki_ask 不得装配 ${name}`);
   });
 });

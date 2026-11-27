@@ -399,6 +399,8 @@ export async function runAsk(input: AskInput): Promise<AskResult> {
       signal: controller.signal,
       maxToolRounds: maxRounds,
       budgetMs: ASK_SOFT_BUDGET_MS,
+      // 源码只读（REQ-20261127-001）：MCP 问答通道不装配 fs_*
+      toolFace: 'ask',
     })) {
       switch (ev.type) {
         case 'content':

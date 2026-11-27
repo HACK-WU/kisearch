@@ -24,12 +24,13 @@ import {
   type ReactElement,
 } from 'react';
 
-import type { AnalysisConfig, FindConfig, PromptConfig, PromptSkill } from '@/api/chatContract';
+import type { AnalysisConfig, CodeRootsDto, CodeRootSkipReason, FindConfig, PromptConfig, PromptSkill } from '@/api/chatContract';
 import { PromptConfigModal, type PromptEditDraft } from '@/chat/PromptConfigModal';
 import { clonePromptConfig } from '@/chat/promptConfigClone';
 import { usePromptConfig } from '@/chat/usePromptConfig';
 import { ScopeMultiPicker } from '@/components/ScopeMultiPicker';
 import { useScopeList } from '@/lib/hooks';
+import { useScopeValue } from '@/lib/scopeContext';
 import {
   CONTEXT_LIMIT_K_MAX,
   DEFAULT_CONTEXT_CHARS,
@@ -211,9 +212,74 @@ export interface PromptConfigLayerProps {
   readOnly?: boolean;
 }
 
+const CODE_ROOT_SKIP_TEXT: Record<CodeRootSkipReason, string> = {
+  unmapped: '未配置（不参与）',
+  unreadable: '目录不可读',
+  'strict-skipped': '未注册（strict 模式）',
+  'view-empty': '视图无成员',
+  'view-error': '视图定义读取失败',
+  forbidden: '无权限查看目录',
+};
+
+/**
+ * 视图会话的可读代码目录清单（REQ-20261127-001 · S-03）。
+ * 只读、不可编辑；库会话不显示清单（映射在「AI 分析 → 代码目录」里编辑）。
+ */
+function CodeRootsBlock({ codeRoots }: { codeRoots?: CodeRootsDto }): JSX.Element | null {
+  if (!codeRoots) return null;
+  if (!codeRoots.isView) {
+    return codeRoots.roots.length === 0
+      ? <p className="ki-chat-cfg__note">未配置代码目录：请在「AI 分析 → 代码目录」中为该 scope 指定路径。</p>
+      : null;
+  }
+  const isMemberSkip = (reason: CodeRootSkipReason): boolean => (
+    reason === 'unmapped' || reason === 'unreadable' || reason === 'strict-skipped'
+  );
+  const memberSkipped = codeRoots.skipped.filter((item) => isMemberSkip(item.reason));
+  // 整视图级原因（view-empty / view-error / forbidden）不是「成员」，不能进 banner 的成员列表
+  const scopeIssues = codeRoots.skipped.filter((item) => !isMemberSkip(item.reason));
+  const members = [
+    ...codeRoots.roots.map((root) => root.label),
+    ...memberSkipped.map((item) => item.label),
+  ];
+  return (
+    <div>
+      <p className="ki-chat-cfg__hint">
+        视图「{codeRoots.scope ?? '当前视图'}」= {members.length > 0 ? members.join(' + ') : '（无成员）'}。
+        源码目录取成员库各自的映射，只读；要修改请切到具体知识库。
+      </p>
+      {codeRoots.roots.map((root) => (
+        <div className="ki-chat-cfg__tool" key={`root:${root.label}`}>
+          <span className="ki-chat-cfg__tool-main">
+            <span className="ki-chat-cfg__tool-name">{root.label}</span>
+            <span className="ki-chat-cfg__tool-desc" title={root.dir}>{root.dir}</span>
+          </span>
+        </div>
+      ))}
+      {memberSkipped.map((item) => (
+        <div className="ki-chat-cfg__tool" key={`skip:${item.label}`}>
+          <span className="ki-chat-cfg__tool-main">
+            <span className="ki-chat-cfg__tool-name">{item.label}</span>
+            <span className="ki-chat-cfg__tool-desc">{CODE_ROOT_SKIP_TEXT[item.reason]}</span>
+          </span>
+        </div>
+      ))}
+      {scopeIssues.map((item) => (
+        <p className="ki-chat-cfg__note" key={`issue:${item.reason}:${item.label}`}>
+          {CODE_ROOT_SKIP_TEXT[item.reason]}
+        </p>
+      ))}
+      {codeRoots.roots.length === 0 && memberSkipped.length === 0 && scopeIssues.length === 0
+        ? <p className="ki-chat-cfg__note">全部成员库都未配置可读目录，源码只读暂不可用。</p>
+        : null}
+    </div>
+  );
+}
+
 export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideHeader = false, readOnly = false }: PromptConfigLayerProps) {
+  const scope = useScopeValue();
   const { loading, loadError, data, saving, saveError, fieldErrors, savedAt, reload, save } =
-    usePromptConfig(true);
+    usePromptConfig(true, scope);
   const { data: scopeListData } = useScopeList();
 
   const [draft, setDraft] = useState<PromptConfig | null>(null);
@@ -326,7 +392,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
     flushPending();
     if (analysisDirtyRef.current) {
       setConfirm({
-        title: '分析目标目录有未保存的改动',
+        title: '代码目录有未保存的改动',
         text: '这些目录配置还没保存，直接关闭会丢失。',
         yesLabel: '保存并关闭',
         yesDanger: false,
@@ -1523,7 +1589,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               <span className="ki-chat-cfg__label">
                 工具与权限
               </span>
-              <p className="ki-chat-cfg__hint">开关即时生效（下一次提问即按新开关暴露工具）。默认只开只读工具；写入 / 删除开启即授权 AI 执行，请谨慎。</p>
+              <p className="ki-chat-cfg__hint">开关即时生效（下一次提问即按新开关暴露工具）。默认只开只读工具；写入 / 删除开启即授权 AI 执行，请谨慎。源码只读工具（fs_*）在「AI 分析」「AI 对话」各自独立开关。</p>
               {toolEntries.map((g) => (
                 <div key={g.key}>
                   <p className={`ki-chat-cfg__group${g.danger ? ' ki-chat-cfg__group--danger' : ''}`}>
@@ -1533,6 +1599,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                       {g.rows.length} 个{g.danger ? ' · 危险 · 默认关' : ' · 默认开'}
                     </span>
                   </p>
+                  {g.key === 'code' ? <CodeRootsBlock codeRoots={data.codeRoots} /> : null}
                   {g.rows.map((r) => (
                     // data-tool：依赖它的 skill 点「去启用」时，靠它 scrollIntoView + 高亮（见 revealTool）
                     <div className="ki-chat-cfg__tool" key={r.name} data-tool={r.name}>
@@ -1603,14 +1670,14 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
             {/* 1. 分析目标目录（按 scope 映射 + 默认目录；块级草稿 + 显式保存） */}
             <div className="ki-chat-cfg__field">
               <span className="ki-chat-cfg__label">
-                分析目标目录
+                代码目录（分析 / 对话共用）
                 <em className={`ki-chat-cfg__badge${analysisDirsBadge.cls}`}>
                   {analysisDirsBadge.text}
                 </em>
               </span>
               <p className="ki-chat-cfg__hint">
-                配置「AI 分析」允许只读访问的本地代码目录或 Git 仓库根目录（不限必须是 Git 仓库）；
-                按 scope 映射优先，未单独映射的 scope 使用默认目录。
+                配置「AI 分析」与「AI 对话」允许只读访问的本地代码目录或 Git 仓库根目录（不限必须是 Git 仓库）；
+                按 scope 映射优先，未单独映射的 scope 使用默认目录。视图会话不适用默认目录，只按成员库各自的映射读取。
                 映射行改动<b>即时保存</b>（选 scope / 路径失焦 / 点「确认」），默认目录点「保存」生效。
               </p>
 
@@ -1619,7 +1686,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                 <input
                   type="text"
                   className="ki-chat-cfg__dirinput"
-                  aria-label="默认分析目标目录"
+                  aria-label="默认代码目录"
                   placeholder="例如 /root/workspace（绝对路径，可留空）"
                   disabled={readOnly}
                   aria-invalid={isAbsPathInvalid(analysisDefaultDirText) || undefined}
@@ -1884,7 +1951,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
               <p className="ki-chat-cfg__hint">
                 只读工具默认全开；写入为<b>危险工具</b>，默认关闭 —— 开启即授权 AI 在分析过程中直接改动
                 「事件所在知识库」（全局生效，对所有库的所有分析），且分析在后台运行、执行时不会有逐次确认。
-                源码只读工具（fs_*）仅限事件「AI 分析」使用，其他场景不可见。
+                源码只读工具（fs_*）与「AI 对话」各自独立开关，互不影响。
               </p>
               {analysisToolEntries.map((g) => (
                 <div key={g.key}>
@@ -2176,7 +2243,7 @@ export function PromptConfigLayer({ onClose, onSaved, capability = 'chat', hideH
                 </em>
               </span>
               <p className="ki-chat-cfg__hint">
-                全部为只读工具；文件工具（fs_*）属「AI 分析」专属，不在此提供。
+                全部为只读工具；文件工具（fs_*）仅在「AI 分析」「AI 对话」提供，查找不提供。
               </p>
               {(data.findToolGroups ?? []).map((g) => (
                 <div key={g.key}>

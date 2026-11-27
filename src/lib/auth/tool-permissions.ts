@@ -9,7 +9,7 @@
 import type { Capability } from './capabilities.js';
 
 export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
-  // 读工具（11）
+  // 读工具（15）
   ki_search: 'knowledge.read',
   ki_get_module_info: 'knowledge.read',
   /**
@@ -28,6 +28,14 @@ export const TOOL_CAPABILITIES: Readonly<Record<string, Capability>> = {
    *    还要加 `READ_ONLY_TOOL_NAMES` 并在 `mcp-server-factory` 注册。
    */
   ki_get_image: 'knowledge.read',
+  /**
+   * 源码只读（REQ-20261127-001）：只在页面对话工具面装配，不进 `/mcp` / `ki_ask`。
+   * 与读知识库同档（`knowledge.read`）：能看到该库对话的人，就能读该库映射的代码目录。
+   */
+  fs_read: 'knowledge.read',
+  fs_grep: 'knowledge.read',
+  fs_find: 'knowledge.read',
+  fs_ls: 'knowledge.read',
   ki_group_list: 'knowledge.read',
   ki_scope_list: 'knowledge.read',
   ki_view_list: 'knowledge.read',

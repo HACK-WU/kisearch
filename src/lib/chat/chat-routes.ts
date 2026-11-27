@@ -121,8 +121,11 @@ import {
   findEnabledSkill,
   readPromptConfig,
   savePromptConfig,
+  type PromptConfig,
 } from './prompt-config.js';
 import { listRegisteredDataSourceRecords } from '../datasource.js';
+import { readViews } from '../scope-view.js';
+import { resolveChatCodeRoots } from './code-tools.js';
 // agent 问答只读视图（REQ-20261116-003）：列表 / 详情，独立于主会话列表
 import { AgentAskError, getAgentAsk, listAgentAskGroups } from './agent-asks.js';
 
@@ -431,7 +434,7 @@ export async function handleChatRoutes(
 
     // ── 批次 1 新增（编号待并入 api/INDEX.md）GET/PUT /api/chat/prompt-config ──
     if (segs.length === 1 && segs[0] === 'prompt-config') {
-      if (method === 'GET') { await handlePromptConfigGet(res, ctx); return true; }
+      if (method === 'GET') { await handlePromptConfigGet(res, url, ctx); return true; }
       if (method === 'PUT') { await handlePromptConfigPut(req, res, ctx); return true; }
     }
 
@@ -667,9 +670,16 @@ export async function handleConfigAck(req: IncomingMessage, res: ServerResponse)
  * 为什么读失败仍返回 200：本接口在生成链路之外（界面读取），回退默认 + 明示 issue
  * 比直接 500 更有用 —— 用户还能进界面看到问题并改回来。
  */
-export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteContext): Promise<void> {
+export async function handlePromptConfigGet(res: ServerResponse, url: URL, ctx: ChatRouteContext): Promise<void> {
   const cfg = snapshotConfig(ctx);
   const { config, issue } = readPromptConfig(cfg);
+  let codeRoots: ReturnType<typeof buildCodeRootsDto>;
+  try {
+    codeRoots = buildCodeRootsDto(cfg, config, url.searchParams.get('scope'), ctx.authScopes);
+  } catch (err) {
+    sendErr(res, 400, 'INVALID_SCOPE', `scope 非法：${(err as Error).message}`);
+    return;
+  }
   // 上下文上限的**部署默认**（config.yaml 的 llm.contextChars，缺省回落内置 1000K）：
   // 前端只写覆盖值、不改 config.yaml，故「恢复默认」需要一个明确的目标值 ——
   // 运维把默认设成 500K 时，恢复默认就该回到 500K（REQ-20261014-001）
@@ -727,6 +737,8 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
     // 工具分组同样由服务端下发（工作项 4 落地时补）：工具名的 SSOT 在 `src/lib/mcp-tools/`，
     // 前端自己写一份分组清单必然会随工具增减而漂移
     toolGroups: MCP_TOOL_GROUPS,
+    /** 当前 scope 的可读代码目录（REQ-20261127-001 · S-03；视图会话只读展示成员库映射） */
+    codeRoots,
     // ── AI 分析专属工具分组、思考级别与数据源快捷路径（REQ-20261113-003 · S-01）──
     analysisToolGroups: ANALYSIS_TOOL_GROUPS,
     analysisReasoningEffort: config.analysis?.reasoningEffort ?? cfg.llm?.reasoningEffort,
@@ -740,6 +752,50 @@ export async function handlePromptConfigGet(res: ServerResponse, ctx: ChatRouteC
     datasourceDirs: collectAuthorizedDatasourceDirs(cfg, ctx.authScopes),
     issue,
   });
+}
+
+/**
+ * 当前 scope 的可读代码目录（REQ-20261127-001 · S-03）。
+ *
+ * 只用于设置页展示；执行侧的根解析在 `tool-loop` / `code-tools`，两处共用
+ * `resolveChatCodeRoots`，保证「展示的目录」与「AI 实际能读的目录」同源。
+ */
+function buildCodeRootsDto(
+  cfg: KiConfig,
+  config: PromptConfig,
+  rawScope: string | null,
+  authScopes: string[] | null,
+): {
+  scope: string | null;
+  isView: boolean;
+  roots: Array<{ label: string; dir: string; aliases: string[] }>;
+  skipped: Array<{ label: string; reason: string }>;
+} {
+  const scope = rawScope?.trim() ?? '';
+  if (!scope) return { scope: null, isView: false, roots: [], skipped: [] };
+  validateScope(scope);
+
+  let isView = false;
+  try {
+    isView = Object.prototype.hasOwnProperty.call(readViews(cfg), scope);
+  } catch {
+    isView = false;
+  }
+
+  const allowAll = authScopes === null || authScopes.includes(ALL_SCOPES);
+  // 视图名通常不在 token 的 scope 白名单里（白名单按库授权），但视图本身已由顶栏 scope
+  // 选择器按可访问性过滤；这里只泄露「成员库映射的目录路径」，不含正文，故视图放行。
+  if (!allowAll && !isView && !authScopes!.includes(scope)) {
+    return { scope, isView, roots: [], skipped: [{ label: scope, reason: 'forbidden' }] };
+  }
+
+  const result = resolveChatCodeRoots(scope, cfg, config.analysis?.targetDirs);
+  return {
+    scope,
+    isView,
+    roots: result.roots.map((root) => ({ label: root.label, dir: root.realRoot, aliases: [...root.aliases] })),
+    skipped: result.skipped.map((item) => ({ label: item.label, reason: item.reason })),
+  };
 }
 
 function collectAuthorizedDatasourceDirs(

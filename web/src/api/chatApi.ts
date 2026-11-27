@@ -94,8 +94,9 @@ const jsonBody = (data: unknown): RequestInit => ({ method: 'POST', body: JSON.s
  * · `limits` 与 `toolGroups` 让前端不硬编码字数上限与工具名（SSOT 在服务端）
  * · `issue` 非 null 表示配置文件有问题且已回退默认（**界面必须提示，不得静默**）
  */
-export async function getPromptConfig(): Promise<PromptConfigOk> {
-  return reqJson<PromptConfigOk>(`${CHAT_API_BASE}/prompt-config`);
+export async function getPromptConfig(scope?: string): Promise<PromptConfigOk> {
+  const qs = scope ? `?scope=${encodeURIComponent(scope)}` : '';
+  return reqJson<PromptConfigOk>(`${CHAT_API_BASE}/prompt-config${qs}`);
 }
 
 /**

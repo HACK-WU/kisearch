@@ -35,7 +35,7 @@ export interface UsePromptConfigResult {
   save: (draft: PromptConfig) => Promise<boolean>;
 }
 
-export function usePromptConfig(active: boolean): UsePromptConfigResult {
+export function usePromptConfig(active: boolean, scope?: string): UsePromptConfigResult {
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [data, setData] = useState<PromptConfigOk | null>(null);
@@ -62,7 +62,7 @@ export function usePromptConfig(active: boolean): UsePromptConfigResult {
     setSavedAt(null);
     void (async () => {
       try {
-        const ok = await getPromptConfig();
+        const ok = await getPromptConfig(scope);
         if (cancelled || !aliveRef.current) return;
         setData(ok);
       } catch (err) {
@@ -75,7 +75,7 @@ export function usePromptConfig(active: boolean): UsePromptConfigResult {
     return () => {
       cancelled = true;
     };
-  }, [active, reloadTick]);
+  }, [active, reloadTick, scope]);
 
   const reload = useCallback(() => setReloadTick((n) => n + 1), []);
 

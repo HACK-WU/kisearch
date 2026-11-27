@@ -125,7 +125,7 @@ describe('SR-01 契约 · 检索 skill（与工具 schema 同源）', () => {
     );
   });
 
-  it('工具 schema：不暴露 scope（N23 禁止跨 scope）—— 14 个工具全量校验（批次 2）', () => {
+  it('工具 schema：不暴露 scope（N23 禁止跨 scope）—— 18 个工具全量校验（批次 2 + 源码只读）', () => {
     for (const entry of CHAT_MCP_TOOLS) {
       const props = Object.keys((entry.def.function.parameters as { properties: Record<string, unknown> }).properties ?? {});
       assert.ok(!props.includes('scope'), `${entry.name} 不得暴露 scope 参数`);

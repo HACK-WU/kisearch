@@ -100,13 +100,16 @@ describe('默认值', () => {
     assert.equal(t.ki_group_delete_empty, false);
   });
 
-  it('工具白名单为 mcp-tools 的 14 个真实注册名（读 6 / 写 6 / 删 2）', () => {
+  it('工具白名单为 18 个真实注册名（读 6 / 源码 4 / 写 6 / 删 2）', () => {
     // 2026-11-23：新增 ki_get_image（REQ-20261123-008），读 5 → 6
-    assert.equal(MCP_TOOL_NAMES.length, 14);
+    // 2026-11-27：新增源码只读 4 个（REQ-20261127-001）
+    assert.equal(MCP_TOOL_NAMES.length, 18);
     assert.ok(MCP_TOOL_NAMES.includes('ki_search'));
     assert.ok(MCP_TOOL_NAMES.includes('ki_get_image'));
     assert.ok(MCP_TOOL_NAMES.includes('ki_scope_list'));
     assert.ok(MCP_TOOL_NAMES.includes('ki_bulk_sync_relation'));
+    assert.ok(MCP_TOOL_NAMES.includes('fs_read'));
+    assert.ok(MCP_TOOL_NAMES.includes('fs_ls'));
   });
 
   it('基础规则和场景 skill 均非空，且可在配置编辑器中保存', () => {
@@ -654,7 +657,8 @@ describe('AI 分析独立配置域（REQ-20261113-003 · S-01）', () => {
     for (const tool of ['ki_delete_relation', 'ki_group_delete_empty', 'ki_bulk_store', 'ki_edit_relation']) {
       assert.equal(base.analysis!.tools[tool], undefined, `${tool} 不应登记进分析工具面`);
     }
-    assert.equal(base.tools['fs_read'], undefined, '对话 tools 不得混入 fs_read');
+    // REQ-20261127-001：对话侧源码只读默认开，与分析侧各自独立
+    assert.equal(base.tools['fs_read'], true, '对话 tools 默认应开启 fs_read');
   });
 
   it('旧配置（analysis.tools 无写入键）升级后写工具为关 —— 缺键不得视作开启', () => {

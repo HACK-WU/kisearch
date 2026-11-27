@@ -306,7 +306,7 @@ function resolveEditableTargetRoot(scope: string, cfg = loadConfig()): string {
   if (!configured) {
     throw new GovernanceError(
       'ANALYSIS_TARGET_NOT_CONFIGURED',
-      `未配置 scope「${scope}」或默认的分析目标目录，请先到「AI 设置 → AI 分析」配置`,
+      `未配置 scope「${scope}」或默认的代码目录，请先到「AI 设置 → AI 分析 → 代码目录」配置`,
       { scope },
     );
   }

@@ -106,10 +106,10 @@ export const SKILL_NAME_RULE_HINT = '以英文字母开头，只能含英文字�
  */
 export const CONTEXT_CHARS_MAX = 100_000_000;
 
-// ─── 工具白名单（★ 取自 src/lib/mcp-tools/ 的真实注册名，共 14 个）───
+// ─── 工具白名单（★ 取自 src/lib/mcp-tools/ 的真实注册名 + 对话侧源码只读，共 18 个）───
 
 export interface McpToolGroup {
-  key: 'read' | 'write' | 'delete';
+  key: 'read' | 'code' | 'write' | 'delete';
   label: string;
   /** 危险组：默认关闭，开启需二次确认 */
   danger: boolean;
@@ -145,6 +145,20 @@ export const MCP_TOOL_GROUPS: readonly McpToolGroup[] = [
       ki_get_image: '查看文档中图片的实际内容（按 images 清单取图）',
       ki_tag_list: '列出标签',
       ki_scope_list: '列出 scope 清单（含顶层组与只读标记）',
+    },
+  },
+  {
+    // REQ-20261127-001：对话侧源码只读。与分析侧 `ANALYSIS_TOOL_GROUPS.code-read`
+    // 各自独立开关；未配置代码目录时工具面自动不装配（见 code-tools.ts）。
+    key: 'code',
+    label: '源码只读（需已配代码目录）',
+    danger: false,
+    names: ['fs_read', 'fs_grep', 'fs_find', 'fs_ls'],
+    descs: {
+      fs_read: '读取代码片段（≤200 行 / 64 KB）',
+      fs_grep: '按关键词检索源码（≤60 条）',
+      fs_find: '按文件名 / 路径模式查找文件（≤80 条）',
+      fs_ls: '列出目录结构（≤200 项）',
     },
   },
   {
@@ -198,8 +212,9 @@ export interface AnalysisToolGroup {
 /**
  * 「AI 分析」专属工具分组。
  *
- * 🔴 `fs_*` 工具**仅限事件 AI 分析内部使用**，严禁登记进 `MCP_TOOL_GROUPS` / `CHAT_MCP_TOOLS`
- *    或 `/mcp`（Q2 拍板：不做通用代码问答，也不破坏 `/mcp` scope 鉴权模型）。
+ * ⚠️ `fs_*` 在「AI 分析」与「AI 对话」**各自独立开关**（REQ-20261127-001）：
+ *    分析侧在本清单的 `code-read` 组；对话侧在 `MCP_TOOL_GROUPS` 的 `code` 组。
+ *    两侧共用同一条目实现（`chat/code-tools.ts`），但开关互不影响；`/mcp` 仍不注册。
  *
  * ⚠️ `kb-write` 是**危险组**（REQ-20261123-004，2026-11-23 拍板）：默认关闭、开启需确认。
  *    默认值由 `danger` 决定（见 `analysisToolDefaultOn`），前端与两个 runner 都按
@@ -211,7 +226,7 @@ export interface AnalysisToolGroup {
 export const ANALYSIS_TOOL_GROUPS: readonly AnalysisToolGroup[] = [
   {
     key: 'code-read',
-    label: '源码只读（AI 分析专属）',
+    label: '源码只读（分析）',
     names: ['fs_read', 'fs_grep', 'fs_find', 'fs_ls'],
     descs: {
       fs_read: '读取目标目录下代码片段（≤200 行 / 64 KB）',
@@ -1162,7 +1177,7 @@ function validateTargetDirString(raw: unknown): { ok: true; value: string } | { 
     || resolved.startsWith('/sys/')
     || resolved.startsWith('/dev/')
   ) {
-    return { ok: false, message: `不允许将系统路径（${resolved}）设为分析目标目录` };
+    return { ok: false, message: `不允许将系统路径（${resolved}）设为代码目录` };
   }
   return { ok: true, value: resolved };
 }

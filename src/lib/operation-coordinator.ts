@@ -91,6 +91,14 @@ const READ_MCP_TOOLS = new Set<string>([
    */
   'ki_get_image',
   /**
+   * 源码只读（REQ-20261127-001）：纯本地文件读，无 embedding、无元数据写。
+   * 落 write 串行会让「对话里读代码」排到导入之后。
+   */
+  'fs_read',
+  'fs_grep',
+  'fs_find',
+  'fs_ls',
+  /**
    * 知识治理的三个枚举（REQ-20261113-004 · S-06）：只读纯查、无 embedding，
    * 与 `ki_group_list` 同性质 —— 落 write 串行会让它们排在导入后面几十秒。
    * `ki_event_edit stage` **不在此列**：它要摘/建索引，必须走写串行。

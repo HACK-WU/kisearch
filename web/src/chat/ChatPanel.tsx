@@ -3226,6 +3226,14 @@ function AnswerFlow({
  *   「N 命中」是检索独有的语义：其余工具的 `hits` 恒为 0（tool-loop 只给 producesSources 赋值），
  *   照搬显示等于在每一行都印一个假的「0 命中」（2026-11-11 用户指出）。
  */
+/** 源码只读工具的动作名（REQ-20261127-001）；其余工具保持「检索知识库」 */
+const CODE_TOOL_ACTIONS: Record<string, string> = {
+  fs_read: '读取文件',
+  fs_grep: '检索源码',
+  fs_find: '查找文件',
+  fs_ls: '浏览目录',
+};
+
 function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
   const [open, setOpen] = useState(false);
   const isSearch = n.mode !== undefined;
@@ -3263,7 +3271,9 @@ function ToolRow({ n }: { n: TimelineNode }): JSX.Element {
         onClick={toggle}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } }}
       >
-        <span className="ki-chat-tl__label ki-chat-tl__act">检索知识库</span>
+        <span className="ki-chat-tl__label ki-chat-tl__act">
+          {n.name && CODE_TOOL_ACTIONS[n.name] ? CODE_TOOL_ACTIONS[n.name] : '检索知识库'}
+        </span>
         {n.name ? <span className="ki-chat-tl__tool">{n.name}</span> : null}
         <span className="ki-chat-tl__stat">{stat}</span>
         <svg className="ki-chat-tl__chev" viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">

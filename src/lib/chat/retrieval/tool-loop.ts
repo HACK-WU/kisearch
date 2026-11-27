@@ -65,12 +65,14 @@ import {
   type ChatTurn,
   type ToolDef,
 } from '../llm-client.js';
-import { loadConfig } from '../../config.js';
+import { loadConfig, type KiConfig } from '../../config.js';
 import { isRootGroup } from '../../import-path.js';
 import { newMessageId } from '../chat-store.js';
 import { buildSystemMessages } from './retrieval-skill.js';
 import { findEnabledSkill, promptSnapshotBlocks, readPromptConfig, type PromptConfig } from '../prompt-config.js';
-import { applyBudgetDefault, applyReadWindowDefault, enabledChatToolEntries, getChatTool, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
+import { applyBudgetDefault, applyReadWindowDefault, enabledChatToolEntries, type ChatMcpToolEntry, type ChatToolArgs } from '../mcp-tool-registry.js';
+import { applyFsReadWindow, CODE_TOOL_NAMES, isCodeTool, renderCodeReadBlock, resolveChatCodeRoots } from '../code-tools.js';
+import type { ChatCodeRootsResult } from '../code-tools-types.js';
 import { canUseTool } from '../../auth/tool-permissions.js';
 import type { Capability } from '../../auth/capabilities.js';
 import { collectReplayItems, withEvidenceBlock, type ReplayItem } from './replay.js';
@@ -129,6 +131,11 @@ export interface ToolLoopInput {
    * ⚠️ 语义边界：本预算**不含**最后那次强制作答的耗时（那由调用方的硬预算兜底）。
    */
   budgetMs?: number;
+  /**
+   * 工具面通道（REQ-20261127-001）：`chat` = 页面对话；`ask` = `ki_ask` / 外部 MCP。
+   * `ask` 一律不装配源码只读 `fs_*`；缺省 `chat`（存量调用方零改动）。
+   */
+  toolFace?: 'chat' | 'ask';
 }
 
 /** 运行期上下文（从配置解析；不改变冻结的 ToolLoopInput 签名） */
@@ -171,6 +178,8 @@ interface LoopRuntime {
    * 与工具面同样**每轮解析一次**、生成期间固定（改配置下一次提问生效）。
    */
   budget: { responseChars: number; hitsPerCall: number };
+  /** 部署配置（REQ-20261127-001）：源码根解析需要 views / scope 定义 */
+  config: KiConfig;
 }
 
 function resolveRuntime(): LoopRuntime {
@@ -203,6 +212,7 @@ function resolveRuntime(): LoopRuntime {
       responseChars: promptConfig.toolResponseChars ?? CHAT_BUDGET.maxToolResponseChars,
       hitsPerCall: promptConfig.searchHitsPerCall ?? CHAT_BUDGET.maxHitsPerCall,
     },
+    config: cfg,
   };
 }
 
@@ -486,6 +496,46 @@ async function resolveUserImageParts(
   return { parts, missing };
 }
 
+/** 每轮解析一次可读根；ask 通道恒为空（不装配 fs_*） */
+function codeRootsFor(input: ToolLoopInput, runtime: LoopRuntime): ChatCodeRootsResult {
+  if ((input.toolFace ?? 'chat') === 'ask') return { roots: [], skipped: [] };
+  return resolveChatCodeRoots(input.scope, runtime.config, runtime.promptConfig.analysis?.targetDirs);
+}
+
+/**
+ * KB-first 块是否注入：必须同时满足「页面对话 / 模型支持工具 / 能力允许 /
+ * 用户至少开了一个 fs_* / 有可读根」，否则会出现"提示说可用、工具面却没有"。
+ * 纯聊天路径（模型不可用）也不例外。
+ */
+function codeBlockFor(input: ToolLoopInput, runtime: LoopRuntime): string | null {
+  if ((input.toolFace ?? 'chat') !== 'chat') return null;
+  if (!runtime.enabled || !runtime.supportsTools) return null;
+  if (input.capabilities && !canUseTool(input.capabilities, 'fs_read')) return null;
+  if (!CODE_TOOL_NAMES.some((name) => runtime.promptConfig.tools[name] === true)) return null;
+  const roots = codeRootsFor(input, runtime);
+  return roots.roots.length > 0 ? renderCodeReadBlock(roots.roots) : null;
+}
+
+/**
+ * 本轮工具面（纯函数，便于单测）：
+ * 1. 按 capability 过滤（默认拒绝）；
+ * 2. `fs_*` 仅页面对话、且本轮有可读根时保留。
+ */
+export function selectToolEntries(
+  entries: readonly ChatMcpToolEntry[],
+  opts: {
+    capabilities?: ReadonlySet<Capability>;
+    toolFace: 'chat' | 'ask';
+    codeRoots: ChatCodeRootsResult;
+  },
+): ChatMcpToolEntry[] {
+  const byCapability = opts.capabilities
+    ? entries.filter((entry) => canUseTool(opts.capabilities!, entry.name))
+    : [...entries];
+  return byCapability.filter((entry) => !isCodeTool(entry.name)
+    || (opts.toolFace === 'chat' && opts.codeRoots.roots.length > 0));
+}
+
 function buildUpstreamMessages(
   input: ToolLoopInput,
   runtime: LoopRuntime,
@@ -493,7 +543,11 @@ function buildUpstreamMessages(
   missingImages = 0,
 ): ChatTurn[] {
   const msgs: ChatTurn[] = [];
-  for (const m of buildSystemMessages(input.convSystemPrompt, injectionBlocks(input.conv, runtime))) {
+  const codeBlock = codeBlockFor(input, runtime);
+  const blocks = codeBlock
+    ? [...injectionBlocks(input.conv, runtime), codeBlock]
+    : injectionBlocks(input.conv, runtime);
+  for (const m of buildSystemMessages(input.convSystemPrompt, blocks)) {
     msgs.push({ role: 'system', content: m.content });
   }
   // ★ 已加载 skill 的正文（会话级，每轮重放）：紧跟恒定块 —— 与恒定块同属"规则组"，
@@ -754,9 +808,11 @@ async function* toolLoopPath(
   // ★ 启用工具面（注册表 ∩ 配置层开关）；空集 = 用户全关 → 不带 tools（纯聊天，
   //   属用户显式配置、非故障，不发 degraded）
   const capabilities = input.capabilities;
-  const toolEntries = capabilities
-    ? runtime.toolEntries.filter((entry) => canUseTool(capabilities, entry.name))
-    : runtime.toolEntries;
+  const toolFace = input.toolFace ?? 'chat';
+  const codeRoots = codeRootsFor(input, runtime);
+  const toolEntries = selectToolEntries(runtime.toolEntries, { capabilities, toolFace, codeRoots });
+  /** 执行查表用**过滤后的工具面**（堵构造式调用：未暴露的工具一律按未知工具拒绝） */
+  const entryByName = new Map(toolEntries.map((entry) => [entry.name, entry]));
   const toolDefs = toolEntries.map((e) => e.def);
   // ★ skill 目录非空 ⇒ 追加 `use_skill`（2026-10-13）：无可用 skill 时不暴露，减少无谓调用面
   const callableIds = callableSkillIds(input.conv, runtime);
@@ -939,7 +995,7 @@ async function* toolLoopPath(
 
       // 未知工具（模型幻觉出未暴露的工具名）：也必须回 tool 消息（实现细节 a），
       // 让模型可见失败并自行改道，不得静默丢调用 → 否则循环不收敛。
-      const entry = getChatTool(call.name);
+      const entry = entryByName.get(call.name);
       if (!entry) {
         const errText = `未知工具 ${call.name || '(未命名)'}：不在本次暴露的工具列表中，请仅使用系统提供的工具`;
         const response = serializeToolResponse({ error: errText }, runtime.budget.responseChars);
@@ -976,13 +1032,16 @@ async function* toolLoopPath(
       }
 
       // ★ 预算补全（REQ-20261015-001）：`ki_search` 未显式传 limit 时补运行时配置的默认值。
-      //   必须在**执行必经点**（此处）而非包装 registry 的 `run` —— 执行走 `getChatTool()` 的
+      //   必须在**执行必经点**（此处）而非包装 registry 的 `run` —— 执行走过滤后工具面的
       //   **原始 entry**，包装 `enabledChatToolEntries` 返回值的 `run` 不会被调用（challenger 意见 1，🔴）。
       if (parsed) parsed = applyBudgetDefault(entry.name, parsed, runtime.budget.hitsPerCall);
       // ★ 长文档分页（2026-11-11）：`ki_get_module_info` 未显式给窗口时，按本轮工具返回预算
       //   推导 `max_chars`。同在**执行必经点**注入，理由与上一条完全相同 —— 工具自己切行边界，
       //   才不会轮到 `serializeToolResponse` 按码点硬切（那会把 JSON 切坏、且没有续读出路）。
       if (parsed) parsed = applyReadWindowDefault(entry.name, parsed, runtime.budget.responseChars);
+      // ★ 源码只读（REQ-20261127-001）：`fs_read` 未给 limit 时按本轮响应窗口推导，
+      //   与上一条同一位置（执行必经点），否则工具自己切的边界不会生效。
+      if (parsed) parsed = applyFsReadWindow(entry.name, parsed, runtime.budget.responseChars);
 
       const desc = parsed ? entry.describe(parsed) : {};
       yield {
@@ -1024,7 +1083,10 @@ async function* toolLoopPath(
       let result: unknown = null;
       let runError: string | null = null;
       try {
-        result = await awaitWithAbort(() => entry.run(input.scope, parsed!), input.signal);
+        result = await awaitWithAbort(
+          () => entry.run(input.scope, parsed!, { codeRoots: codeRoots.roots, signal: input.signal }),
+          input.signal,
+        );
       } catch (err) {
         runError = (err as Error).message;
       }

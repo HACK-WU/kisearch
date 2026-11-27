@@ -103,7 +103,8 @@ describe('capability coverage', () => {
 
     const chatNames = CHAT_MCP_TOOLS.map((t) => t.name);
     // 2026-11-25：ki_get_image 从 /mcp 移除但保留在 chat，工具数仍为 14
-    assert.equal(chatNames.length, 14);
+    // 2026-11-27：源码只读 4 个进对话工具面（REQ-20261127-001），14 → 18
+    assert.equal(chatNames.length, 18);
     for (const name of chatNames) {
       assert.ok(
         registered.includes(name) || INTERNAL_ONLY_TOOL_NAMES.includes(name),

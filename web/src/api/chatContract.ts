@@ -645,15 +645,34 @@ export interface PromptConfigLimits {
   findTimeoutDefaultMs?: number;
 }
 
-/** 工具分组（顺序 = 只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
+/** 工具分组（顺序 = 只读 → 源码只读 → 写入 → 删除；`danger` 组默认关闭、开启需二次确认） */
 export interface PromptToolGroup {
-  key: 'read' | 'write' | 'delete';
+  key: 'read' | 'code' | 'write' | 'delete';
   label: string;
   danger: boolean;
   names: string[];
   /** 工具短描述（走查 #7；服务端 `MCP_TOOL_GROUPS.descs` 下发，UI 文案非工具契约。
    *  可选：旧版 daemon 响应无此字段，前端必须容忍缺失而不是假设一定有 */
   descs?: Record<string, string>;
+}
+
+/**
+ * 源码只读的「可读代码目录」（REQ-20261127-001 · S-03）。
+ * `dir` = 服务端 `ChatCodeRoot.realRoot`；`aliases` 仅展示、不作 `root` 入参。
+ */
+export type CodeRootSkipReason =
+  | 'unmapped'
+  | 'unreadable'
+  | 'strict-skipped'
+  | 'view-empty'
+  | 'view-error'
+  | 'forbidden';
+
+export interface CodeRootsDto {
+  scope: string | null;
+  isView: boolean;
+  roots: Array<{ label: string; dir: string; aliases: string[] }>;
+  skipped: Array<{ label: string; reason: CodeRootSkipReason }>;
 }
 
 export interface PromptConfigOk {
@@ -680,6 +699,8 @@ export interface PromptConfigOk {
   /** 是否使用了用户覆盖值（决定"自定义 / 默认"徽标与「恢复默认」可用性）；**旧版 daemon 缺失** */
   reasoningEffortOverridden?: boolean;
   toolGroups: PromptToolGroup[];
+  /** 当前 scope 的可读代码目录（旧版 daemon 缺失 → 不显示视图清单） */
+  codeRoots?: CodeRootsDto;
   /** AI 分析专属工具分组、思考级别与数据源快捷路径 */
   analysisToolGroups?: AnalysisToolGroup[];
   analysisReasoningEffort?: string;
