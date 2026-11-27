@@ -775,18 +775,26 @@ function buildCodeRootsDto(
   if (!scope) return { scope: null, isView: false, roots: [], skipped: [] };
   validateScope(scope);
 
-  let isView = false;
+  let views: Record<string, { members: readonly string[] }> = {};
   try {
-    isView = Object.prototype.hasOwnProperty.call(readViews(cfg), scope);
+    views = readViews(cfg);
   } catch {
-    isView = false;
+    views = {};
   }
+  const view = Object.prototype.hasOwnProperty.call(views, scope) ? views[scope] : undefined;
+  const isView = view !== undefined;
 
   const allowAll = authScopes === null || authScopes.includes(ALL_SCOPES);
-  // 视图名通常不在 token 的 scope 白名单里（白名单按库授权），但视图本身已由顶栏 scope
-  // 选择器按可访问性过滤；这里只泄露「成员库映射的目录路径」，不含正文，故视图放行。
-  if (!allowAll && !isView && !authScopes!.includes(scope)) {
-    return { scope, isView, roots: [], skipped: [{ label: scope, reason: 'forbidden' }] };
+  if (!allowAll) {
+    // 单库：scope 必须在授权列表；视图：显式授权视图名，或成员全部在授权范围内。
+    // 视图名通常不在按库授权的白名单里，放宽到视图会被误拒；但也不能无条件放行 ——
+    // 否则受限 Token 能拿到无权访问的成员库目录路径（只路径、不含正文，仍是泄露）。
+    const granted = view !== undefined
+      ? authScopes!.includes(scope) || view.members.every((m) => authScopes!.includes(m))
+      : authScopes!.includes(scope);
+    if (!granted) {
+      return { scope, isView, roots: [], skipped: [{ label: scope, reason: 'forbidden' }] };
+    }
   }
 
   const result = resolveChatCodeRoots(scope, cfg, config.analysis?.targetDirs);

@@ -57,6 +57,10 @@ describe('S-03 · 视图清单', () => {
     assert.doesNotMatch(membersBlock, /codeRoots\.skipped/, '成员列表不得直接用全部 skipped');
   });
 
+  it('无权限时 banner 显示「成员不可见」而不是「无成员」', () => {
+    assert.match(layer, /成员不可见/);
+  });
+
   it('视图清单不可编辑：块内没有输入框 / 开关', () => {
     const block = layer.slice(layer.indexOf('function CodeRootsBlock'), layer.indexOf('export function PromptConfigLayer'));
     assert.doesNotMatch(block, /<input|role="switch"/);

@@ -62,7 +62,12 @@ before(async () => {
   chatDir = path.join(root, 'chat');
   const mod = await import('../../src/lib/chat/chat-routes.js');
   handleChatRoutes = mod.handleChatRoutes as typeof handleChatRoutes;
-  const cfgSnapshot = { dataDir: path.join(root, 'kb'), chatDir };
+  const cfgSnapshot = { dataDir: path.join(root, 'kb'), chatDir, _configPath: path.join(root, 'config.yaml') };
+  // 视图定义与 config 同目录（getViewsPath = dirname(_configPath)/views.json）
+  fs.writeFileSync(path.join(root, 'views.json'), JSON.stringify({
+    version: 2,
+    views: { authView: { id: 'v_test', members: ['alpha', 'beta'], revision: 0 } },
+  }), 'utf8');
 
   server = createServer((rq, rs) => {
     void (async () => {
@@ -315,5 +320,60 @@ describe('护栏自检（可脚本化）', () => {
       false,
       'PROMPT_CONFIG_INVALID 必须仍是 chat-routes.ts 的本地常量（契约冻结期不得并入）',
     );
+  });
+});
+
+describe('GET /prompt-config?scope=视图 · authScopes 收紧', () => {
+  const rootsOf = (r: ApiRes): {
+    isView: boolean;
+    roots: unknown[];
+    skipped: Array<{ label: string; reason: string }>;
+  } => r.json?.codeRoots as {
+    isView: boolean;
+    roots: unknown[];
+    skipped: Array<{ label: string; reason: string }>;
+  };
+
+  it('受限 Token 成员不全 → forbidden，不返回目录', async () => {
+    ctxExtra = { authScopes: ['alpha'] };
+    try {
+      const cr = rootsOf(await api('GET', '/api/chat/prompt-config?scope=authView'));
+      assert.equal(cr.isView, true);
+      assert.deepEqual(cr.roots, []);
+      assert.deepEqual(cr.skipped, [{ label: 'authView', reason: 'forbidden' }]);
+    } finally {
+      ctxExtra = {};
+    }
+  });
+
+  it('成员全部在授权范围 → 不返回 forbidden', async () => {
+    ctxExtra = { authScopes: ['alpha', 'beta'] };
+    try {
+      const cr = rootsOf(await api('GET', '/api/chat/prompt-config?scope=authView'));
+      assert.equal(cr.isView, true);
+      assert.ok(cr.skipped.every((item) => item.reason !== 'forbidden'));
+    } finally {
+      ctxExtra = {};
+    }
+  });
+
+  it('显式授权视图名（成员不全）→ 放行', async () => {
+    ctxExtra = { authScopes: ['authView'] };
+    try {
+      const cr = rootsOf(await api('GET', '/api/chat/prompt-config?scope=authView'));
+      assert.ok(cr.skipped.every((item) => item.reason !== 'forbidden'));
+    } finally {
+      ctxExtra = {};
+    }
+  });
+
+  it('非视图 scope 不在授权范围 → forbidden（原行为不变）', async () => {
+    ctxExtra = { authScopes: ['alpha'] };
+    try {
+      const cr = rootsOf(await api('GET', '/api/chat/prompt-config?scope=beta'));
+      assert.deepEqual(cr.skipped, [{ label: 'beta', reason: 'forbidden' }]);
+    } finally {
+      ctxExtra = {};
+    }
   });
 });

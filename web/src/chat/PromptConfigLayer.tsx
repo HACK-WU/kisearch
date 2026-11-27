@@ -242,10 +242,11 @@ function CodeRootsBlock({ codeRoots }: { codeRoots?: CodeRootsDto }): JSX.Elemen
     ...codeRoots.roots.map((root) => root.label),
     ...memberSkipped.map((item) => item.label),
   ];
+  const forbidden = scopeIssues.some((item) => item.reason === 'forbidden');
   return (
     <div>
       <p className="ki-chat-cfg__hint">
-        视图「{codeRoots.scope ?? '当前视图'}」= {members.length > 0 ? members.join(' + ') : '（无成员）'}。
+        视图「{codeRoots.scope ?? '当前视图'}」= {members.length > 0 ? members.join(' + ') : (forbidden ? '成员不可见' : '（无成员）')}。
         源码目录取成员库各自的映射，只读；要修改请切到具体知识库。
       </p>
       {codeRoots.roots.map((root) => (
