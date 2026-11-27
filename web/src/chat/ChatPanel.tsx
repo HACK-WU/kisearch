@@ -424,6 +424,26 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
   /**
+   * 地址栏会话 id 的实时值（渲染期同步，与上方 `scopeRef` 同一写法）。
+   *
+   * ★ 为什么需要：切 scope 的 layout effect 要判断"此刻地址栏指向哪个会话"，而 URL 参数
+   *   不在它的依赖里（列进去会让每次会话切换都重跑重置块），只能靠 ref 拿实时值。
+   */
+  const urlConvIdRef = useRef<string | null>(urlConvId ?? null);
+  urlConvIdRef.current = urlConvId ?? null;
+  /**
+   * 切 scope 时被判定为**过期**的地址栏会话 id（它属于上一个 scope）。
+   *
+   * ★ 为什么需要：在 `/chat/:convId` 页面上直接切 scope 时，地址栏仍挂着旧会话；
+   *   若照旧把它当深链，会走 `openConversationGuarded` 并被 scope 守卫拒绝 ——
+   *   于是**每次切 scope** 都往会话列表落一条"已拒绝打开"红字（用户报的 Bug）。
+   *   跨 scope 门禁本身是对的（防把旧 scope 的会话打开并写入），错的是"切 scope 后
+   *   把上一 scope 遗留的地址当外部深链"。
+   * ★ 为什么记"过期 id"而不是一个一次性布尔标记：dev 的 StrictMode 会重跑 effect，
+   *   "消费即清零"的写法第二次执行时会把旧 URL 又当深链，问题照旧。
+   */
+  const staleUrlConvRef = useRef<string | null>(null);
+  /**
    * 「scope 是否变化」的判定锚点（`null` = 本实例尚未挂载过）。
    *
    * ★ 为什么必须是「变化」而不能是「挂载」：本组件有两个挂载点 —— AppShell 的常驻
@@ -452,6 +472,8 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
     //   `isCurrent()` 的 store 令牌失配而停止消费（等价于打断），两者必须同进同退。
     //   首次挂载保留全局态：用户从别的页面进入 /chat 要能接着看正在生成的回答。
     if (scopeChanged) {
+      // 地址栏里的会话属于即将离开的 scope：不再是有效深链（见 staleUrlConvRef 注释）
+      staleUrlConvRef.current = urlConvIdRef.current;
       stream.abort();
       store.dispatch({ type: 'setActiveConv', convId: null });
     }
@@ -862,8 +884,12 @@ export function ChatPanel({ store, open, onClose, variant = 'dock' }: ChatPanelP
         if (isPage) {
           // page（/chat）选中口径：**URL 深链 > 现状保留 > 最近一条**（URL 契约 §2.4）。
           // 不得套用 dock 的"强制对齐最近一条"——否则深链进入 /chat/:convId 会被改写成别的会话。
+          // 例外：切 scope 遗留在地址栏的会话（staleUrlConvRef）不属于本 scope，不参与选中 ——
+          // 否则会被守卫拒绝并留下"已拒绝打开"红字；此时按"现状保留 > 最近一条"走，地址栏由
+          // 下方 store→URL 同步归位到 /chat（或新选中的会话）。
           const current = store.getState().activeConvId;
-          const target = urlConvId ?? current ?? pick?.id ?? null;
+          const liveUrlConvId = urlConvId && urlConvId !== staleUrlConvRef.current ? urlConvId : null;
+          const target = liveUrlConvId ?? current ?? pick?.id ?? null;
           if (target && target !== current) {
             selection = selectionSeqRef.current + 1;
             try {
